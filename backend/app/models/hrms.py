@@ -3540,6 +3540,18 @@ class FieldStatusIn(BaseModel):
     reason: Optional[str] = None
 
 
+class PhotographIn(BaseModel):
+    """FRD §3 Basic Identity -- the employee photograph, as base64.
+
+    Same ingest shape as UploadIn, declared separately because the two have different
+    rules: UploadIn carries an optional `doc_type` for the joining-document catalogue, a
+    photograph never belongs to one.
+    """
+    name: Optional[str] = None
+    mime_type: str
+    data: str                                  # base64, optionally a data: URL
+
+
 # =============================================================
 # Phase 3 - Requisitions (FMS) + Job Descriptions
 # =============================================================
@@ -7681,6 +7693,9 @@ JOB_POLICY_ACK    = "policy_acknowledgement_reminders"
 # The Last Working Day sweep: revokes access and opens the F&F on the day somebody
 # actually leaves, rather than leaving both to whenever a human next opens the case.
 JOB_LWD           = "last_working_day"
+# FRD §4/§20 — apply the organisation / reporting / pay-linkage changes whose
+# effective date has arrived.
+JOB_EFFECTIVE_DATED = "effective_dated_changes"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -7695,6 +7710,17 @@ SCHEDULED_JOBS = [
     # Runs early: everything else on somebody's last day (final attendance, payroll cut-off)
     # reads better once the access revocation and the F&F have been opened.
     (JOB_LWD,           "last working day sweep",          JOB_CADENCE_DAILY,  6),
+    # Runs FIRST, before every other job and before the working day starts: a scheduled
+    # transfer, promotion or pay revision must be in force for the attendance and payroll
+    # that read the profile later the same day.
+    #
+    # The service applies these lazily on an employee READ as well, which is what made the
+    # change visible to whoever opened the directory. That is not enough on its own — a run
+    # on the 1st would otherwise calculate against yesterday's department, grade or salary
+    # simply because nobody had happened to open the employee list first. §4's "future
+    # changes must be effective-dated; historical values are preserved" is a promise about
+    # the DATE, not about who browsed what.
+    (JOB_EFFECTIVE_DATED, "apply effective-dated employee changes", JOB_CADENCE_DAILY, 1),
 ]
 
 

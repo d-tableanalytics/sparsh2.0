@@ -767,6 +767,9 @@ async def _finish_view(actor: dict, view: dict, profile: Optional[dict], *, is_s
     if include_salary and profile.get("employee_code"):
         from app.services.hrms_payroll_service import structure_summary
         view["salary_summary"] = await structure_summary(company_id, profile["employee_code"])
+    # FRD §3 Basic Identity. The metadata only — the storage key stays server-side and the
+    # picture itself is fetched through its own short-lived link.
+    view["photograph"] = master.photograph_view(profile.get("photograph"))
     return view
 
 

@@ -21,6 +21,31 @@ This document therefore is **not** a build-from-zero plan. It is:
 Verdict legend: **DONE** = implemented and testable · **PARTIAL** = implemented but short of
 what the §-text asks · **MISSING** = no implementation exists.
 
+> **The matrix in section 2 is the audit as taken on 18 Oct 2026, before any of this plan
+> was built.** It is deliberately not rewritten as steps land — it is the baseline the work
+> is measured against. What has actually shipped is the status board immediately below.
+
+### Implementation status on `MANOJ_PHASE1_CHNAGES`
+
+| Step | Scope | Status |
+|---|---|---|
+| 0 | Branch + baseline | **Done** — baseline 82/82 on the Phase 1 suite |
+| 1 | Payroll approval matrix (§12, §17, §20) | **Done** — `Cap.PAYROLL_CHECK`, `PayrollRunStatus.CHECKED`, `check_run`/`decide_run` split, configurable matrix, `/payroll/runs/{period}/check`, three-stage UI |
+| 12 (part) | Employee master finish (§3, §4) | **Done** — photograph as a first-class field; effective-dated changes registered as a scheduled job |
+| 2 | Policy version spine | Not started |
+| 3 | Config change approval flow | Not started |
+| 4 | Attendance policy migration + designer | Not started |
+| 5 | Attendance simulation | Not started |
+| 6 | Component lifecycle & proration | Not started |
+| 7 | Formula variables & versioning | Not started |
+| 8 | Payroll policy versioning | Not started |
+| 9 | Attendance snapshot | Not started |
+| 10 | Configurable bank file | Not started |
+| 11 | Impact + config audit viewers | Not started |
+
+Phase 1 suite now **85/85**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
+in the backend venv and failed identically before this work began.
+
 ---
 
 ## 1. Current state — what already exists
@@ -77,7 +102,7 @@ declared in `models/hrms.py` and provisioned via `HRMS_INDEXES`.
 | Work Configuration | **DONE** | `shift_code`, `attendance_policy_group`, `weekly_off_pattern`, `holiday_calendar` |
 | Bank | **DONE** | name / branch / holder / account / IFSC / type / `bank_effective_from` |
 | Statutory IDs | **DONE** | `pan`, `aadhaar`, `uan`, `pf_number`, `esi_number`, `passport`, `driving_license` |
-| Salary Linkage | **PARTIAL** | `salary_template`, `payroll_group`, `base_salary` on the profile; **`annual_ctc` / `monthly_gross` live only on the salary structure**, not surfaced on the profile as §3 asks |
+| Salary Linkage | **DONE** | `salary_template`, `payroll_group`, `base_salary` on the profile; `annual_ctc` / `monthly_gross` resolved from the active structure by `structure_summary` and rendered on the profile (corrected 18 Oct — the first pass recorded this as PARTIAL in error) |
 | Documents | **DONE** | `COLL_DOCUMENTS` + `COLL_DOCUMENT_TYPES` |
 | System / Audit | **DONE** | `COLL_AUDIT_LOG`, created/modified stamps, `COLL_EMPLOYEE_HISTORY` |
 
@@ -86,8 +111,10 @@ declared in `models/hrms.py` and provisioned via `HRMS_INDEXES`.
 Duplicate check (`find_duplicates`, `EMPLOYEE_DUPLICATE_FIELDS`), configured numbering
 (`hrms_id_service.py`), effective-dated scheduling (`record_changes` → `apply_due_changes`,
 `cancel_scheduled`).
-**One gap:** `apply_due_changes(company_id)` exists but needs confirming as registered with
-`hrms_scheduler_service.py`, otherwise a scheduled change never auto-applies (Step 3).
+**One gap (now closed — see Step 12):** `apply_due_changes(company_id)` ran only lazily, on
+an employee READ. A change due on the 1st was therefore not in force for a payroll
+calculated before anyone happened to open the employee directory. It is now also a
+scheduled job (`JOB_EFFECTIVE_DATED`, daily at 01:00, the earliest slot in the table).
 
 ### §5 Attendance configuration
 
@@ -395,9 +422,11 @@ Grouped by workstream, each with the FRD clause it closes.
 ### W9 — Employee master finishing touches (§3)
 - **G9.1** Photograph as a first-class employee-master field (upload, store, show on the
   profile header and on the payslip if the approved template wants it).
-- **G9.2** Surface `annual_ctc` / `monthly_gross` on the profile's Salary Linkage section,
-  derived from the active structure.
-- **G9.3** Confirm `apply_due_changes` is registered with `hrms_scheduler_service`.
+- ~~**G9.2** Surface `annual_ctc` / `monthly_gross` on the profile's Salary Linkage~~ —
+  already implemented (`structure_summary`); the audit recorded this in error.
+- **G9.3** `apply_due_changes` ran only lazily on an employee READ, so a change due on the
+  1st was not in force for a payroll calculated before anyone opened the directory.
+  Register it as a scheduled job.
 
 ### W10 — Impact / dependency viewer (§29, §30)
 - **G10.1** Generalise `field_usage` into a dependency service covering fields, components,

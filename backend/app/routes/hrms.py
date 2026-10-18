@@ -6510,6 +6510,7 @@ from fastapi.responses import Response as _Response  # noqa: E402
 
 from app.models.hrms import (  # noqa: E402
     EmployeeMasterListsIn, FieldDefinitionIn, FieldStatusIn, PaymentBatchIn,
+    PhotographIn,
     PaymentStatusImportIn, PaymentStatusIn, PayrollPolicyIn, PayrollRemarksIn,
     PostLockAdjustmentIn, StructureDecisionIn,
 )
@@ -6552,6 +6553,44 @@ async def employee_duplicate_check(
     return {"duplicates": await master_mgmt.find_duplicates(
         _company(current_user, company_id), body,
         exclude_user_id=body.get("exclude_user_id"), exclude_code=body.get("exclude_code"))}
+
+
+# ── Employee photograph (FRD §3 Basic Identity) ──
+@router.put("/employees/{user_id}/photograph")
+async def save_employee_photograph(
+    user_id: str,
+    body: PhotographIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload or replace the employee's photograph (JPEG/PNG/WebP, up to 5 MB)."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.save_photograph(
+        current_user, _company(current_user, company_id), user_id, body.model_dump())
+
+
+@router.delete("/employees/{user_id}/photograph")
+async def delete_employee_photograph(
+    user_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.remove_photograph(
+        current_user, _company(current_user, company_id), user_id)
+
+
+@router.get("/employees/{user_id}/photograph")
+async def get_employee_photograph(
+    user_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived link to the photograph. Anyone who may read the employee may see it —
+    a staff photo is the least sensitive thing on the record, and the directory shows it."""
+    _require(current_user, Cap.EMPLOYEE_READ)
+    return await master_mgmt.photograph_url(
+        _company(current_user, company_id), user_id)
 
 
 @router.get("/employees/{user_id}/history")

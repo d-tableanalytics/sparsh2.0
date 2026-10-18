@@ -16,7 +16,14 @@ module stays about composing a person:
   * CONFIGURABLE FIELDS -- HR defines extra Employee / Attendance fields (type, options,
     validation, visibility, applicability, lifecycle) without a code change (FRD §21-22).
     A field that has values is retired, never deleted, and its data type is then frozen.
+  * PHOTOGRAPH -- FRD §3 Basic Identity. Its own small upload rather than a value on the
+    profile update, for the same reason the candidate photo is: a picture is not
+    effective-dated, so routing it through `record_changes` would put a binary blob in the
+    change timeline that nobody can read and that nothing can schedule.
 """
+import base64
+import binascii
+import io as _io
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -38,6 +45,14 @@ from app.services.hrms_audit_service import audit
 USER_COLLECTIONS = ("learners", "staff")
 MASK_PREFIX = "XXXX"
 MAX_LIST_VALUES = 300
+
+# FRD §3 Basic Identity -- the photograph. Deliberately narrow: an employee photo is a
+# head-and-shoulders picture, so the formats are the three every camera and phone produces
+# and the ceiling is small enough that a directory of them stays cheap to serve.
+PHOTO_MIME_TYPES = ("image/jpeg", "image/png", "image/webp")
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+AUDIT_PHOTOGRAPH_SAVED = "employee photograph saved"
+AUDIT_PHOTOGRAPH_REMOVED = "employee photograph removed"
 
 # Human labels for history rows, so the timeline reads "Location" rather than work_location.
 FIELD_LABELS = {
@@ -645,3 +660,119 @@ async def field_usage(company_id: str, module: str, code: str) -> dict:
     """Impact check before retiring: how many records hold a value (FRD §22, §30)."""
     return {"module": module, "code": code,
             "records_with_value": await _usage_count(company_id, module, code)}
+
+
+# ─────────────────────────────────────────────────────────────
+# Photograph (FRD §3 Basic Identity)
+# ─────────────────────────────────────────────────────────────
+async def _photo_profile(company_id: str, user_id: str) -> dict:
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"user_id": str(user_id), "company_id": str(company_id)})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    return profile
+
+
+def _decode_photo(payload: dict) -> tuple:
+    """base64 (optionally a data: URL) -> bytes, filename, mime.
+
+    Checked in this order on purpose: the declared type first, then the ENCODED length,
+    then the decoded length. Measuring the encoded string before decoding is what stops a
+    50 MB body being expanded into memory just to be rejected afterwards.
+    """
+    data = str(payload.get("data") or "")
+    if not data:
+        raise HTTPException(status_code=422, detail="Attach a photograph.")
+    mime = str(payload.get("mime_type") or "").strip().lower()
+    if mime not in PHOTO_MIME_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"A photograph must be one of: {', '.join(PHOTO_MIME_TYPES)}.")
+    if "," in data[:120] and data[:5].lower() == "data:":
+        data = data.split(",", 1)[1]
+    limit_mb = PHOTO_MAX_BYTES // 1024 // 1024
+    if len(data) > (PHOTO_MAX_BYTES * 4 // 3) + 1024:
+        raise HTTPException(status_code=413,
+                            detail=f"The photograph is too large. The limit is {limit_mb} MB.")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="The photograph could not be read.")
+    if not raw:
+        raise HTTPException(status_code=400, detail="The photograph is empty.")
+    if len(raw) > PHOTO_MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"The photograph is too large. The limit is {limit_mb} MB.")
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", str(payload.get("name") or "photo"))[:120]
+    return raw, name or "photo", mime
+
+
+async def save_photograph(actor: dict, company_id: str, user_id: str, payload: dict) -> dict:
+    """Store (or replace) one employee's photograph.
+
+    The previous file's key is NOT deleted from object storage here. A payslip or a letter
+    generated earlier may still reference it, and a dangling reference in an issued document
+    is worse than an orphaned object -- the same reasoning Phase LETTER-1 applies to a
+    rendered letter. Removal is an explicit act (`remove_photograph`).
+    """
+    profile = await _photo_profile(company_id, user_id)
+    raw, name, mime = _decode_photo(payload)
+
+    from app.services.s3_service import upload_file_to_s3_with_key
+    code = profile.get("employee_code") or user_id
+    try:
+        stored = upload_file_to_s3_with_key(_io.BytesIO(raw), f"employee_photo_{code}_{name}", mime)
+    except Exception as e:
+        print(f"[WARN] HRMS photograph upload failed for {code}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="The photograph could not be uploaded right now. Please try again.")
+
+    now = datetime.now(timezone.utc)
+    entry = {"name": name, "key": stored.get("key"), "mime_type": mime,
+             "size_bytes": len(raw), "uploaded_by": _actor_id(actor),
+             "uploaded_by_name": _actor_name(actor), "uploaded_at": now}
+    await get_collection(COLL_EMPLOYEE_PROFILES).update_one(
+        {"_id": profile["_id"]}, {"$set": {"photograph": entry, "updated_at": now}})
+    await audit(actor, AUDIT_PHOTOGRAPH_SAVED, ENTITY_EMPLOYEE, code, name, company_id)
+    return photograph_view(entry)
+
+
+async def remove_photograph(actor: dict, company_id: str, user_id: str) -> dict:
+    """Clear the photograph from the profile. The stored object is left alone, for the
+    reason save_photograph gives."""
+    profile = await _photo_profile(company_id, user_id)
+    code = profile.get("employee_code") or user_id
+    await get_collection(COLL_EMPLOYEE_PROFILES).update_one(
+        {"_id": profile["_id"]},
+        {"$unset": {"photograph": ""},
+         "$set": {"updated_at": datetime.now(timezone.utc)}})
+    await audit(actor, AUDIT_PHOTOGRAPH_REMOVED, ENTITY_EMPLOYEE, code, None, company_id)
+    return {"photograph": None}
+
+
+async def photograph_url(company_id: str, user_id: str) -> dict:
+    """A short-lived link to the photograph, the same shape every other HRMS attachment
+    read returns."""
+    profile = await _photo_profile(company_id, user_id)
+    photo = profile.get("photograph") or {}
+    if not photo.get("key"):
+        raise HTTPException(status_code=404,
+                            detail="No photograph is on file for this employee.")
+    from app.services.s3_service import get_signed_url
+    url = get_signed_url(photo["key"], expires_in=300)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="The photograph could not be opened right now. Please try again.")
+    return {"url": url, "expires_in": 300, "name": photo.get("name") or "photo"}
+
+
+def photograph_view(photo: Optional[dict]) -> Optional[dict]:
+    """What a profile read exposes about the photograph: that one exists and what it is,
+    never the storage key. The key is an address in the bucket, and handing it out would
+    let anybody who has ever seen one profile construct links to others."""
+    if not photo or not photo.get("key"):
+        return None
+    return {k: photo.get(k) for k in ("name", "mime_type", "size_bytes", "uploaded_at",
+                                      "uploaded_by_name")}

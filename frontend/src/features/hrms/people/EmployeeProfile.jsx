@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, UserCircle, Save, Network, LayoutGrid, FileText, X, CalendarClock, AlertTriangle,
+  Camera, Trash2,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -13,6 +14,7 @@ import {
   getAppointments, getEmployees, getEmployeeMasterLists, getEmployeeHistory,
   cancelScheduledEmployeeChange, checkEmployeeDuplicates, listFieldDefinitions,
   getDocuments, getDocumentUrl,
+  saveEmployeePhotograph, deleteEmployeePhotograph, getEmployeePhotographUrl,
 } from '../../../services/hrmsApi';
 import DocumentPanel from '../documents/DocumentPanel';
 import AppointmentPaper from '../recruitment/AppointmentPaper';
@@ -386,9 +388,14 @@ const EmployeeProfile = () => {
   const { showSuccess, showError } = useNotification();
 
   const [employee, setEmployee] = useState(null);
-  // FRD §3 Basic Identity: the photograph is the employee's latest "Photograph" document,
-  // shown through a short-lived signed URL (never stored).
+  // FRD §3 Basic Identity: the employee's own photograph, shown through a short-lived
+  // signed URL (never stored). §3 lists "Photograph" TWICE — once as an identity attribute
+  // and once as a verifiable document — so there are two sources, tried in that order:
+  // the profile field, then the latest approved "Photograph" document. The document scan
+  // is the fallback rather than the primary because it needs document-read rights, and a
+  // manager who may see the person may not see their papers.
   const [photoUrl, setPhotoUrl] = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
   const [form, setForm] = useState({});
   // What the server last returned, as a form — the diff against it is what Save sends.
   const [baseline, setBaseline] = useState({});
@@ -438,26 +445,74 @@ const EmployeeProfile = () => {
   }, [userId]);
 
   const employeeCode = employee?.employee_code;
-  useEffect(() => {
-    let alive = true;
+  const loadPhoto = useCallback(async () => {
     setPhotoUrl(null);
-    if (!employeeCode || !scope.company_id) return undefined;
-    (async () => {
-      try {
-        const { data } = await getDocuments({ ...scope, owner_type: 'employee', owner_id: employeeCode });
-        const rows = Array.isArray(data) ? data : (data?.documents || []);
-        const photo = rows.find((d) => /photo/i.test(d.type_name || '') && d.status !== 'Rejected'
-          && (d.latest_version || d.version_count));
-        if (!photo) return;
-        const { data: link } = await getDocumentUrl(photo.doc_no, scope);
-        if (alive && link?.url) setPhotoUrl(link.url);
-      } catch {
-        // No photograph, or no right to see documents: the plain icon stays.
-      }
-    })();
-    return () => { alive = false; };
+    if (!userId || !scope.company_id) return;
+    try {
+      const { data: link } = await getEmployeePhotographUrl(userId, scope);
+      if (link?.url) { setPhotoUrl(link.url); return; }
+    } catch {
+      // No photograph on the profile — fall through to the document store below.
+    }
+    if (!employeeCode) return;
+    try {
+      const { data } = await getDocuments({ ...scope, owner_type: 'employee', owner_id: employeeCode });
+      const rows = Array.isArray(data) ? data : (data?.documents || []);
+      const photo = rows.find((d) => /photo/i.test(d.type_name || '') && d.status !== 'Rejected'
+        && (d.latest_version || d.version_count));
+      if (!photo) return;
+      const { data: link } = await getDocumentUrl(photo.doc_no, scope);
+      if (link?.url) setPhotoUrl(link.url);
+    } catch {
+      // No photograph, or no right to see documents: the plain icon stays.
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeCode, scope.company_id]);
+  }, [userId, employeeCode, scope.company_id]);
+
+  useEffect(() => { loadPhoto(); }, [loadPhoto]);
+
+  /** Read the chosen file as base64 and store it on the profile. */
+  const onPickPhoto = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';           // so picking the same file twice still fires
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      showError('The photograph must be 5 MB or smaller.');
+      return;
+    }
+    setPhotoBusy(true);
+    try {
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('unreadable'));
+        reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+        reader.readAsDataURL(file);
+      });
+      await saveEmployeePhotograph(
+        userId, { name: file.name, mime_type: file.type, data }, scope);
+      await loadPhoto();
+      await load();
+      showSuccess('Photograph saved.');
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not save the photograph.');
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+
+  const onRemovePhoto = async () => {
+    setPhotoBusy(true);
+    try {
+      await deleteEmployeePhotograph(userId, scope);
+      await loadPhoto();
+      await load();
+      showSuccess('Photograph removed.');
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not remove the photograph.');
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -687,6 +742,22 @@ const EmployeeProfile = () => {
                    .filter(Boolean).join(' · ') || employee.email}
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {canWrite && (
+              <>
+                <label className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5 cursor-pointer"
+                  title="JPEG, PNG or WebP, up to 5 MB">
+                  <Camera size={14} /> {photoBusy ? 'Working…' : (photoUrl ? 'Change photo' : 'Add photo')}
+                  <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only"
+                    disabled={photoBusy} onChange={onPickPhoto} />
+                </label>
+                {employee.photograph && (
+                  <button type="button" onClick={onRemovePhoto} disabled={photoBusy}
+                    className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+                    <Trash2 size={14} /> Remove photo
+                  </button>
+                )}
+              </>
+            )}
             <button type="button" onClick={() => navigate('/hrms/employees')}
               className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5">
               <ArrowLeft size={14} /> Directory

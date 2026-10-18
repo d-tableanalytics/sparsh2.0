@@ -97,6 +97,14 @@ export const updateEmployee = (userId, payload, params) =>
   api.patch(`/hrms/employees/${userId}`, payload, { params });
 export const getEmployeeHierarchy = (userId, params) =>
   api.get(`/hrms/employees/${userId}/hierarchy`, { params });
+// ── Employee photograph (FRD §3 Basic Identity) ──
+export const saveEmployeePhotograph = (userId, payload, params) =>
+  api.put(`/hrms/employees/${userId}/photograph`, payload, { params });
+export const deleteEmployeePhotograph = (userId, params) =>
+  api.delete(`/hrms/employees/${userId}/photograph`, { params });
+/** A short-lived signed link — re-fetch rather than caching the URL. */
+export const getEmployeePhotographUrl = (userId, params) =>
+  api.get(`/hrms/employees/${userId}/photograph`, { params });
 /** Company users who do not yet have an employee profile — the "Add employee" picker. */
 export const getLinkableUsers = (params) => api.get('/hrms/employees/linkable', { params });
 /** Your own employee record. Never gated by employee.read, and always includes your salary. */
