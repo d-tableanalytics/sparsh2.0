@@ -10,7 +10,9 @@ import { useState } from 'react';
  */
 
 /** FRD §12 — the run lifecycle, in the order a month walks through it. */
-export const RUN_STAGES = ['Calculate', 'Submit', 'Check', 'Lock', 'Pay', 'Close'];
+/** FRD §12 stages 5-13. Check (stage 8) and Approve (stage 9) are SEPARATE authorities —
+ *  the Payroll/HR Checker verifies, Finance approves — so they are two steps, not one. */
+export const RUN_STAGES = ['Calculate', 'Submit', 'Check', 'Approve', 'Lock', 'Pay', 'Close'];
 
 /** Inputs (Calculate, Adjust) are accepted only while the run is with the maker. */
 export const EDITABLE_RUN_STATUSES = ['Draft', 'Calculated', 'Returned', 'Rejected'];
@@ -20,7 +22,7 @@ export const FINAL_RUN_STATUSES = ['Locked', 'Paid', 'Closed'];
 /** Which RUN_STAGES entry a status is waiting on (RUN_STAGES.length = all done). */
 export const stageIndex = (status) => ({
   Draft: 0, Returned: 0, Rejected: 0, Calculated: 1, Submitted: 2,
-  Approved: 3, Locked: 4, Paid: 5, Closed: 6,
+  Checked: 3, Approved: 4, Locked: 5, Paid: 6, Closed: 7,
 }[status] ?? 0);
 
 export const PAYMENT_MODES = ['NEFT', 'RTGS', 'IMPS', 'Bank Transfer', 'Cheque', 'Cash', 'Manual Advice'];

@@ -78,7 +78,10 @@ async def main() -> int:
     import app.utils.hrms_access as HA
     HA.sees_all_payroll = lambda u: u.get("role") != "employee"
     HR = {"_id": "hr-1", "role": "admin", "full_name": "Dummy HR"}
-    CHECKER = {"_id": "fin-1", "role": "admin", "full_name": "Dummy Finance"}
+    CHECKER = {"_id": "chk-1", "role": "admin", "full_name": "Dummy Checker"}
+    # FRD §12 names stage 8 and stage 9 as DIFFERENT authorities, so the suite needs a
+    # third person -- with only two, "the approver is not the checker" cannot be tested.
+    APPROVER = {"_id": "fin-1", "role": "admin", "full_name": "Dummy Finance"}
 
     # ── 1 ──
     section("1. Daily attendance measures (FRD §6)")
@@ -275,31 +278,43 @@ async def main() -> int:
           r1["tds"] == 1000 and r1["reimbursements"] == 500
           and r1["adjustments"][0]["reason"] == "Spot award")
     check("net = 50,000 + 500 + 750 - 200 - 1,000 = 50,050", r1["net_pay"] == 50050)
-    await expect("checker decides before submission", PR.decide_run(
-        CHECKER, CO, P, {"action": "approve"}), 409, "submitted")
+    await expect("checker checks before submission", PR.check_run(
+        CHECKER, CO, P, {"action": "check"}), 409, "submitted")
     await PR.submit_run(HR, CO, P, {})
-    await expect("the maker cannot check their own payroll", PR.decide_run(
-        HR, CO, P, {"action": "approve"}), 403, "maker-checker")
-    await expect("a return needs a reason", PR.decide_run(
+    await expect("the maker cannot check their own payroll", PR.check_run(
+        HR, CO, P, {"action": "check"}), 403, "maker-checker")
+    await expect("stage 9 cannot run before stage 8", PR.decide_run(
+        APPROVER, CO, P, {"action": "approve"}), 409, "checked")
+    await expect("a return needs a reason", PR.check_run(
         CHECKER, CO, P, {"action": "return"}), 422, "why")
-    await PR.decide_run(CHECKER, CO, P, {"action": "return", "remarks": "Recheck TDS"})
+    await PR.check_run(CHECKER, CO, P, {"action": "return", "remarks": "Recheck TDS"})
     run = await PR.get_run(HR, CO, P)
     check("returned to the maker", run["status"] == "Returned")
     await PR.adjust_record(HR, CO, P, "E1", {"tds": 900})
     await PR.calculate_payroll(HR, CO, P)
     await PR.submit_run(HR, CO, P, {})
-    await PR.decide_run(CHECKER, CO, P, {"action": "approve"})
+    await PR.check_run(CHECKER, CO, P, {"action": "check"})
+    check("checked is NOT approved (FRD §12 stage 8 != stage 9)",
+          (await PR.get_run(HR, CO, P))["status"] == "Checked")
+    await expect("the checker cannot also approve", PR.decide_run(
+        CHECKER, CO, P, {"action": "approve"}), 403, "checked this payroll")
+    await expect("the maker cannot approve either", PR.decide_run(
+        HR, CO, P, {"action": "approve"}), 403, "maker-checker")
+    await PR.decide_run(APPROVER, CO, P, {"action": "approve"})
     check("approved is NOT locked", (await PR.get_run(HR, CO, P))["status"] == "Approved")
     await expect("edits after approval", PR.adjust_record(HR, CO, P, "E1", {"tds": 1}),
                  409, "with the maker")
     await PS.save_payslip_template(HR, CO, {"company_name": "Sparsh Magic LLP",
                                             "footer_note": "v1"})
-    await PR.lock_run(CHECKER, CO, P, {})
+    await PR.lock_run(APPROVER, CO, P, {})
     run = await PR.get_run(HR, CO, P)
-    check("locked by Finance with the payslip template version frozen",
+    check("locked with the payslip template version frozen",
           run["status"] == "Locked" and run["payslip_template_version"] == 1)
-    check("approval trail has maker, checker and finance steps",
-          [t["stage"] for t in run["approval_trail"]][-3:] == ["Maker", "Checker", "Finance"])
+    check("approval trail has maker, checker, approver and finance steps",
+          [t["stage"] for t in run["approval_trail"]][-4:]
+          == ["Maker", "Checker", "Approver", "Finance"])
+    check("the run names who checked and who approved, separately",
+          run.get("checked_by") == "chk-1" and run.get("decided_by") == "fin-1")
     await expect("calculating a locked payroll", PR.calculate_payroll(HR, CO, P), 409,
                  "post-lock")
     adj = await PR.create_post_lock_adjustment(HR, CO, P, {

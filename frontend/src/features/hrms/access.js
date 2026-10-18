@@ -250,6 +250,8 @@ export const CAP = {
   // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
   PAYROLL_READ: 'payroll.read',
   PAYROLL_PROCESS: 'payroll.process',
+  // FRD §12 stage 8 — the Payroll/HR Checker, a tier below the stage-9 approver.
+  PAYROLL_CHECK: 'payroll.check',
   PAYROLL_APPROVE: 'payroll.approve',
   SALARY_STRUCTURE_READ: 'salary_structure.read',
   SALARY_STRUCTURE_MANAGE: 'salary_structure.manage',

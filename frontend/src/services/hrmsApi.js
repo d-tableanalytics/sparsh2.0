@@ -1183,6 +1183,9 @@ export const decideSalaryStructure = (structureId, payload, params) =>
   api.post(`/hrms/salary-structures/${structureId}/decision`, payload, { params });
 export const submitPayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/submit`, payload || {}, { params });
+/** FRD §12 stage 8 — the Payroll/HR Checker verifies and passes it on, or sends it back. */
+export const checkPayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/check`, payload || {}, { params });
 export const lockPayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/lock`, payload || {}, { params });
 export const closePayrollRun = (period, payload, params) =>

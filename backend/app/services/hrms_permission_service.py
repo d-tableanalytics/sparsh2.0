@@ -170,6 +170,7 @@ CATALOGUE = [
     ]),
     ("Payroll", [
         ("Payroll run", [("payroll.read", None), ("payroll.process", "Process payroll"),
+                         ("payroll.check", "Check payroll"),
                          ("payroll.approve", "Approve payroll")]),
         ("Salary structure", [("salary_structure.read", None),
                               ("salary_structure.manage", "Set salary structures")]),

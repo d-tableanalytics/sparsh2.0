@@ -35,14 +35,14 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_PAYROLL_ADJUSTMENTS_SET, AUDIT_PAYROLL_CALCULATED, AUDIT_PAYROLL_CLOSED,
     AUDIT_PAYROLL_DECIDED, AUDIT_PAYROLL_LOCKED, AUDIT_PAYROLL_POLICY_SAVED,
-    AUDIT_PAYROLL_RECORD_ADJUSTED, AUDIT_PAYROLL_RUN_CREATED, AUDIT_PAYROLL_SUBMITTED,
+    AUDIT_PAYROLL_RECORD_ADJUSTED, AUDIT_PAYROLL_RUN_CREATED, AUDIT_PAYROLL_CHECKED, AUDIT_PAYROLL_SUBMITTED,
     AUDIT_POST_LOCK_ADJUSTMENT, AUDIT_SALARY_COMPONENT_SAVED, AUDIT_SALARY_STRUCTURE_SAVED,
     AUDIT_STRUCTURE_DECIDED,
     COLL_ATTENDANCE, COLL_ATTENDANCE_LOCKS, COLL_EMPLOYEE_PROFILES,
     COLL_PAYROLL_CARRY_FORWARD, COLL_PAYROLL_RECORDS, COLL_PAYROLL_RUNS,
     COLL_SALARY_ADVANCES, COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, COLL_SETTINGS,
     COLL_VARIABLE_PAY_RECORDS,
-    DEDUCTING_TYPES, DEFAULT_PAYROLL_POLICY, EARNING_TYPES,
+    DEDUCTING_TYPES, DEFAULT_PAYROLL_POLICY, PAYROLL_MATRIX_ALLOWED_CAPS, PAYROLL_MATRIX_CAP_KEYS, EARNING_TYPES,
     ENTITY_PAYROLL_RUN, ENTITY_SALARY_COMPONENT, ENTITY_SALARY_STRUCTURE,
     MAX_PAYROLL_LIST_PAGE, PAYROLL_EDITABLE_STATUSES, PAYROLL_FINAL_STATUSES,
     AdvanceStatus, AttendanceStatus, CalculationMethod, ComponentType, PayrollRunStatus,
@@ -137,6 +137,14 @@ async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> di
         raise HTTPException(status_code=422, detail="Variance threshold must be 0-100%.")
     if "input_cutoff_day" in clean and not 1 <= int(clean["input_cutoff_day"]) <= 31:
         raise HTTPException(status_code=422, detail="Cut-off day must be 1-31.")
+    # FRD §12/§19 approval matrix: a stage may only name a PAYROLL capability. Refusing an
+    # unknown value here (rather than falling back silently at call time) means a mistyped
+    # matrix is visible when it is saved, not discovered when a payroll will not lock.
+    for key in PAYROLL_MATRIX_CAP_KEYS:
+        if key in clean and str(clean[key]) not in PAYROLL_MATRIX_ALLOWED_CAPS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} must be one of: {', '.join(sorted(PAYROLL_MATRIX_ALLOWED_CAPS))}.")
     merged = {**await get_payroll_policy(company_id), **clean}
     await get_collection(COLL_SETTINGS).update_one(
         {"company_id": str(company_id)},
@@ -1262,37 +1270,102 @@ async def submit_run(actor: dict, company_id: str, period: str, payload: dict) -
     return await get_run(actor, company_id, period)
 
 
-async def decide_run(actor: dict, company_id: str, period: str, payload: dict) -> dict:
-    """FRD §12 stage 8: the checker approves, rejects or returns -- and is never the maker
-    who submitted it. Approval does not lock; Finance locks as its own step."""
+def _decision_action(payload: dict, allowed: dict, *, verb: str) -> tuple:
+    """The action and the status it moves the run to. Shared by stages 8 and 9 so the two
+    read identically to an operator: pass it on silently, say why when sending it back."""
+    action = str(payload.get("action") or "").lower()
+    if not action:
+        action = verb if payload.get("approved") else "reject"
+    if action not in allowed:
+        raise HTTPException(status_code=422,
+                            detail=f"Action must be {', '.join(sorted(allowed))}.")
+    if action != verb and not (payload.get("remarks") or "").strip():
+        raise HTTPException(status_code=422, detail="Say why the payroll is being sent back.")
+    return action, allowed[action]
+
+
+async def check_run(actor: dict, company_id: str, period: str, payload: dict) -> dict:
+    """FRD §12 stage 8: the Payroll/HR Checker VERIFIES component values, attendance impact
+    and exceptions, then passes the run to the stage-9 approver -- or returns/rejects it.
+
+    Never the maker who submitted it. That is the maker-checker rule §18 calls mandatory,
+    and it is enforced on the ACTOR, not the role: HR holds both PAYROLL_PROCESS and
+    PAYROLL_CHECK (§12 names the checker "Payroll/HR Checker"), so a role-level test would
+    let a single HR user wave their own run through."""
     run = await _get_run(company_id, period)
     if run["status"] != PayrollRunStatus.SUBMITTED.value:
         raise HTTPException(
             status_code=409,
-            detail=f"{period} must be Submitted by the maker before a decision "
+            detail=f"{period} must be Submitted by the maker before it is checked "
                    f"(currently \"{run['status']}\").")
     if run.get("submitted_by") and run["submitted_by"] == _actor_id(actor):
         raise HTTPException(status_code=403,
                             detail="Maker-checker: you submitted this payroll, so someone else "
                                    "must check it.")
-    action = str(payload.get("action") or "").lower()
-    if not action:
-        action = "approve" if payload.get("approved") else "reject"
-    statuses = {"approve": PayrollRunStatus.APPROVED.value,
-                "reject": PayrollRunStatus.REJECTED.value,
-                "return": PayrollRunStatus.RETURNED.value}
-    if action not in statuses:
-        raise HTTPException(status_code=422, detail="Action must be approve, reject or return.")
-    if action != "approve" and not (payload.get("remarks") or "").strip():
-        raise HTTPException(status_code=422, detail="Say why the payroll is being sent back.")
-    new_status = statuses[action]
+    action, new_status = _decision_action(
+        payload,
+        {"check": PayrollRunStatus.CHECKED.value,
+         "reject": PayrollRunStatus.REJECTED.value,
+         "return": PayrollRunStatus.RETURNED.value},
+        verb="check")
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_PAYROLL_RUNS).update_one(
+        {"_id": run["_id"]},
+        {"$set": {"status": new_status, "checked_by": _actor_id(actor),
+                  "checked_by_name": _actor_name(actor), "checked_at": now,
+                  "check_remarks": payload.get("remarks"), "updated_at": now},
+         "$push": {"approval_trail": _trail(actor, "Checker", new_status,
+                                            payload.get("remarks"))}})
+    await audit(actor, AUDIT_PAYROLL_CHECKED, ENTITY_PAYROLL_RUN, period, new_status, company_id)
+    return await get_run(actor, company_id, period)
+
+
+async def decide_run(actor: dict, company_id: str, period: str, payload: dict) -> dict:
+    """FRD §12 stage 9: Finance / the Authorised Approver approves, rejects or returns.
+
+    Which run states are acceptable here depends on the company's approval matrix:
+      * checker_required=True  (the default) -- only a CHECKED run, so stage 8 cannot be
+        skipped;
+      * checker_required=False              -- a SUBMITTED run too, which is the pre-FRD
+        two-stage shape, kept so a company that has not configured a checker is unaffected.
+
+    The approver is never the maker, and -- when the matrix says so -- never the checker
+    either. §19 leaves the exact approvers unconfirmed, which is why this is policy and
+    not code."""
+    run = await _get_run(company_id, period)
+    policy = await get_payroll_policy(company_id)
+    checker_required = bool(policy.get("checker_required", True))
+
+    acceptable = ([PayrollRunStatus.CHECKED.value] if checker_required
+                  else [PayrollRunStatus.CHECKED.value, PayrollRunStatus.SUBMITTED.value])
+    if run["status"] not in acceptable:
+        expected = "Checked by the checker" if checker_required else "Submitted or Checked"
+        raise HTTPException(
+            status_code=409,
+            detail=f"{period} must be {expected} before a decision "
+                   f"(currently \"{run['status']}\").")
+    if run.get("submitted_by") and run["submitted_by"] == _actor_id(actor):
+        raise HTTPException(status_code=403,
+                            detail="Maker-checker: you submitted this payroll, so someone else "
+                                   "must approve it.")
+    if (policy.get("approver_distinct_from_checker", True)
+            and run.get("checked_by") and run["checked_by"] == _actor_id(actor)):
+        raise HTTPException(status_code=403,
+                            detail="You checked this payroll, so the approval is someone "
+                                   "else's to give (FRD §12 stages 8 and 9).")
+    action, new_status = _decision_action(
+        payload,
+        {"approve": PayrollRunStatus.APPROVED.value,
+         "reject": PayrollRunStatus.REJECTED.value,
+         "return": PayrollRunStatus.RETURNED.value},
+        verb="approve")
     now = datetime.now(timezone.utc)
     await get_collection(COLL_PAYROLL_RUNS).update_one(
         {"_id": run["_id"]},
         {"$set": {"status": new_status, "decided_by": _actor_id(actor),
                   "decided_by_name": _actor_name(actor), "decided_at": now,
                   "decision_remarks": payload.get("remarks"), "updated_at": now},
-         "$push": {"approval_trail": _trail(actor, "Checker", new_status,
+         "$push": {"approval_trail": _trail(actor, "Approver", new_status,
                                             payload.get("remarks"))}})
     await audit(actor, AUDIT_PAYROLL_DECIDED, ENTITY_PAYROLL_RUN, period, new_status, company_id)
     return await get_run(actor, company_id, period)

@@ -50,6 +50,10 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       input_cutoff_day: cutoff,
       net_rounding: form.net_rounding,
       sandwich_weekly_off: !!form.sandwich_weekly_off,
+      // FRD §12 / §19 approval matrix.
+      checker_required: !!form.checker_required,
+      approver_distinct_from_checker: !!form.approver_distinct_from_checker,
+      lock_cap: form.lock_cap || 'payroll.approve',
     }, scope), 'Payroll policy saved.');
   };
 
@@ -117,6 +121,31 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
             The cut-off day is the last day of the month inputs (PF, tax, one-off lines) are
             expected. A net-pay change beyond the threshold shows as a warning on that employee.
           </p>
+
+          {/* FRD §12 stages 7-10 / §19 "Payroll Approval Matrix". Who performs each stage is
+              a setting because the FRD leaves the exact approvers unconfirmed. */}
+          <div className="pt-3 border-t border-[var(--border-subtle)] space-y-3">
+            <div>
+              <h3 className="text-[12.5px] font-bold text-[var(--text-main)]">Approval matrix</h3>
+              <p className="text-[11.5px] text-[var(--text-muted)]">
+                Payroll runs maker → checker → approver → lock. The person who submits can never
+                check or approve their own run; that rule is not optional.
+              </p>
+            </div>
+            {check('checker_required', 'A checker verifies before Finance approves',
+              'Off: the run goes straight from the maker to Finance for approval, skipping the separate check.')}
+            {check('approver_distinct_from_checker', 'The approver must not be the checker',
+              'On: whoever passed the check cannot also give the approval.')}
+            <div>
+              <label className={LABEL} htmlFor="pp-lockcap">Who locks the approved payroll</label>
+              <select id="pp-lockcap" value={form.lock_cap || 'payroll.approve'} className={FIELD}
+                disabled={!canEdit} onChange={set('lock_cap')}>
+                <option value="payroll.approve">Finance / Authorised Approver</option>
+                <option value="payroll.check">Payroll / HR Checker</option>
+                <option value="payroll.process">Payroll Maker</option>
+              </select>
+            </div>
+          </div>
         </div>
       )}
     </Modal>

@@ -2081,6 +2081,14 @@ class Cap(str, Enum):
     # Payroll/Finance Approver").
     PAYROLL_READ    = "payroll.read"
     PAYROLL_PROCESS = "payroll.process"
+    # ── Phase 1 FRD §12 ── the workflow names THREE authorities, not two: stage 8 is the
+    # "Payroll/HR Checker" who VERIFIES component values, attendance impact and exceptions,
+    # and stage 9 is the separate "Finance / Authorised Approver" who approves, rejects or
+    # returns. Before this they shared PAYROLL_APPROVE, so one person could both check and
+    # approve and §17's two rows could not be told apart. CHECK is its own capability for
+    # exactly the reason ADVANCE_APPROVE_EMERGENCY is separate from ADVANCE_APPROVE: a
+    # narrower tier is not a flag on a wider one.
+    PAYROLL_CHECK   = "payroll.check"
     PAYROLL_APPROVE = "payroll.approve"
     SALARY_STRUCTURE_READ   = "salary_structure.read"
     SALARY_STRUCTURE_MANAGE = "salary_structure.manage"
@@ -2448,7 +2456,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase PAY-1 ── same reasoning as every block above: the top of the ladder holds
         # every one of these, including both money gates, so a company with no separate
         # Finance user can still run payroll and variable pay to completion.
-        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_APPROVE,
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
         Cap.ADVANCE_READ, Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
@@ -2595,7 +2603,11 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         #   narrower tier than plain HR.
         #   VARIABLE_PAY_HOLD_MANAGE -- releasing/forfeiting held pay is a Finance-level
         #   call at FY-end, not a routine HR act.
-        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS,
+        # FRD §12 stage 8 names the checker "Payroll/HR Checker", so HR holds CHECK as well
+        # as PROCESS. Holding both is safe: check_run refuses the person who submitted, so
+        # one HR user cannot wave their own run through — the maker-checker split is
+        # enforced on the ACTOR, not merely on the role.
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
@@ -2882,7 +2894,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # mirrors EMPLOYEE_SALARY_READ just above: Finance sees what payroll is BUILT from
         # (to judge the numbers it approves) without holding SALARY_STRUCTURE_MANAGE, the
         # same "visibility without write" split that comment already draws.
-        Cap.PAYROLL_READ, Cap.PAYROLL_APPROVE,
+        Cap.PAYROLL_READ, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
@@ -9181,10 +9193,15 @@ class PayrollRunStatus(str, Enum):
     DRAFT      = "Draft"
     CALCULATED = "Calculated"
     SUBMITTED  = "Submitted"    # maker -> checker (FRD §12 stage 7)
-    APPROVED   = "Approved"     # checker approved; Finance still to lock
+    # FRD §12 stage 8: the Payroll/HR Checker has VERIFIED component values, attendance
+    # impact and exceptions, and passed it on. Deliberately its own state rather than a flag
+    # on Submitted: stage 9's approver must be able to see that the check actually happened,
+    # and a run that is Checked but not yet Approved is a real place a payroll sits.
+    CHECKED    = "Checked"
+    APPROVED   = "Approved"     # Finance approved (stage 9); Payroll still to lock
     LOCKED     = "Locked"
     REJECTED   = "Rejected"     # sent back to the maker with a comment
-    RETURNED   = "Returned"     # returned for correction (FRD §12 stage 8)
+    RETURNED   = "Returned"     # returned for correction (FRD §12 stages 8-9)
     PAID       = "Paid"         # every payable employee's payment confirmed
     CLOSED     = "Closed"       # period closed after payment (FRD §12 stage 13)
 
@@ -9424,12 +9441,32 @@ DEFAULT_PAYROLL_POLICY = {
     "input_cutoff_day": 25,
     "net_rounding": "None",
     "sandwich_weekly_off": True,
+    # ── FRD §12 / §19 "Payroll Approval Matrix" ──
+    # Who performs stages 8, 9 and 10, and whether the checker stage runs at all. §19 marks
+    # the exact approvers as UNCONFIRMED, which is precisely why this is policy rather than
+    # code: the client's answer changes a setting, not a deployment.
+    #
+    # `checker_required=False` collapses the chain to the pre-FRD two-stage shape
+    # (Submitted -> Approved), so a company that has not set this up is unaffected.
+    "checker_required": True,
+    "checker_cap": Cap.PAYROLL_CHECK.value,
+    "approver_cap": Cap.PAYROLL_APPROVE.value,
+    "lock_cap": Cap.PAYROLL_APPROVE.value,
+    # Stage 9 may not be performed by the stage-8 checker. Separate from the maker/checker
+    # rule, which is never optional.
+    "approver_distinct_from_checker": True,
+}
+# The capability keys above, for validation — a policy may only name a payroll capability.
+PAYROLL_MATRIX_CAP_KEYS = ("checker_cap", "approver_cap", "lock_cap")
+PAYROLL_MATRIX_ALLOWED_CAPS = {
+    Cap.PAYROLL_PROCESS.value, Cap.PAYROLL_CHECK.value, Cap.PAYROLL_APPROVE.value,
 }
 COLL_PAYROLL_CARRY_FORWARD = "hrms_payroll_carry_forwards"
 COLL_PAYSLIP_TEMPLATE_VERSIONS = "hrms_payslip_template_versions"
 COLL_PAYMENT_BATCHES = "hrms_payment_batches"
 COLL_PAYMENTS = "hrms_payments"
 AUDIT_PAYROLL_SUBMITTED = "payroll submitted for approval"
+AUDIT_PAYROLL_CHECKED = "payroll checked"
 AUDIT_PAYROLL_LOCKED = "payroll locked"
 AUDIT_PAYROLL_CLOSED = "payroll period closed"
 AUDIT_PAYROLL_POLICY_SAVED = "payroll policy saved"

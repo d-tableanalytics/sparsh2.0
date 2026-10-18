@@ -213,6 +213,24 @@ def _require(user: dict, capability: Cap) -> None:
         raise HTTPException(status_code=403, detail=NO_ACCESS_MESSAGE)
 
 
+async def _require_payroll_matrix_cap(user: dict, company_id: str, key: str) -> None:
+    """Capability gate for a payroll stage whose authority the company CONFIGURES.
+
+    FRD §19 leaves the payroll approval matrix unconfirmed, so stage 10 (lock) names its
+    capability in policy rather than in code. This still resolves through `can()` — the one
+    permission decision point — it just looks up WHICH capability from the matrix first.
+
+    A policy naming anything outside PAYROLL_MATRIX_ALLOWED_CAPS is ignored in favour of the
+    default: a typo in configuration must not silently widen who can lock a payroll.
+    """
+    from app.models.hrms import DEFAULT_PAYROLL_POLICY, PAYROLL_MATRIX_ALLOWED_CAPS
+    policy = await payroll_mgmt.get_payroll_policy(company_id)
+    wanted = str(policy.get(key) or "")
+    if wanted not in PAYROLL_MATRIX_ALLOWED_CAPS:
+        wanted = DEFAULT_PAYROLL_POLICY[key]
+    _require(user, Cap(wanted))
+
+
 def _require_any(user: dict, *capabilities: Cap) -> None:
     """Capability gate for an endpoint two different roles reach by different routes.
 
@@ -4927,6 +4945,21 @@ async def set_payroll_adjustments(
         body.model_dump())
 
 
+@router.post("/payroll/runs/{period}/check")
+async def check_payroll_run(
+    period: str,
+    body: PayrollApprovalIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §12 stage 8: the Payroll/HR Checker verifies component values, attendance impact
+    and exceptions on a SUBMITTED payroll, then passes it to the stage-9 approver — or
+    returns/rejects it. Never the maker who submitted it."""
+    _require(current_user, Cap.PAYROLL_CHECK)
+    return await payroll_mgmt.check_run(
+        current_user, _company(current_user, company_id), period, body.model_dump())
+
+
 @router.post("/payroll/runs/{period}/decision")
 async def decide_payroll_run(
     period: str,
@@ -4934,8 +4967,10 @@ async def decide_payroll_run(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """FRD §12 stage 8: the checker approves, rejects or returns a SUBMITTED payroll
-    (never the maker who submitted it). Locking is Finance's separate step."""
+    """FRD §12 stage 9: Finance / the Authorised Approver approves, rejects or returns a
+    CHECKED payroll — or a merely SUBMITTED one where the company's approval matrix sets
+    `checker_required=false`. Never the maker, and never the checker when the matrix says
+    the two must differ. Locking is its own stage-10 step."""
     _require(current_user, Cap.PAYROLL_APPROVE)
     return await payroll_mgmt.decide_run(
         current_user, _company(current_user, company_id), period, body.model_dump())
@@ -6698,11 +6733,12 @@ async def lock_payroll_run(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """FRD §12 stage 9: Finance locks the approved payroll."""
-    _require(current_user, Cap.PAYROLL_APPROVE)
+    """FRD §12 stage 10: the approved payroll is locked. Which authority may do so comes
+    from the company's approval matrix (`lock_cap`), defaulting to Finance."""
+    company = _company(current_user, company_id)
+    await _require_payroll_matrix_cap(current_user, company, "lock_cap")
     return await payroll_mgmt.lock_run(
-        current_user, _company(current_user, company_id), period,
-        body.model_dump() if body else {})
+        current_user, company, period, body.model_dump() if body else {})
 
 
 @router.post("/payroll/runs/{period}/close")

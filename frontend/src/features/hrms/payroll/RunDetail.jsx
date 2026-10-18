@@ -9,7 +9,8 @@ import { payrollNextStep } from '../common/processGuides';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getPayrollRun, calculatePayroll, listPayrollRecords, listPayslips,
-  submitPayrollRun, decidePayrollRun, lockPayrollRun, closePayrollRun, downloadPayrollRegister,
+  submitPayrollRun, checkPayrollRun, decidePayrollRun, lockPayrollRun, closePayrollRun,
+  downloadPayrollRegister,
   adjustPayrollRecord, setPayrollAdjustments, listSalaryComponents,
 } from '../../../services/hrmsApi';
 import Payslip, { PayslipDocument } from './Payslip';
@@ -377,17 +378,41 @@ const RunActions = ({ runInfo, period, scope, can, busy, run, showError }) => {
     title = 'Submit for approval';
     hint = critical
       ? `${critical} critical problem(s) must be fixed and the run recalculated before it can be submitted.`
-      : 'A checker — someone other than you — then approves, returns or rejects it.';
+      : 'A checker — someone other than you — verifies it, then Finance approves it.';
     buttons = (
       <Btn tone="primary" disabled={busy || critical > 0} onClick={() => act(
         () => submitPayrollRun(period, { remarks: text }, scope), 'Payroll submitted for approval.')}>
         <Send size={14} /> {busy ? 'Working…' : 'Submit for approval'}
       </Btn>
     );
-  } else if (status === 'Submitted' && can(CAP.PAYROLL_APPROVE)) {
+  } else if (status === 'Submitted' && can(CAP.PAYROLL_CHECK)) {
+    // FRD §12 stage 8 — the Payroll/HR Checker. Verifying is NOT approving: this hands the
+    // run on to Finance, which is a different person's decision.
     title = 'Check this payroll';
     hint = `Submitted by ${runInfo.submitted_by_name || 'the maker'}${runInfo.submitted_at ? ` on ${when(runInfo.submitted_at)}` : ''}. `
-      + 'Return it for a correction, reject it outright, or approve it. Approving does not lock it — locking is the next step.';
+      + 'Verify the component values, attendance impact and exceptions. Passing the check sends it to Finance for approval — it does not approve or lock it.';
+    remarksLabel = 'Remarks (required to return or reject)';
+    buttons = (
+      <>
+        <Btn disabled={busy} onClick={() => needReason(
+          () => checkPayrollRun(period, { action: 'return', remarks: text }, scope), 'Payroll returned to the maker.')}>
+          Return
+        </Btn>
+        <Btn tone="danger" disabled={busy} onClick={() => needReason(
+          () => checkPayrollRun(period, { action: 'reject', remarks: text }, scope), 'Payroll rejected.')}>
+          Reject
+        </Btn>
+        <Btn tone="primary" disabled={busy} onClick={() => act(
+          () => checkPayrollRun(period, { action: 'check', remarks: text }, scope), 'Payroll checked — sent to Finance for approval.')}>
+          {busy ? 'Working…' : 'Pass check'}
+        </Btn>
+      </>
+    );
+  } else if (status === 'Checked' && can(CAP.PAYROLL_APPROVE)) {
+    // FRD §12 stage 9 — Finance / the Authorised Approver.
+    title = 'Approve this payroll';
+    hint = `Checked by ${runInfo.checked_by_name || 'the checker'}${runInfo.checked_at ? ` on ${when(runInfo.checked_at)}` : ''}. `
+      + 'Approve, return it for a correction, or reject it. Approving does not lock it — locking is the next step.';
     remarksLabel = 'Remarks (required to return or reject)';
     buttons = (
       <>
@@ -451,7 +476,7 @@ const RunActions = ({ runInfo, period, scope, can, busy, run, showError }) => {
 };
 
 // ── Approval trail ──
-const STAGE_TONE = { Maker: 'neutral', Checker: 'accent', Finance: 'good' };
+const STAGE_TONE = { Maker: 'neutral', Checker: 'accent', Approver: 'warn', Finance: 'good' };
 
 const ApprovalTrail = ({ trail }) => {
   if (!trail?.length) {
