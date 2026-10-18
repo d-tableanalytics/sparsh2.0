@@ -41,9 +41,9 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 8 | Payroll policy versioning (§21) | **Done** — PAY_POLICY on the spine, runs read the policy as at their own period end and record the version |
 | 9 | Attendance snapshot (§8, §18) | **Done** — per-day basis frozen onto each record, lock identity on the run, submit refused when the basis moved, stale banner |
 | 10 | Configurable bank file (§13, §19) | **Done** — named formats per company, column designer, fixed-width/delimited, amount + date conventions, header/trailer records, live preview; DEFAULT reproduces the old output byte for byte |
-| 11 | Impact + config audit viewers | Not started |
+| 11 | Impact + config audit viewers (§22, §29, §30) | **Done** — `where_used` across components/fields/policies, references vs history separated, retirement blocked and the blockers named, Audit & Impact screen |
 
-Phase 1 suite now **92/92**, attendance policy suite **27/27**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
+Phase 1 suite **92/92**. New suites: policy spine 28, config change 29, attendance policy 27, component lifecycle 42, bank format 24, dependency 19. Full HRMS suite **100 modules pass**; the 10 that fail do so on a missing `httpx` and failed identically before this work. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
 in the backend venv and failed identically before this work began.
 
 ---

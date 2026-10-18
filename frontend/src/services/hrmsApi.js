@@ -134,6 +134,17 @@ export const decideConfigChangeRequest = (requestNo, payload, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/decision`, payload, { params });
 export const activateConfigChangeRequest = (requestNo, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/activate`, null, { params });
+/** FRD §29 — what points at a piece of configuration, before changing or retiring it. */
+export const getConfigImpact = (entityType, code, params) =>
+  api.get(`/hrms/config/impact/${entityType}/${code}`, { params });
+/** FRD §29/§30 — every governed change with requester, approver, reason and old/new. */
+export const getConfigAudit = (params) => api.get('/hrms/config/audit', { params });
+export const listBankFileFormats = (params) =>
+  api.get('/hrms/config/bank-file-formats', { params });
+export const saveBankFileFormat = (payload, params) =>
+  api.put('/hrms/config/bank-file-formats', payload, { params });
+export const previewBankFileFormat = (payload, params) =>
+  api.post('/hrms/config/bank-file-formats/preview', payload, { params });
 
 /** A short-lived signed link — re-fetch rather than caching the URL. */
 export const getEmployeePhotographUrl = (userId, params) =>

@@ -154,6 +154,7 @@ import PipBoard from './features/hrms/pip/PipBoard';
 import AuditViewer from './features/hrms/admin/AuditViewer';
 import ConfigApprovalInbox from './features/hrms/admin/ConfigApprovalInbox';
 import AttendancePolicyDesigner from './features/hrms/attendance/AttendancePolicyDesigner';
+import ConfigAuditViewer from './features/hrms/admin/ConfigAuditViewer';
 // ── SM-HR-051 — User / Role / Permission Administration ──
 import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
 import RolesPermissions from './features/hrms/admin/RolesPermissions';
@@ -499,6 +500,9 @@ const AppRoutes = () => {
         {/* FRD §23/§29 — Attendance Policy Designer. Same nav decision as above:
             routed at /hrms/attendance-policies, not advertised in the sidebar. */}
         <Route path="attendance-policies"  element={<AttendancePolicyDesigner />} />
+        {/* FRD §29 — Configuration Audit Viewer + Impact/Dependency Viewer, as two tabs
+            of one screen. Routed at /hrms/config-audit; same nav decision as above. */}
+        <Route path="config-audit"         element={<ConfigAuditViewer />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
         {/* Dynamic Roles & Permissions — MD / Super Admin / Admin decide who does what. */}

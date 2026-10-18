@@ -323,6 +323,16 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
                 status_code=409,
                 detail="This component has been paid in a payroll, so its type cannot "
                        "change. Retire it and create a new one.")
+    # §22 Control 3 / §30: a component still referenced by a live formula or structure
+    # cannot be retired until that is resolved. Checked only on the TRANSITION into a
+    # retired state -- re-saving an already-retired component must not start failing.
+    retiring = (clean.get("active") is False and (current or {}).get("active") is not False)         or (clean.get("lifecycle") == "Retired"
+            and (current or {}).get("lifecycle") != "Retired")
+    if retiring:
+        from app.services.hrms_config_dependency_service import (
+            ENTITY_COMPONENT, assert_retirable)
+        await assert_retirable(company_id, ENTITY_COMPONENT, code)
+
     clean["updated_at"] = now
     change = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
               "reason": (payload.get("change_reason") or "").strip() or None,

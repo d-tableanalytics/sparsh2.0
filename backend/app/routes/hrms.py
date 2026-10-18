@@ -6523,6 +6523,7 @@ from app.services import hrms_policy_version_service as policy_versions  # noqa:
 from app.services import hrms_config_change_service as config_changes  # noqa: E402
 from app.services import hrms_attendance_simulation_service as att_sim  # noqa: E402
 from app.services import hrms_bank_format_service as bank_formats  # noqa: E402
+from app.services import hrms_config_dependency_service as config_deps  # noqa: E402
 
 
 # ── Employee Master ──
@@ -7247,3 +7248,40 @@ async def preview_bank_file_format(
     question is easier to answer against output than against a column list."""
     _require(current_user, Cap.CONFIG_READ)
     return bank_formats.preview(body or {})
+
+
+# ── Configuration impact / dependency viewer (FRD §22, §29, §30) ──
+@router.get("/config/impact/{entity_type}/{code}")
+async def config_impact(
+    entity_type: str,
+    code: str,
+    module: str = Query("employee"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Everything that points at one piece of configuration, before it is changed or
+    retired (FRD §29 "Configuration Impact / Dependency Viewer").
+
+    References and history are reported SEPARATELY: a reference breaks next time it runs,
+    history is the reason retirement exists instead of deletion.
+    """
+    _require(current_user, Cap.CONFIG_READ)
+    return await config_deps.where_used(
+        _company(current_user, company_id), entity_type, code, module)
+
+
+@router.get("/config/audit")
+async def config_audit(
+    entity_type: Optional[str] = Query(None),
+    limit: int = Query(100, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The Configuration Audit Viewer (FRD §29, §30): every governed change with its
+    requester, approver, reason, effective date and old/new definition."""
+    _require(current_user, Cap.CONFIG_READ)
+    company = _company(current_user, company_id)
+    rows = await config_changes.list_requests(company, limit=limit)
+    if entity_type:
+        rows = [r for r in rows if r.get("entity_type") == entity_type]
+    return {"changes": rows, "total": len(rows)}
