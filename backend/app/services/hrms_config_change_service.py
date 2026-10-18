@@ -42,7 +42,8 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_CONFIG_ACTIVATED, AUDIT_CONFIG_DECIDED, AUDIT_CONFIG_REQUESTED,
     COLL_CONFIG_APPROVALS, COLL_CONFIG_CHANGE_REQUESTS, COLL_EMPLOYEE_PROFILES,
-    CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_TYPES, ENTITY_CONFIG_CHANGE,
+    CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT, CONFIG_ENTITY_TYPES,
+    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, ENTITY_CONFIG_CHANGE,
     ConfigChangeStatus, PolicyVersionStatus, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
@@ -161,12 +162,101 @@ async def _policy_describe(company_id: str, request: dict) -> dict:
             "new_version": new.get("version_no")}
 
 
+# ─────────────────────────────────────────────────────────────
+# Salary component (FRD §25 Formula Versioning, §30)
+# ─────────────────────────────────────────────────────────────
+async def _component_load(company_id: str, request: dict) -> dict:
+    doc = await get_collection(COLL_SALARY_COMPONENTS).find_one(
+        {"company_id": str(company_id), "code": request["entity_code"]})
+    if not doc:
+        raise HTTPException(status_code=404,
+                            detail=f"No salary component {request['entity_code']}.")
+    return doc
+
+
+async def _component_impact(company_id: str, request: dict) -> dict:
+    """What a component change reaches: who is paid it, and what else reads it.
+
+    Leans on the dependency service rather than re-deriving: "what depends on this" has
+    one answer in this system, and two implementations would eventually disagree.
+    """
+    from app.services.hrms_config_dependency_service import (
+        ENTITY_COMPONENT, where_used)
+    code = request["entity_code"]
+    component = await _component_load(company_id, request)
+    usage = await where_used(company_id, ENTITY_COMPONENT, code)
+
+    structures = await get_collection(COLL_SALARY_STRUCTURES).find(
+        {"company_id": str(company_id), "components.code": code},
+        {"employee_code": 1, "status": 1}).to_list(5000)
+    paid_to = len({s.get("employee_code") for s in structures
+                   if s.get("status") != "Rejected"})
+
+    effective_from = component.get("effective_from")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    retroactive = bool(effective_from and effective_from < today)
+    warnings = []
+    if retroactive:
+        warnings.append(
+            f"Effective {effective_from}, which is in the past — payroll already run for "
+            f"those months is NOT recalculated automatically.")
+    if usage["references"]:
+        warnings.append(
+            f"{len(usage['references'])} other piece(s) of configuration read this "
+            f"component; changing what it means changes them too.")
+
+    return {
+        "entity": f"{code} ({component.get('name') or ''})".strip(),
+        "employees_affected": paid_to,
+        "total_employees": await get_collection(COLL_EMPLOYEE_PROFILES).count_documents(
+            {"company_id": str(company_id)}),
+        "effective_from": effective_from,
+        "references": usage["references"],
+        "history": usage["history"],
+        "retroactive": retroactive,
+        "warnings": warnings,
+    }
+
+
+async def _component_activate(actor: dict, company_id: str, request: dict) -> dict:
+    """Make the drafted component live. The lifecycle is the switch, the same way a policy
+    version's status is: activation here means Active, nothing else moves."""
+    component = await _component_load(company_id, request)
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_SALARY_COMPONENTS).update_one(
+        {"_id": component["_id"]},
+        {"$set": {"lifecycle": "Active", "activated_at": now, "updated_at": now}})
+    return await _component_load(company_id, request)
+
+
+async def _component_describe(company_id: str, request: dict) -> dict:
+    """The old/new definition §30 requires — for a component that means the CALCULATION,
+    which is what a reader of the audit actually wants to compare."""
+    component = await _component_load(company_id, request)
+    keys = ("calculation_method", "calculation_base", "percentage", "formula", "slabs",
+            "proration", "rounding", "frequency", "min_amount", "max_amount")
+    history = component.get("history") or []
+    previous = history[-1].get("old") if history else None
+    return {
+        "old": {k: (previous or {}).get(k) for k in keys} if previous else None,
+        "new": {k: component.get(k) for k in keys},
+        "old_version": max(1, int(component.get("version") or 1) - 1),
+        "new_version": component.get("version"),
+    }
+
+
 ENTITY_HANDLERS = {
     CONFIG_ENTITY_POLICY_VERSION: {
         "load": _policy_load,
         "impact": _policy_impact,
         "activate": _policy_activate,
         "describe": _policy_describe,
+    },
+    CONFIG_ENTITY_SALARY_COMPONENT: {
+        "load": _component_load,
+        "impact": _component_impact,
+        "activate": _component_activate,
+        "describe": _component_describe,
     },
 }
 
@@ -205,11 +295,14 @@ async def create_request(actor: dict, company_id: str, payload: dict) -> dict:
     if not entity_code:
         raise HTTPException(status_code=422, detail="Name what is being changed.")
     version_no = payload.get("version_no")
-    if version_no is None:
+    # A POLICY change names a version; a COMPONENT change names the component, whose own
+    # `version` counter says which revision is being governed. Requiring a version number
+    # for both would mean asking the requester for a number they have no way to know.
+    if version_no is None and entity_type == CONFIG_ENTITY_POLICY_VERSION:
         raise HTTPException(status_code=422, detail="Name which version is being changed.")
 
     draft = {"entity_type": entity_type, "entity_code": entity_code,
-             "version_no": int(version_no)}
+             "version_no": int(version_no) if version_no is not None else None}
     await handler["load"](company_id, draft)      # 404s now rather than at approval time
 
     effective_from = payload.get("effective_from")

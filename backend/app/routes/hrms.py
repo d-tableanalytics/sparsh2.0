@@ -7285,3 +7285,48 @@ async def config_audit(
     if entity_type:
         rows = [r for r in rows if r.get("entity_type") == entity_type]
     return {"changes": rows, "total": len(rows)}
+
+
+# ── Calculation variables (FRD §25 constants, §28 CALCULATION_VARIABLE) ──
+@router.get("/payroll/calculation-variables")
+async def list_calculation_variables(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's named constants, plus the built-in variables a formula may read —
+    the Formula Designer's variable list (FRD §25, §29)."""
+    _require_any(current_user, Cap.PAYROLL_READ, Cap.CONFIG_READ)
+    from app.services import hrms_formula_engine as FE
+    return {
+        "variables": await payroll_mgmt.list_calculation_variables(
+            _company(current_user, company_id)),
+        "built_in": {
+            "structure": sorted(FE.STRUCTURE_VARS),
+            "attendance": sorted(FE.ATTENDANCE_VARS),
+            "employee": sorted(FE.EMPLOYEE_VARS),
+        },
+        "functions": sorted(FE.FUNCTIONS),
+    }
+
+
+@router.put("/payroll/calculation-variables")
+async def save_calculation_variable(
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
+    return await payroll_mgmt.save_calculation_variable(
+        current_user, _company(current_user, company_id), body or {})
+
+
+@router.delete("/payroll/calculation-variables/{name}")
+async def delete_calculation_variable(
+    name: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Refused while any formula still reads it."""
+    _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
+    return await payroll_mgmt.delete_calculation_variable(
+        current_user, _company(current_user, company_id), name)

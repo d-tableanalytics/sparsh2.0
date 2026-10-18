@@ -32,12 +32,14 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
+import re
+
 from app.models.hrms import (
     AUDIT_PAYROLL_ADJUSTMENTS_SET, AUDIT_PAYROLL_CALCULATED, AUDIT_PAYROLL_CLOSED,
     AUDIT_PAYROLL_DECIDED, AUDIT_PAYROLL_LOCKED, AUDIT_PAYROLL_POLICY_SAVED,
     AUDIT_PAYROLL_RECORD_ADJUSTED, AUDIT_PAYROLL_RUN_CREATED, AUDIT_PAYROLL_CHECKED, AUDIT_PAYROLL_SUBMITTED,
     AUDIT_POST_LOCK_ADJUSTMENT, AUDIT_SALARY_COMPONENT_SAVED, AUDIT_SALARY_STRUCTURE_SAVED,
-    AUDIT_STRUCTURE_DECIDED,
+    AUDIT_STRUCTURE_DECIDED, COLL_CALCULATION_VARIABLES,
     COLL_ATTENDANCE, COLL_ATTENDANCE_LOCKS, COLL_EMPLOYEE_PROFILES,
     COLL_PAYROLL_CARRY_FORWARD, COLL_PAYROLL_RECORDS, COLL_PAYROLL_RUNS,
     COLL_SALARY_ADVANCES, COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, COLL_SETTINGS,
@@ -241,7 +243,8 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
     if method == CalculationMethod.FORMULA.value:
         from app.services import hrms_formula_engine as FE
         known = {c["code"] for c in await list_salary_components(actor, company_id)} | {code}
-        refs = FE.validate(clean.get("formula") or "", known)
+        constants = set(await constants_for(company_id))
+        refs = FE.validate(clean.get("formula") or "", known, constants)
         if code.upper() in refs:
             raise HTTPException(status_code=422, detail=f"{code} cannot use itself in its formula.")
         clean["formula"] = str(clean["formula"]).strip()
@@ -1051,7 +1054,8 @@ def _period_dependent(component: dict) -> bool:
 
 
 def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
-                        profile: dict, period_end: str) -> Optional[dict]:
+                        profile: dict, period_end: str,
+                        constants: Optional[dict] = None) -> Optional[dict]:
     """The structure with its period-dependent formulas evaluated for THIS period.
 
     Returns the structure untouched when nothing depends on the period, which is the
@@ -1064,7 +1068,8 @@ def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
               "percentage": c.get("percentage_override") or c.get("percentage")}
              for c in components]
     resolved = resolve_lines(lines, meta, annual_ctc=(structure or {}).get("annual_ctc"),
-                             days=days, profile=profile, period_end=period_end)
+                             days=days, profile=profile, period_end=period_end,
+                             constants=constants)
     fresh = {r["code"]: r["amount"] for r in resolved}
     return {**structure,
             "components": [
@@ -1148,6 +1153,8 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
 
     await _load_component_types(company_id)
     meta = dict(_component_meta_cache)
+    # §25 constants, read once for the whole run rather than per employee.
+    run_constants = await constants_for(company_id)
     profiles = await _eligible_profiles(company_id, start, end)
 
     records_coll = get_collection(COLL_PAYROLL_RECORDS)
@@ -1176,7 +1183,8 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         days = await _payable_days(company_id, employee_code, period, profile, calendar,
                                    sandwich=bool(policy.get("sandwich_weekly_off")))
         ratio = (days["payable_days"] / days["days_in_period"]) if days["days_in_period"] else 0
-        structure = _reprice_for_period(structure, meta, days, profile, end)
+        structure = _reprice_for_period(structure, meta, days, profile, end,
+                                        constants=run_constants)
         lines = _component_lines(structure, meta, ratio, days=days, profile=profile,
                                  period=period, period_end=end)
 
@@ -1943,3 +1951,84 @@ async def simulate_component(actor: dict, company_id: str, code: str, payload: d
                             sum(r["employer_difference"] for r in rows), 2)},
             "note": "Simulation only — nothing was saved. Saved structures keep their amounts "
                     "until a new structure revision is made; past payroll is never rewritten."}
+
+
+# ─────────────────────────────────────────────────────────────
+# Calculation variables (FRD §25 "constants", §28 CALCULATION_VARIABLE)
+# ─────────────────────────────────────────────────────────────
+_VARIABLE_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,39}$")
+
+
+async def list_calculation_variables(company_id: str) -> list:
+    """The company's named constants. Read by the formula validator and by payroll."""
+    rows = await get_collection(COLL_CALCULATION_VARIABLES).find(
+        {"company_id": str(company_id)}).sort("name", 1).to_list(200)
+    return [_out(r) for r in rows]
+
+
+async def constants_for(company_id: str) -> dict:
+    """{NAME: value} for the formula environment."""
+    return {r["name"]: float(r.get("value") or 0)
+            for r in await list_calculation_variables(company_id)}
+
+
+async def save_calculation_variable(actor: dict, company_id: str, payload: dict) -> dict:
+    """Define or update one named constant.
+
+    The name is checked against the BUILT-IN variables and refused on collision: a company
+    constant shadowing PAYABLE_DAYS would silently change what every formula using it
+    means, and the formula text would give no hint that it had happened.
+    """
+    from app.services import hrms_formula_engine as FE
+    name = str(payload.get("name") or "").strip().upper()
+    if not _VARIABLE_NAME.match(name):
+        raise HTTPException(
+            status_code=422,
+            detail="A variable name is 2-40 characters, UPPER CASE, starting with a letter "
+                   "(e.g. PF_WAGE_CEILING).")
+    if name in FE.BUILT_INS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{name} is a built-in variable and cannot be redefined.")
+    try:
+        value = float(payload.get("value"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="A variable needs a numeric value.")
+
+    now = datetime.now(timezone.utc)
+    coll = get_collection(COLL_CALCULATION_VARIABLES)
+    current = await coll.find_one({"company_id": str(company_id), "name": name})
+    await coll.update_one(
+        {"company_id": str(company_id), "name": name},
+        {"$set": {"value": value,
+                  "label": str(payload.get("label") or "").strip()[:120] or None,
+                  "description": str(payload.get("description") or "").strip()[:300] or None,
+                  "updated_at": now, "updated_by": _actor_id(actor),
+                  "version": int((current or {}).get("version") or 0) + 1},
+         "$setOnInsert": {"company_id": str(company_id), "name": name, "created_at": now},
+         # A statutory figure changes, and every payroll calculated before the change has
+         # to stay explicable. The old value is kept rather than overwritten.
+         "$push": {"history": {"at": now, "by": _actor_id(actor),
+                               "by_name": _actor_name(actor),
+                               "old": (current or {}).get("value"), "new": value,
+                               "reason": str(payload.get("change_reason") or "").strip() or None}}},
+        upsert=True)
+    await audit(actor, AUDIT_SALARY_COMPONENT_SAVED, ENTITY_SALARY_COMPONENT,
+                f"variable {name}", str(value), company_id)
+    return _out(await coll.find_one({"company_id": str(company_id), "name": name}))
+
+
+async def delete_calculation_variable(actor: dict, company_id: str, name: str) -> dict:
+    """Remove a constant, refusing while any formula still reads it."""
+    from app.services import hrms_formula_engine as FE
+    name = str(name).strip().upper()
+    users = [c["code"] for c in await list_salary_components(actor, company_id)
+             if c.get("calculation_method") == CalculationMethod.FORMULA.value
+             and name in FE.references(c.get("formula") or "0")]
+    if users:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{name} is still used by: {', '.join(users)}. Change those formulas first.")
+    await get_collection(COLL_CALCULATION_VARIABLES).delete_one(
+        {"company_id": str(company_id), "name": name})
+    return {"removed": True}

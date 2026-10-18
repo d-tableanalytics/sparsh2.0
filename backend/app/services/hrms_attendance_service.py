@@ -255,6 +255,30 @@ async def closure_rules(company_id: str, profile: Optional[dict] = None,
                                   default=default)
 
 
+async def regularisation_rules(company_id: str, profile: Optional[dict] = None,
+                               on_date: Optional[str] = None) -> dict:
+    """The ATT_REGULARISATION policy in force, over the company's stored settings.
+
+    The window and the evidence flag were already enforced -- from the flat settings dict.
+    This routes them through the policy spine so they can be versioned, effective-dated and
+    scoped like every other §23 rule, WITHOUT changing the answer for a company that has
+    configured no policy: the settings remain the fallback.
+    """
+    from app.models.hrms import DEFAULT_ATTENDANCE_RULES, POLICY_ATT_REGULARISATION
+    from app.services import hrms_policy_version_service as PV
+    settings = await get_shift_policy(company_id)
+    default = {
+        "window_days": settings.get("regularisation_window_days",
+                                    DEFAULT_ATTENDANCE_RULES["regularisation_window_days"]),
+        "evidence_required": bool(settings.get("regularisation_evidence_required")),
+        "max_requests_per_month": settings.get("regularisation_max_per_month"),
+        "approval_levels": settings.get("regularisation_approval_levels") or 1,
+        "request_types": settings.get("regularisation_request_types") or None,
+    }
+    return await PV.resolve_rules(company_id, POLICY_ATT_REGULARISATION, profile or {},
+                                  on_date, default=default)
+
+
 async def _assert_within_cutoff(actor: dict, company_id: str, work_date: str) -> None:
     """FRD §23 Monthly Closure -- the cut-off, enforced.
 
@@ -483,9 +507,10 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
             detail=f"{work_date} is inside a locked attendance period — no regularisation "
                    f"without an authorised unlock (§7.9 BR).")
     await _assert_within_cutoff(actor, company_id, work_date)
-    # FRD §5 Regularisation: the allowed request window, and evidence where policy needs it.
-    policy = await get_shift_policy(company_id)
-    window = policy.get("regularisation_window_days")
+    # FRD §5/§23 Regularisation: window, evidence, request type and monthly cap, from the
+    # ATT_REGULARISATION policy in force for THIS employee on THIS date.
+    rules = await regularisation_rules(company_id, profile, work_date)
+    window = rules.get("window_days")
     today = _today()
     if work_date > today:
         raise HTTPException(status_code=422, detail="You cannot regularise a future date.")
@@ -497,16 +522,42 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
                 status_code=422,
                 detail=f"Regularisation can be requested up to {window} day(s) back "
                        f"(from {earliest}).")
-    if policy.get("regularisation_evidence_required") and not (payload.get("evidence") or "").strip():
+    if rules.get("evidence_required") and not (payload.get("evidence") or "").strip():
         raise HTTPException(status_code=422,
                             detail="Attach supporting evidence (a link or reference) — company "
                                    "policy requires it for regularisation.")
+
+    # §23 "Request types". Configured as a list; unconfigured means anything is accepted,
+    # which is how every company behaved before this existed.
+    allowed_types = rules.get("request_types")
+    request_type = (payload.get("request_type") or "").strip()
+    if allowed_types and request_type not in allowed_types:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Choose a regularisation type: {', '.join(allowed_types)}.")
+
+    # §23 "Request window ... monthly count". A cap on how often one person may ask, which
+    # is what stops regularisation quietly becoming the way attendance is recorded.
+    cap = rules.get("max_requests_per_month")
+    if cap:
+        period = str(work_date)[:7]
+        used = await get_collection(COLL_ATTENDANCE_CORRECTIONS).count_documents({
+            "company_id": str(company_id), "employee_code": employee_code,
+            "work_date": {"$gte": f"{period}-01", "$lte": f"{period}-31"},
+            "status": {"$ne": CorrectionStatus.REJECTED.value},
+        })
+        if used >= int(cap):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{employee_code} has already used {used} of {cap} regularisation(s) "
+                       f"allowed for {period}.")
 
     year = datetime.now(timezone.utc).year
     req_no = await next_business_id("regularization", str(company_id), year)
     now = datetime.now(timezone.utc)
     doc = {
         "req_no": req_no,
+        "request_type": request_type or None,
         "company_id": str(company_id),
         "employee_code": employee_code,
         "employee_name": profile.get("display_name") or profile.get("full_name"),

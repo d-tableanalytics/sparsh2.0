@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
-import { saveSalaryComponent, simulateSalaryComponent } from '../../../services/hrmsApi';
+import React, { useEffect, useState } from 'react';
+import {
+  saveSalaryComponent, simulateSalaryComponent, listCalculationVariables,
+} from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
 import {
@@ -18,6 +20,46 @@ import {
  * past payrolls that paid it still read correctly. The server refuses a type change on a
  * component already paid, and a percentage chain that would depend on itself.
  */
+
+/**
+ * FRD §25 / §29 — every name a formula may use, grouped by where its value comes from.
+ *
+ * Grouped rather than one flat list because the groups answer different questions: "what
+ * is this person's situation this month" (attendance), "who are they" (employee), "what
+ * has been worked out already" (components). A flat list of thirty names answers none.
+ *
+ * Clicking appends the name, because the names are the part people get wrong — an unknown
+ * one is refused on save, and guessing is how that happens.
+ */
+const VariablePicker = ({ bases, vars, onPick }) => {
+  const groups = [
+    ['Earlier components', (bases || []).map((b) => b.code)],
+    ['Structure', vars?.built_in?.structure || []],
+    ['Attendance', vars?.built_in?.attendance || []],
+    ['Employee', vars?.built_in?.employee || []],
+    ['Company constants', (vars?.variables || []).map((v) => v.name)],
+  ].filter(([, names]) => names.length);
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      {groups.map(([label, names]) => (
+        <div key={label} className="flex flex-wrap items-baseline gap-1.5">
+          <span className="text-[11px] text-[var(--text-muted)] sm:min-w-[9rem]">{label}</span>
+          {names.map((n) => (
+            <button key={n} type="button" onClick={() => onPick(n)}
+              className="px-1.5 py-0.5 rounded border border-[var(--border)] text-[11px] font-mono text-[var(--text-main)]">
+              {n}
+            </button>
+          ))}
+        </div>
+      ))}
+      <p className="text-[11.5px] text-[var(--text-muted)] pt-0.5">
+        Plus + − × ÷, comparisons, AND / OR, and IF(condition, then, else), MIN, MAX,
+        ROUND, FLOOR, CEIL, ABS. Nothing else runs — an unknown name is refused on save.
+      </p>
+    </div>
+  );
+};
 
 export const ComponentList = ({ components, canManage, onEdit, onToggle, busyCode }) => {
   const sorted = [...components].sort((a, b) => (a.sequence ?? 100) - (b.sequence ?? 100)
@@ -86,6 +128,7 @@ export const ComponentEditorModal = ({
   component, components, scope, onClose, onDone, showSuccess, showError,
 }) => {
   const editing = !!component;
+  const [vars, setVars] = useState(null);
   const [form, setForm] = useState(() => ({
     code: component?.code || '',
     name: component?.name || '',
@@ -135,6 +178,15 @@ export const ComponentEditorModal = ({
   }));
   const code = form.code.trim().toUpperCase();
   const bases = components.filter((c) => c.code !== code);
+
+  useEffect(() => {
+    let alive = true;
+    listCalculationVariables(scope)
+      .then(({ data }) => { if (alive) setVars(data); })
+      .catch(() => { /* the picker is help, not a gate — the textarea still works */ });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = () => {
     if (!code || !form.name.trim()) { showError('Code and name are required.'); return; }
@@ -252,12 +304,13 @@ export const ComponentEditorModal = ({
         <div>
           <label className={LABEL} htmlFor="comp-formula">Formula *</label>
           <textarea id="comp-formula" rows={2} value={form.formula} className={`${TEXTAREA} font-mono`}
-            placeholder="IF(GROSS > 21000, 0, ROUND(GROSS * 0.0075, 0))" onChange={set('formula')} />
-          <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
-            Use component codes worked out earlier in the order ({bases.slice(0, 6).map((c) => c.code).join(', ')}
-            {bases.length > 6 ? ', …' : ''}), GROSS, CTC, MONTHLY_CTC; + − × ÷, comparisons, AND / OR, and
-            IF(condition, then, else), MIN, MAX, ROUND, FLOOR, CEIL, ABS. Nothing else runs.
-          </p>
+            placeholder="IF(PAYABLE_DAYS < 15, 0, 1500)" onChange={set('formula')} />
+          <VariablePicker bases={bases} vars={vars}
+            onPick={(name) => setForm((f) => ({
+              ...f,
+              formula: f.formula && !/[\s(]$/.test(f.formula)
+                ? `${f.formula} ${name}` : `${f.formula}${name}`,
+            }))} />
         </div>
       )}
       {isSlab && (

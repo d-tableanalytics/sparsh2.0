@@ -27,6 +27,22 @@ what the §-text asks · **MISSING** = no implementation exists.
 
 ### Implementation status on `MANOJ_PHASE1_CHNAGES`
 
+**Backlog completion (the W-items in section 3), verified 18 Oct:**
+
+| Item | State |
+|---|---|
+| W1 G1.1–G1.3, W2 G2.1–G2.4, W3 G3.1–G3.4 | Done |
+| W4 G4.1, G4.2, G4.4, G4.5, G4.6 | Done |
+| W4 G4.3 formula versioning | Done — version/effective dates/lifecycle come from the component; **approval** from routing `salary_component` through the §27 flow |
+| W5 G5.1 attendance + employee variables | Done |
+| W5 G5.2 `CALCULATION_VARIABLE` registry | Done — collection, CRUD, wired into formula validation and the run |
+| W5 G5.3 variable picker | Done — grouped picker in the Formula Designer |
+| W6 G6.1–G6.4 | Done |
+| W6 G6.5 attendance policy group master | **Already existed** before this work (`attendance_policy_groups` master list); the original audit flagged it in error |
+| W6 G6.6 OD/regularisation rules | Done — window, evidence, request types and a monthly cap, resolved through `ATT_REGULARISATION` |
+| W7–W11 | Done |
+
+
 | Step | Scope | Status |
 |---|---|---|
 | 0 | Branch + baseline | **Done** — baseline 82/82 on the Phase 1 suite |

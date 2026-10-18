@@ -25,6 +25,7 @@ import EmployeeSalaryStructure from './EmployeeSalaryStructure';
 import RunDetailModal from './RunDetail';
 import PayrollPolicyModal from './PayrollPolicy';
 import PayslipTemplateTab from './PayslipTemplate';
+import BankFileFormatTab from './BankFileFormat';
 import { ComponentList, ComponentEditorModal } from './ComponentEditor';
 import { runTone, componentPayload, errText, useSubmit } from './payrollKit';
 import { FIELD, LABEL, TEXTAREA, money, attLeaveToneFor } from '../internal/internalKit';
@@ -43,7 +44,7 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
  */
 
 const TABS = ['Payroll Runs', 'Salary Structure', 'Salary Advance', 'Variable Pay',
-  'My Payslip', 'Payslip Template'];
+  'My Payslip', 'Payslip Template', 'Bank File Format'];
 
 const EmployeePicker = ({ scope, value, onChange, placeholder }) => {
   const [search, setSearch] = useState('');
@@ -122,6 +123,8 @@ const PayrollBoard = () => {
     'Variable Pay': can(CAP.VARIABLE_PAY_READ),
     'My Payslip': can(CAP.PAYROLL_READ) && !reviewer,
     'Payslip Template': can(CAP.PAYROLL_PROCESS) || reviewer,
+    // FRD §13/§19 — the bank layout is configuration, so it takes a config capability.
+    'Bank File Format': can(CAP.CONFIG_READ) || can(CAP.PAYROLL_APPROVE),
   }[t] ?? true));
   // Derived rather than fixed at first render: the viewer's role arrives a moment after the
   // page mounts, and a tab chosen before then (e.g. before we know this is the MD) stuck.
@@ -167,6 +170,7 @@ const PayrollBoard = () => {
         <PayslipTemplateTab scope={scope} companyId={companyId} can={can}
           showSuccess={showSuccess} showError={showError} />
       )}
+      {tab === 'Bank File Format' && <BankFileFormatTab />}
     </div>
   );
 };

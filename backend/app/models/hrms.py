@@ -3464,6 +3464,13 @@ COLL_CONFIG_APPROVALS       = "hrms_config_approvals"
 # implementation answered it in code with one CSV. One row per named layout per company.
 COLL_BANK_FILE_FORMATS = "hrms_bank_file_formats"
 
+# ── Phase 1 FRD §25/§28 — CALCULATION_VARIABLE ──
+# A company-defined NAMED CONSTANT a formula may read: a PF wage ceiling, an ESI threshold,
+# a standard deduction. They belong here rather than inside each formula because the same
+# figure appears in several, and a statutory change should be ONE edit with one audit entry
+# rather than a hunt through every component that happens to mention 21000.
+COLL_CALCULATION_VARIABLES = "hrms_calculation_variables"
+
 MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
 BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -3786,7 +3793,14 @@ class ConfigChangeStatus(str, Enum):
 # so a later phase adds a kind by naming it here and giving it a handler in
 # hrms_config_change_service.ENTITY_HANDLERS -- the §27 machinery itself does not change.
 CONFIG_ENTITY_POLICY_VERSION = "policy_version"
-CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION,)
+# §25 Formula Versioning asks a formula to have "version, effective dates, status and
+# approval". The first three come from the component it lives on (ComponentLifecycle plus
+# effective_from/to, Step 6). The APPROVAL is this: a component change can be routed
+# through the §27 flow, so a formula revision is simulated, reviewed and approved before it
+# is active -- which is also §30's "Payroll can revise a formula through a new version,
+# simulate the impact and obtain approval before activation".
+CONFIG_ENTITY_SALARY_COMPONENT = "salary_component"
+CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
 
 AUDIT_CONFIG_REQUESTED = "configuration change requested"
 AUDIT_CONFIG_DECIDED   = "configuration change decided"
@@ -10358,6 +10372,8 @@ HRMS_INDEXES.extend([
      {"name": "by_request_decided"}),
     (COLL_BANK_FILE_FORMATS, [("company_id", 1), ("name", 1)],
      {"unique": True, "name": "uniq_bank_format_name"}),
+    (COLL_CALCULATION_VARIABLES, [("company_id", 1), ("name", 1)],
+     {"unique": True, "name": "uniq_calc_variable"}),
     (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
      {"name": "by_target_status"}),
     (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],

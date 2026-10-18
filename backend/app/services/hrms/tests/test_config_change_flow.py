@@ -50,6 +50,7 @@ APPROVER = {"_id": "fin-1", "role": "admin", "full_name": "Dummy Finance"}
 async def main() -> int:
     import app.db.mongodb as mongo
     from app.models import hrms as M
+    from bson import ObjectId
     import app.services.hrms_config_change_service as CC
     import app.services.hrms_id_service as ID
     import app.services.hrms_policy_version_service as PV
@@ -197,6 +198,43 @@ async def main() -> int:
 
     inbox = await CC.list_requests(CO, status="Pending Approval")
     check("the approval inbox is empty once everything is decided", inbox == [])
+
+    # -- 6. A salary component is governable too (FRD 25 Formula Versioning, 30) --
+    section("6. A formula change goes through the same flow (§25, §30)")
+
+    store.setdefault(M.COLL_SALARY_COMPONENTS, FakeCollection()).docs.append(
+        {"_id": ObjectId(), "company_id": CO, "code": "PF", "name": "PF",
+         "component_type": "Deduction",
+         "calculation_method": "Formula", "formula": "BASIC * 0.12", "version": 2,
+         "lifecycle": "Draft",
+         "history": [{"old": {"formula": "BASIC * 0.10"},
+                      "new": {"formula": "BASIC * 0.12"}}]})
+
+    comp = await CC.create_request(HR, CO, {
+        "entity_type": "salary_component", "entity_code": "PF",
+        "reason": "Statutory rate revision"})
+    check("a component change needs no version number -- it has its own counter",
+          comp["entity_code"] == "PF" and comp["version_no"] is None)
+
+    impact = (await CC.analyse_impact(HR, CO, comp["request_no"]))["impact"]
+    check("the impact reads the dependency service rather than re-deriving",
+          "references" in impact and "history" in impact)
+
+    await CC.submit(HR, CO, comp["request_no"])
+    await expect("the requester approving their own formula change",
+                 CC.decide(HR, CO, comp["request_no"], {"action": "approve"}),
+                 403, "someone else")
+    await CC.decide(APPROVER, CO, comp["request_no"], {"action": "approve"})
+    check("approved, and the component is still Draft until activation",
+          store[M.COLL_SALARY_COMPONENTS].docs[0]["lifecycle"] == "Draft")
+
+    done = await CC.activate(APPROVER, CO, comp["request_no"])
+    check("activation makes it Active -- 30's approval-before-activation",
+          store[M.COLL_SALARY_COMPONENTS].docs[0]["lifecycle"] == "Active")
+    change = done.get("definition_change") or {}
+    check("the audit records the old and new FORMULA, which is what a reader compares",
+          change.get("new", {}).get("formula") == "BASIC * 0.12"
+          and change.get("old", {}).get("formula") == "BASIC * 0.10")
 
     print("\n" + "=" * 60)
     print(f"  {sum(results)}/{len(results)} checks passed")

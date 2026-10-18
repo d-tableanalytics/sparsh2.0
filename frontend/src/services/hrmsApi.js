@@ -145,6 +145,13 @@ export const saveBankFileFormat = (payload, params) =>
   api.put('/hrms/config/bank-file-formats', payload, { params });
 export const previewBankFileFormat = (payload, params) =>
   api.post('/hrms/config/bank-file-formats/preview', payload, { params });
+/** FRD §25/§29 — every variable a formula may read, plus the company's own constants. */
+export const listCalculationVariables = (params) =>
+  api.get('/hrms/payroll/calculation-variables', { params });
+export const saveCalculationVariable = (payload, params) =>
+  api.put('/hrms/payroll/calculation-variables', payload, { params });
+export const deleteCalculationVariable = (name, params) =>
+  api.delete(`/hrms/payroll/calculation-variables/${name}`, { params });
 
 /** A short-lived signed link — re-fetch rather than caching the URL. */
 export const getEmployeePhotographUrl = (userId, params) =>
