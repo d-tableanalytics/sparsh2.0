@@ -3459,6 +3459,11 @@ COLL_POLICY_ASSIGNMENTS = "hrms_policy_assignments"
 COLL_CONFIG_CHANGE_REQUESTS = "hrms_config_change_requests"
 COLL_CONFIG_APPROVALS       = "hrms_config_approvals"
 
+# ── Phase 1 FRD §13/§19 — bank file layouts ──
+# §19 lists "bank-specific layout and mandatory fields" as an open decision; the previous
+# implementation answered it in code with one CSV. One row per named layout per company.
+COLL_BANK_FILE_FORMATS = "hrms_bank_file_formats"
+
 MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
 BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -10351,6 +10356,8 @@ HRMS_INDEXES.extend([
      {"name": "by_status_created"}),
     (COLL_CONFIG_APPROVALS, [("company_id", 1), ("request_no", 1), ("decided_at", -1)],
      {"name": "by_request_decided"}),
+    (COLL_BANK_FILE_FORMATS, [("company_id", 1), ("name", 1)],
+     {"unique": True, "name": "uniq_bank_format_name"}),
     (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
      {"name": "by_target_status"}),
     (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],

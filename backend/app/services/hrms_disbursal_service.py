@@ -182,34 +182,39 @@ async def get_batch(actor: dict, company_id: str, batch_no: str) -> dict:
     return out
 
 
-async def bank_file(actor: dict, company_id: str, batch_no: str) -> tuple:
+async def bank_file(actor: dict, company_id: str, batch_no: str,
+                    format_name: Optional[str] = None) -> tuple:
     """The bank upload / advice file. Full account numbers appear ONLY here, for the user
-    holding payroll approval, and every download is audited (FRD §13, §18)."""
+    holding payroll approval, and every download is audited (FRD §13, §18).
+
+    The LAYOUT comes from a configurable format (FRD §19), not from this function. A
+    company that has configured none gets the DEFAULT format, which reproduces the previous
+    hard-coded output byte for byte — downstream tooling built on the old shape keeps
+    working. The format and its version are recorded on the batch, so a file can be
+    explained months after it was sent.
+    """
+    from app.services import hrms_bank_format_service as BF
     batch = await get_batch(actor, company_id, batch_no)
     rows = await get_collection(COLL_PAYMENTS).find(
         {"company_id": str(company_id), "batch_no": batch_no}).sort(
         "employee_code", 1).to_list(5000)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["Batch No", "Payroll Period", "Employee ID", "Beneficiary Name",
-                     "Account Number", "IFSC", "Bank", "Branch", "Account Type", "Amount",
-                     "Payment Mode", "Narration"])
-    for r in rows:
-        writer.writerow([batch_no, r["period"], r["employee_code"], r.get("account_holder"),
-                         r.get("bank_account"), r.get("bank_ifsc"), r.get("bank_name"),
-                         r.get("bank_branch"), r.get("bank_account_type"),
-                         f"{float(r['amount']):.2f}", r.get("payment_mode"),
-                         f"Salary {r['period']}"])
-    writer.writerow([])
-    writer.writerow(["Total", "", "", "", "", "", "", "", "", f"{batch['total_amount']:.2f}",
-                     "", f"{batch['employee_count']} payment(s)"])
+
+    fmt = await BF.get_format(company_id, format_name or batch.get("bank_format"))
     now = datetime.now(timezone.utc)
+    content = BF.render(fmt, rows, {
+        "batch_no": batch_no,
+        "generated_date": now.strftime("%Y-%m-%d"),
+        "period": batch.get("period"),
+    })
+    extension = "txt" if fmt.get("fixed_width") else "csv"
     await get_collection(COLL_PAYMENT_BATCHES).update_one(
         {"company_id": str(company_id), "batch_no": batch_no},
         {"$set": {"file_downloaded_at": now, "file_downloaded_by": _actor_id(actor),
-                  "updated_at": now}})
-    await audit(actor, AUDIT_PAYMENT_FILE, ENTITY_PAYMENT_BATCH, batch_no, None, company_id)
-    return f"{batch_no}_{batch['period']}.csv", buf.getvalue()
+                  "bank_format": fmt.get("name"),
+                  "bank_format_version": fmt.get("version"), "updated_at": now}})
+    await audit(actor, AUDIT_PAYMENT_FILE, ENTITY_PAYMENT_BATCH, batch_no,
+                fmt.get("name"), company_id)
+    return f"{batch_no}_{batch['period']}.{extension}", content
 
 
 def _clean_status(payload: dict) -> dict:

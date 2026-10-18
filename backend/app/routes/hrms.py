@@ -6522,6 +6522,7 @@ from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
 from app.services import hrms_policy_version_service as policy_versions  # noqa: E402
 from app.services import hrms_config_change_service as config_changes  # noqa: E402
 from app.services import hrms_attendance_simulation_service as att_sim  # noqa: E402
+from app.services import hrms_bank_format_service as bank_formats  # noqa: E402
 
 
 # ── Employee Master ──
@@ -6887,13 +6888,14 @@ async def get_payment_batch(
 @router.get("/payment-batches/{batch_no}/bank-file")
 async def download_bank_file(
     batch_no: str,
+    format_name: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     """The bank upload / advice file -- the one place full account numbers leave HRMS."""
     _require(current_user, Cap.PAYROLL_APPROVE)
     name, text = await disbursal_mgmt.bank_file(
-        current_user, _company(current_user, company_id), batch_no)
+        current_user, _company(current_user, company_id), batch_no, format_name)
     return _Response(content=text, media_type="text/csv",
                      headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
@@ -7199,3 +7201,49 @@ async def simulate_attendance_policy(
         _company(current_user, company_id), period,
         version_no=version_no, employee_codes=codes,
         policy_code=policy_code.upper())
+
+
+# ── Bank file formats (FRD §13, §19) ──
+@router.get("/config/bank-file-formats")
+async def list_bank_file_formats(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's bank layouts. DEFAULT is always present — it reproduces the original
+    hard-coded output, so a company that has configured nothing still has one."""
+    _require(current_user, Cap.CONFIG_READ)
+    return await bank_formats.list_formats(_company(current_user, company_id))
+
+
+@router.put("/config/bank-file-formats")
+async def save_bank_file_format(
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await bank_formats.save_format(
+        current_user, _company(current_user, company_id), body or {})
+
+
+@router.delete("/config/bank-file-formats/{name}")
+async def delete_bank_file_format(
+    name: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await bank_formats.delete_format(
+        current_user, _company(current_user, company_id), name)
+
+
+@router.post("/config/bank-file-formats/preview")
+async def preview_bank_file_format(
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Two sample rows through the real renderer. Writes nothing — §19's "mandatory fields"
+    question is easier to answer against output than against a column list."""
+    _require(current_user, Cap.CONFIG_READ)
+    return bank_formats.preview(body or {})

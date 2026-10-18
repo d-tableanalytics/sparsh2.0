@@ -40,7 +40,7 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 7 | Formula variables (§25) | **Done** — attendance + employee-field variables, period-dependent formulas re-priced per period, formula/slab stamped on every result line |
 | 8 | Payroll policy versioning (§21) | **Done** — PAY_POLICY on the spine, runs read the policy as at their own period end and record the version |
 | 9 | Attendance snapshot (§8, §18) | **Done** — per-day basis frozen onto each record, lock identity on the run, submit refused when the basis moved, stale banner |
-| 10 | Configurable bank file | Not started |
+| 10 | Configurable bank file (§13, §19) | **Done** — named formats per company, column designer, fixed-width/delimited, amount + date conventions, header/trailer records, live preview; DEFAULT reproduces the old output byte for byte |
 | 11 | Impact + config audit viewers | Not started |
 
 Phase 1 suite now **92/92**, attendance policy suite **27/27**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
