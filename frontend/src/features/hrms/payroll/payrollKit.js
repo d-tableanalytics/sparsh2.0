@@ -129,7 +129,25 @@ export const parseBankResponse = (text) => String(text || '')
 export const COMPONENT_TYPES = [
   'Earning', 'Deduction', 'Employer Contribution', 'Reimbursement', 'Recovery', 'Informational',
 ];
-export const METHODS = ['Fixed', 'Percentage', 'Formula', 'Slab', 'Manual Input'];
+export const METHODS = [
+  'Fixed', 'Percentage', 'Formula', 'Slab', 'Manual Input', 'Imported Input',
+  'Attendance Linked',
+];
+/** FRD §24 Proration — the four rules differ in their DENOMINATOR, not just on/off. */
+export const PRORATION = [
+  ['', 'Default for the type'],
+  ['Payable Days', 'Payable days ÷ calendar days'],
+  ['Working Days', 'Payable working days ÷ working days'],
+  ['Full Month', 'Full month, even for a joiner'],
+  ['None', 'No proration'],
+];
+/** FRD §24 Lifecycle. Only Active is paid. */
+export const LIFECYCLE = ['Draft', 'Approved', 'Active', 'Superseded', 'Retired'];
+/** What an attendance-linked component multiplies its rate by. */
+export const ATTENDANCE_BASES = [
+  'payable_days', 'present_days', 'lop_days', 'working_days',
+  'weekly_off_days', 'holiday_days', 'leave_days',
+];
 export const SECTIONS = ['Regular Earnings', 'Other Earnings', 'Deductions', 'Employer Contribution', 'Hidden'];
 export const ROUNDING = ['None', 'Nearest', 'Floor', 'Ceiling'];
 export const FREQUENCIES = ['Monthly', 'One-time', 'Quarterly', 'Annual', 'Ad hoc'];
@@ -181,6 +199,17 @@ export const componentPayload = (c) => {
     frequency: c.frequency || null,
     accounting_code: (c.accounting_code || '').trim() || null,
     description: (c.description || '').trim() || null,
+    // ── FRD §24 Lifecycle and Applicability ──
+    lifecycle: c.lifecycle || null,
+    effective_from: c.effective_from || null,
+    effective_to: c.effective_to || null,
+    applicability: Object.fromEntries(
+      Object.entries(c.applicability || {})
+        .map(([k, v]) => [k, String(v || '').split(',').map((x) => x.trim()).filter(Boolean)])
+        .filter(([, v]) => v.length)),
+    attendance_basis: c.calculation_method === 'Attendance Linked'
+      ? (c.attendance_basis || 'payable_days') : null,
+    rate: c.calculation_method === 'Attendance Linked' ? num(c.rate) : null,
   };
 };
 

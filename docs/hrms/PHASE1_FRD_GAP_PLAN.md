@@ -36,9 +36,9 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 3 | Config change approval flow (§27, §30) | **Done** — request/impact/simulate/submit/decide/activate, `config.*` gates, Approval Inbox screen, 29-check suite |
 | 4 | Attendance policy migration + designer (§23) | **Done** — ATT_DAY/ATT_REGULARISATION/ATT_CLOSURE on the spine, configurable half-day combination + LOP fraction, cut-off enforced, Policy Designer screen |
 | 5 | Attendance simulation (§23, §25) | **Done** — re-judges recorded punches under a draft, old-vs-proposed comparison, writes nothing; built into the designer |
-| 6 | Component lifecycle & proration | Not started |
-| 7 | Formula variables & versioning | Not started |
-| 8 | Payroll policy versioning | Not started |
+| 6 | Component lifecycle & proration (§24) | **Done** — Draft/Approved/Active/Superseded/Retired, applicability scope, four proration rules, frequency enforced, Imported + Attendance-Linked methods |
+| 7 | Formula variables (§25) | **Done** — attendance + employee-field variables, period-dependent formulas re-priced per period, formula/slab stamped on every result line |
+| 8 | Payroll policy versioning (§21) | **Done** — PAY_POLICY on the spine, runs read the policy as at their own period end and record the version |
 | 9 | Attendance snapshot (§8, §18) | **Done** — per-day basis frozen onto each record, lock identity on the run, submit refused when the basis moved, stale banner |
 | 10 | Configurable bank file | Not started |
 | 11 | Impact + config audit viewers | Not started |

@@ -11,10 +11,23 @@ Language
   and the functions IF(condition, then, else), MIN(...), MAX(...), ROUND(x[, digits]),
   FLOOR(x), CEIL(x), ABS(x).
 Variables (upper case)
-  any component code already worked out earlier in the structure (by sequence), GROSS
-  (the earnings resolved so far), CTC (annual) and MONTHLY_CTC.
+  * any component code already worked out earlier in the structure (by sequence)
+  * GROSS (the earnings resolved so far), CTC (annual), MONTHLY_CTC
+  * ATTENDANCE (§25 "attendance/payable days/LOP"): PAYABLE_DAYS, LOP_DAYS, PRESENT_DAYS,
+    WORKING_DAYS, CALENDAR_DAYS, LOP_RATIO, PAYABLE_RATIO
+  * EMPLOYEE FIELDS (§25 "Employee fields"): EMP_GRADE, EMP_LEVEL, EMP_LOCATION,
+    EMP_CATEGORY, EMP_DEPARTMENT, EMP_PAYROLL_GROUP, EMP_SERVICE_MONTHS
+  * CONSTANTS a company defines (§28 CALCULATION_VARIABLE), supplied by the caller
 
-Example: IF(BASIC > 21000, 0, ROUND(GROSS * 0.0075, 0))
+Examples
+  IF(BASIC > 21000, 0, ROUND(GROSS * 0.0075, 0))
+  IF(PAYABLE_DAYS < 15, 0, 1500)                     -- a full-attendance allowance
+  ROUND(BASIC / CALENDAR_DAYS * LOP_DAYS, 0)         -- an explicit LOP recovery
+
+An employee-field variable is a NUMBER or 0: the engine does arithmetic, not string
+comparison, so EMP_GRADE is the grade's numeric suffix where it has one (M3 -> 3) and 0
+otherwise. Comparing grades as text is what APPLICABILITY is for, and doing it in a formula
+instead would be a second, weaker way to express the same thing.
 
 A SLAB table maps a base value onto an amount: [{"upto": 7500, "amount": 0},
 {"upto": 10000, "amount": 175}, {"upto": null, "amount": 200}] -- the first row whose
@@ -27,7 +40,15 @@ import re
 
 from fastapi import HTTPException
 
-BUILT_INS = {"GROSS", "CTC", "MONTHLY_CTC"}
+# §25 Variables. Kept as three named sets rather than one blob because they come from
+# three different places at evaluation time, and a reader debugging "why is this zero"
+# needs to know which.
+STRUCTURE_VARS  = {"GROSS", "CTC", "MONTHLY_CTC"}
+ATTENDANCE_VARS = {"PAYABLE_DAYS", "LOP_DAYS", "PRESENT_DAYS", "WORKING_DAYS",
+                   "CALENDAR_DAYS", "LOP_RATIO", "PAYABLE_RATIO"}
+EMPLOYEE_VARS   = {"EMP_GRADE", "EMP_LEVEL", "EMP_LOCATION", "EMP_CATEGORY",
+                   "EMP_DEPARTMENT", "EMP_PAYROLL_GROUP", "EMP_SERVICE_MONTHS"}
+BUILT_INS = STRUCTURE_VARS | ATTENDANCE_VARS | EMPLOYEE_VARS
 FUNCTIONS = {
     "IF": None,                                   # evaluated lazily, see _eval
     "MIN": lambda *a: min(a),
@@ -96,15 +117,71 @@ def references(expr: str) -> set:
             if isinstance(n, ast.Name) and id(n) not in funcs}
 
 
-def validate(expr: str, known_codes: set) -> set:
-    """Parse and check every variable exists. Returns the referenced variables."""
+def validate(expr: str, known_codes: set, constants: set = None) -> set:
+    """Parse and check every variable exists. Returns the referenced variables.
+
+    Refusing an unknown name HERE, when the formula is saved, is what makes adding
+    variables safe: no formula already stored can reference one that did not exist when it
+    was written, so widening BUILT_INS can never change an existing result.
+    """
     refs = references(expr)
-    unknown = sorted(r for r in refs if r not in BUILT_INS and r not in known_codes)
+    allowed = BUILT_INS | set(known_codes) | set(constants or ())
+    unknown = sorted(r for r in refs if r not in allowed)
     if unknown:
-        raise HTTPException(status_code=422,
-                            detail=f"Unknown name(s) in the formula: {', '.join(unknown)}. Use "
-                                   f"component codes, GROSS, CTC or MONTHLY_CTC.")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown name(s) in the formula: {', '.join(unknown)}. Use component "
+                   f"codes, a company constant, or one of: "
+                   f"{', '.join(sorted(BUILT_INS))}.")
     return refs
+
+
+def _numeric_suffix(value) -> float:
+    """The number in a code like "M3" or "L-2", or 0. See the module docstring for why an
+    employee field is a number here rather than a string."""
+    import re as _re
+    match = _re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
+    return float(match.group(1)) if match else 0.0
+
+
+def employee_variables(profile: dict, period_end: str = None) -> dict:
+    """The EMP_* half of a formula's environment (§25 "Employee fields")."""
+    profile = profile or {}
+    out = {
+        "EMP_GRADE": _numeric_suffix(profile.get("grade")),
+        "EMP_LEVEL": _numeric_suffix(profile.get("level")),
+        "EMP_LOCATION": _numeric_suffix(profile.get("work_location")),
+        "EMP_CATEGORY": _numeric_suffix(profile.get("employee_category")),
+        "EMP_DEPARTMENT": _numeric_suffix(profile.get("department_id")),
+        "EMP_PAYROLL_GROUP": _numeric_suffix(profile.get("payroll_group")),
+        "EMP_SERVICE_MONTHS": 0.0,
+    }
+    joined, end = profile.get("joined_on"), period_end
+    if joined and end and len(str(joined)) >= 7 and len(str(end)) >= 7:
+        try:
+            out["EMP_SERVICE_MONTHS"] = float(
+                (int(end[:4]) - int(joined[:4])) * 12 + (int(end[5:7]) - int(joined[5:7])))
+        except (ValueError, IndexError):
+            pass
+    return out
+
+
+def attendance_variables(days: dict) -> dict:
+    """The attendance half (§25 "attendance/payable days/LOP"), from the frozen basis the
+    run already computed -- never re-derived, so a formula and the payable-days arithmetic
+    can never disagree."""
+    days = days or {}
+    calendar = float(days.get("days_in_period") or 0)
+    payable = float(days.get("payable_days") or 0)
+    return {
+        "PAYABLE_DAYS": payable,
+        "LOP_DAYS": float(days.get("lop_days") or 0),
+        "PRESENT_DAYS": float(days.get("present_days") or 0),
+        "WORKING_DAYS": float(days.get("working_days") or 0),
+        "CALENDAR_DAYS": calendar,
+        "LOP_RATIO": (float(days.get("lop_days") or 0) / calendar) if calendar else 0.0,
+        "PAYABLE_RATIO": (payable / calendar) if calendar else 0.0,
+    }
 
 
 def evaluate(expr: str, variables: dict) -> float:

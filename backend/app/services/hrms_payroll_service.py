@@ -122,9 +122,25 @@ async def _get_profile(company_id: str, employee_code: str) -> dict:
 # ─────────────────────────────────────────────────────────────
 # Payroll policy (FRD §19, §24)
 # ─────────────────────────────────────────────────────────────
-async def get_payroll_policy(company_id: str) -> dict:
+async def get_payroll_policy(company_id: str, *, profile: Optional[dict] = None,
+                             on_date: Optional[str] = None) -> dict:
+    """The payroll policy in force.
+
+    §21 asks for payroll policy to be versioned ("Change payroll cut-off, eligibility,
+    component applicability, rounding and approval controls WITH VERSIONING"). The stored
+    settings dict is the base; a PAY_POLICY version in force on `on_date` for this
+    employee lays over it.
+
+    `on_date` is the point of the whole thing: a run for February must read February's
+    policy even if HR changed the cut-off in March. Callers that pass nothing get today's,
+    which is what every existing caller wants and what they already got.
+    """
     doc = await get_collection(COLL_SETTINGS).find_one({"company_id": str(company_id)})
-    return {**DEFAULT_PAYROLL_POLICY, **((doc or {}).get("payroll_policy") or {})}
+    base = {**DEFAULT_PAYROLL_POLICY, **((doc or {}).get("payroll_policy") or {})}
+    from app.models.hrms import POLICY_PAY_POLICY
+    from app.services import hrms_policy_version_service as PV
+    return await PV.resolve_rules(company_id, POLICY_PAY_POLICY, profile or {}, on_date,
+                                  default=base)
 
 
 async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> dict:
@@ -247,6 +263,46 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
         if loop:
             raise HTTPException(status_code=422,
                                 detail=f"{code} would depend on itself: {' -> '.join(loop)}.")
+    # ── §24 Lifecycle, Applicability, Frequency, Attendance Linked ──
+    if clean.get("lifecycle") is not None:
+        from app.models.hrms import ComponentLifecycle
+        allowed = {l.value for l in ComponentLifecycle}
+        if clean["lifecycle"] not in allowed:
+            raise HTTPException(status_code=422,
+                                detail=f"Lifecycle must be one of: {', '.join(sorted(allowed))}.")
+    if clean.get("frequency") is not None:
+        from app.models.hrms import COMPONENT_FREQUENCIES
+        if clean["frequency"] not in COMPONENT_FREQUENCIES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Frequency must be one of: {', '.join(COMPONENT_FREQUENCIES)}.")
+    for key in ("effective_from", "effective_to"):
+        if clean.get(key) and not is_iso_date(str(clean[key])):
+            raise HTTPException(status_code=422,
+                                detail=f"{key.replace('_', ' ').capitalize()} must be a date "
+                                       f"(YYYY-MM-DD).")
+    if clean.get("effective_from") and clean.get("effective_to") \
+            and clean["effective_to"] < clean["effective_from"]:
+        raise HTTPException(status_code=422, detail="Effective to is before effective from.")
+    if clean.get("applicability") is not None:
+        from app.services.hrms_policy_version_service import _clean_scope
+        clean["applicability"] = _clean_scope(clean["applicability"])
+    if method == CalculationMethod.ATTENDANCE_LINKED.value:
+        basis = str(clean.get("attendance_basis") or "payable_days")
+        allowed_basis = ("payable_days", "present_days", "lop_days", "working_days",
+                         "weekly_off_days", "holiday_days", "leave_days")
+        if basis not in allowed_basis:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Attendance basis must be one of: {', '.join(allowed_basis)}.")
+        clean["attendance_basis"] = basis
+        if clean.get("rate") is None:
+            raise HTTPException(status_code=422,
+                                detail="An attendance-linked component needs a rate — the "
+                                       "amount earned per day.")
+        if float(clean["rate"]) < 0:
+            raise HTTPException(status_code=422, detail="The rate cannot be negative.")
+
     clean.pop("change_reason", None)
     for key in ("min_amount", "max_amount"):
         if clean.get(key) is not None and float(clean[key]) < 0:
@@ -294,7 +350,9 @@ async def list_salary_components(actor: dict, company_id: str) -> list:
 # ─────────────────────────────────────────────────────────────
 # FRD §9 — effective-dated salary structure
 # ─────────────────────────────────────────────────────────────
-def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None) -> list:
+def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None,
+                  days: Optional[dict] = None, profile: Optional[dict] = None,
+                  period_end: Optional[str] = None, constants: Optional[dict] = None) -> list:
     """Turn the entered lines into monthly amounts, in sequence order.
 
     A Percentage line is computed from its base: another component already resolved, GROSS
@@ -313,7 +371,9 @@ def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None
             pct = m.get("percentage")
         base_code = m.get("calculation_base")
         if method in (CalculationMethod.FORMULA.value, CalculationMethod.SLAB.value):
-            amount = _formula_or_slab(m, code, resolved, meta, lines, annual_ctc)
+            amount = _formula_or_slab(m, code, resolved, meta, lines, annual_ctc,
+                                  days=days, profile=profile, period_end=period_end,
+                                  constants=constants)
         elif method == CalculationMethod.PERCENTAGE.value and pct is not None:
             if base_code == "GROSS":
                 base_amount = sum(v for c, v in resolved.items()
@@ -352,12 +412,18 @@ def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None
                                                     CalculationMethod.SLAB.value) else None,
                     "formula": m.get("formula") if method == CalculationMethod.FORMULA.value
                     else None,
+                    # §25 Audit / §30 reproducibility: the component version alone is not
+                    # enough to reproduce a line -- the same version number means nothing
+                    # once the component master has been edited. The slab table and the
+                    # formula TEXT that actually produced this amount travel with it.
+                    "slabs": m.get("slabs") if method == CalculationMethod.SLAB.value else None,
                     "component_version": m.get("version")})
     return out
 
 
 def _formula_or_slab(m: dict, code: str, resolved: dict, meta: dict, lines: list,
-                     annual_ctc) -> float:
+                     annual_ctc, *, days=None, profile=None, period_end=None,
+                     constants=None) -> float:
     """A Formula or Slab line, from what is already resolved. A variable that IS in this
     structure but comes later in the sequence is refused (that is how loops stay out);
     one that is not in the structure at all counts as 0."""
@@ -365,8 +431,13 @@ def _formula_or_slab(m: dict, code: str, resolved: dict, meta: dict, lines: list
     in_structure = {l["code"] for l in lines}
     gross = sum(v for c, v in resolved.items()
                 if (meta.get(c) or {}).get("component_type") == ComponentType.EARNING.value)
+    # §25 Variables. The attendance figures come from the basis the run already froze
+    # (never re-derived here), so a formula and the payable-days arithmetic cannot disagree.
     env = {**resolved, "GROSS": gross, "CTC": float(annual_ctc or 0),
-           "MONTHLY_CTC": float(annual_ctc or 0) / 12.0}
+           "MONTHLY_CTC": float(annual_ctc or 0) / 12.0,
+           **FE.attendance_variables(days or {}),
+           **FE.employee_variables(profile or {}, period_end),
+           **{str(k).upper(): float(v or 0) for k, v in (constants or {}).items()}}
     name = m.get("name") or code
     needed = FE.dependencies(m)
     late = sorted(d for d in needed if d in in_structure and d not in resolved)
@@ -393,6 +464,18 @@ def _structure_totals(lines: list, meta: dict) -> dict:
     return {"monthly_gross": round(gross, 2), "monthly_deductions": round(deductions, 2),
             "monthly_employer_contributions": round(employer, 2),
             "monthly_net": round(gross - deductions, 2)}
+
+
+async def _policy_version_ref(company_id: str, on_date: str) -> Optional[dict]:
+    """Which PAY_POLICY version a run consumed, or None where the company runs on its
+    stored settings. Stamped on the run for §30 reproducibility."""
+    from app.models.hrms import POLICY_PAY_POLICY
+    from app.services import hrms_policy_version_service as PV
+    version = await PV.resolve(company_id, POLICY_PAY_POLICY, {}, on_date)
+    if not version:
+        return None
+    return {"policy_code": POLICY_PAY_POLICY, "version_no": version.get("version_no"),
+            "effective_from": version.get("effective_from")}
 
 
 async def _last_final_period(company_id: str) -> Optional[str]:
@@ -854,19 +937,169 @@ async def _eligible_profiles(company_id: str, start: str, end: str) -> list:
     return out
 
 
-def _component_lines(structure: Optional[dict], meta: dict, ratio: float) -> list:
-    """The record's component lines: full monthly amount and what is paid this month."""
+def _proration_ratio(rule: str, days: dict, ratio: float) -> float:
+    """What fraction of a component is earned this period (FRD §24 Proration).
+
+    The rules differ in their DENOMINATOR, which is the whole point: a conveyance
+    allowance that only accrues on days worked is underpaid by a calendar-day divisor in a
+    month with five Sundays, and overpaid by it in a month with four.
+    """
+    if rule == ProrationRule.PAYABLE_DAYS.value:
+        return ratio
+    if rule == ProrationRule.WORKING_DAYS.value:
+        working = float(days.get("working_days") or 0)
+        if working <= 0:
+            # No working-day count on the calendar (an unconfigured holiday calendar, say).
+            # Falling back to the payable-days ratio is the conservative answer: it is what
+            # the component would have paid before this rule existed.
+            return ratio
+        off = float(days.get("weekly_off_days") or 0) + float(days.get("holiday_days") or 0)
+        payable_working = max(0.0, float(days.get("payable_days") or 0) - off)
+        return min(1.0, payable_working / working)
+    # FULL_MONTH and NONE both pay in full; see the enum for why they are separate names.
+    return 1.0
+
+
+def _applies_to(component: dict, profile: dict, period_end: str) -> bool:
+    """§24 Applicability -- whether a component is live for THIS employee in THIS period.
+
+    Three gates, cheapest first:
+      * lifecycle  -- only an Active component is paid. A Draft or Approved one is
+                      configuration somebody is still working on.
+      * dates      -- effective_from/to, compared against the period END (a component
+                      effective mid-month is earned that month).
+      * scope      -- the same specificity match policies use, so "applies to this person"
+                      means one thing across the module.
+    """
+    from app.models.hrms import COMPONENT_PAYABLE_LIFECYCLE
+    from app.services.hrms_policy_version_service import specificity
+
+    lifecycle = component.get("lifecycle")
+    if lifecycle is not None and lifecycle not in COMPONENT_PAYABLE_LIFECYCLE:
+        return False
+    # Components predating §24 carry no lifecycle at all; `active` is their switch and
+    # must keep working exactly as it did.
+    if lifecycle is None and component.get("active") is False:
+        return False
+    if component.get("effective_from") and component["effective_from"] > period_end:
+        return False
+    if component.get("effective_to") and component["effective_to"] < period_end:
+        return False
+    scope = component.get("applicability") or {}
+    return not scope or specificity(scope, profile or {}) >= 0
+
+
+def _due_this_period(component: dict, period: str) -> bool:
+    """§24 Frequency. A quarterly or annual component is not earned every month.
+
+    Anchored on the component's own effective_from where it has one, so "quarterly" means
+    quarterly FROM WHEN IT STARTED rather than from an arbitrary calendar quarter the
+    company never chose. One-time and Ad hoc are never paid automatically: somebody adds
+    them to the run as an adjustment, which is what makes them one-time.
+    """
+    freq = (component.get("frequency") or "Monthly").strip()
+    if freq in ("", "Monthly"):
+        return True
+    if freq in ("One-time", "Ad hoc"):
+        return False
+    anchor = str(component.get("effective_from") or "")[:7] or period
+    try:
+        months = ((int(period[:4]) - int(anchor[:4])) * 12
+                  + (int(period[5:7]) - int(anchor[5:7])))
+    except (ValueError, IndexError):
+        return True
+    if months < 0:
+        return False
+    if freq == "Quarterly":
+        return months % 3 == 0
+    if freq == "Annual":
+        return months % 12 == 0
+    return True
+
+
+def _period_dependent(component: dict) -> bool:
+    """Does this component's formula read something only a PERIOD can answer?
+
+    A salary structure stores each component's monthly amount, resolved when the structure
+    was approved. That is right for almost everything -- a percentage of Basic does not
+    change between January and February, and re-deriving it at payroll time would quietly
+    bypass the structure approval §9 requires.
+
+    It is wrong for exactly one case: a formula reading PAYABLE_DAYS, LOP_DAYS or an EMP_*
+    field. There is no attendance at structure-approval time, so such a formula would have
+    been stored as whatever it evaluates to against zeros -- and would stay that number
+    for ever, for everybody. Those components, and only those, are re-priced per period.
+    """
+    from app.services import hrms_formula_engine as FE
+    if component.get("calculation_method") != CalculationMethod.FORMULA.value:
+        return False
+    try:
+        refs = FE.references(component.get("formula") or "0")
+    except HTTPException:
+        return False
+    return bool(refs & (FE.ATTENDANCE_VARS | FE.EMPLOYEE_VARS))
+
+
+def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
+                        profile: dict, period_end: str) -> Optional[dict]:
+    """The structure with its period-dependent formulas evaluated for THIS period.
+
+    Returns the structure untouched when nothing depends on the period, which is the
+    overwhelmingly common case and means this phase changes no existing company's figures.
+    """
+    components = (structure or {}).get("components") or []
+    if not any(_period_dependent(meta.get(c.get("code")) or {}) for c in components):
+        return structure
+    lines = [{"code": c.get("code"), "amount": c.get("amount") or 0,
+              "percentage": c.get("percentage_override") or c.get("percentage")}
+             for c in components]
+    resolved = resolve_lines(lines, meta, annual_ctc=(structure or {}).get("annual_ctc"),
+                             days=days, profile=profile, period_end=period_end)
+    fresh = {r["code"]: r["amount"] for r in resolved}
+    return {**structure,
+            "components": [
+                {**c, "amount": fresh.get(c.get("code"), c.get("amount"))}
+                if _period_dependent(meta.get(c.get("code")) or {}) else c
+                for c in components]}
+
+
+def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
+                     days: Optional[dict] = None, profile: Optional[dict] = None,
+                     period: Optional[str] = None,
+                     period_end: Optional[str] = None) -> list:
+    """The record's component lines: full monthly amount and what is paid this month.
+
+    The keyword arguments are all optional so every existing caller keeps working; without
+    them the function behaves exactly as it did before §24 -- payable-days proration, no
+    applicability test, no frequency test.
+    """
+    days = days or {}
     lines = []
     for c in (structure or {}).get("components", []):
         m = component_defaults(meta.get(c.get("code")) or {})
         ctype = m.get("component_type") or ComponentType.EARNING.value
+
+        if period_end and not _applies_to(m, profile or {}, period_end):
+            continue
+        if period and not _due_this_period(m, period):
+            continue
+
         full = float(c.get("amount") or 0)
-        prorate = m["proration"] == ProrationRule.PAYABLE_DAYS.value
-        paid = _round(full * ratio, m["rounding"]) if prorate else full
+        # §24 Attendance Linked: a rate times a quantity off the frozen attendance basis.
+        if m.get("calculation_method") == CalculationMethod.ATTENDANCE_LINKED.value:
+            basis_key = str(m.get("attendance_basis") or "payable_days")
+            quantity = float(days.get(basis_key) or 0)
+            full = round(float(m.get("rate") or c.get("amount") or 0) * quantity, 2)
+
+        share = _proration_ratio(m["proration"], days, ratio)
+        prorate = share != 1.0 or m["proration"] in (ProrationRule.PAYABLE_DAYS.value,
+                                                     ProrationRule.WORKING_DAYS.value)
+        paid = _round(full * share, m["rounding"]) if prorate else full
         lines.append({"code": c.get("code"), "name": m.get("name") or c.get("code"),
                       "component_type": ctype, "section": m["payslip_section"],
                       "full_amount": round(full, 2), "amount": round(paid, 2),
                       "prorated": prorate and round(paid, 2) != round(full, 2),
+                      "proration": m["proration"], "frequency": m.get("frequency"),
                       "component_version": m.get("version")})
     return lines
 
@@ -879,7 +1112,9 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     run = await _get_run(company_id, period)
     _assert_editable(run)
     _y, _m, _days, start, end = _period_bounds(period)
-    policy = await get_payroll_policy(company_id)
+    # §21: the policy as at the END OF THIS PERIOD, not as at today. A February run must
+    # read February's cut-off and rounding even if HR revised them in March.
+    policy = await get_payroll_policy(company_id, on_date=end)
 
     # FRD §18: payroll uses the LOCKED attendance snapshot, never live editable attendance.
     lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
@@ -931,7 +1166,9 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         days = await _payable_days(company_id, employee_code, period, profile, calendar,
                                    sandwich=bool(policy.get("sandwich_weekly_off")))
         ratio = (days["payable_days"] / days["days_in_period"]) if days["days_in_period"] else 0
-        lines = _component_lines(structure, meta, ratio)
+        structure = _reprice_for_period(structure, meta, days, profile, end)
+        lines = _component_lines(structure, meta, ratio, days=days, profile=profile,
+                                 period=period, period_end=end)
 
         gross_structured = round(sum(l["full_amount"] for l in lines
                                      if l["component_type"] == ComponentType.EARNING.value), 2)
@@ -1025,7 +1262,9 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         {"_id": run["_id"]},
         {"$set": {"status": PayrollRunStatus.CALCULATED.value, "eligible_count": len(profiles),
                   "calculated_at": now, "updated_at": now, "totals": totals,
-                  "attendance_basis": attendance_basis_ref},
+                  "attendance_basis": attendance_basis_ref,
+                  # §30: enough rule references to reproduce this run later.
+                  "payroll_policy_version": (await _policy_version_ref(company_id, end))},
          "$push": {"approval_trail": _trail(actor, "Maker", "Calculated",
                                             f"{len(profiles)} employee(s)")}},
     )

@@ -3673,6 +3673,12 @@ POLICY_ATT_CLOSURE        = "ATT_CLOSURE"
 
 ATTENDANCE_POLICY_CODES = (POLICY_ATT_DAY, POLICY_ATT_REGULARISATION, POLICY_ATT_CLOSURE)
 
+# §21 Payroll Policy, "with versioning". One policy whose rules are the DEFAULT_PAYROLL_
+# POLICY keys -- cut-off, variance threshold, rounding, the approval matrix. Versioned for
+# the same reason the attendance rules are: a run for February must read February's policy
+# even after HR changes the cut-off in March.
+POLICY_PAY_POLICY = "PAY_POLICY"
+
 # What each policy may carry, and what the system does when it carries nothing. Every
 # default here is TODAY'S BEHAVIOUR, which is what makes an unconfigured company identical
 # after this phase as before it.
@@ -9491,10 +9497,39 @@ class CalculationMethod(str, Enum):
     MANUAL     = "Manual Input"    # entered per payroll run
     FORMULA    = "Formula"         # a controlled expression (hrms_formula_engine)
     SLAB       = "Slab"            # a slab / table on a base value, e.g. Professional Tax
+    # ── §24's remaining two ──
+    # IMPORTED differs from MANUAL in WHERE the number comes from, not in the arithmetic:
+    # manual is typed per employee on the run, imported arrives as a file (an incentive
+    # sheet, a canteen deduction). Both are zero until supplied, so neither can be
+    # calculated from the structure alone.
+    IMPORTED          = "Imported Input"
+    # ATTENDANCE_LINKED is a rate x attendance quantity -- an overtime rate, a per-day
+    # site allowance. The quantity comes from the attendance basis the run already froze.
+    ATTENDANCE_LINKED = "Attendance Linked"
 
 
 class ProrationRule(str, Enum):
+    """§24 Proration: "Full month, payable-days based, working-days based, no proration".
+
+    PAYABLE_DAYS and NONE are the original two. The other two differ in the DENOMINATOR:
+
+      PAYABLE_DAYS  paid x (payable days / calendar days)   -- a weekly off is paid, so a
+                    full month pays in full.
+      WORKING_DAYS  paid x (payable working days / working days) -- weekly offs and
+                    holidays are excluded from BOTH sides. For a component that only
+                    accrues on days actually worked (a shift allowance, a conveyance),
+                    dividing by calendar days quietly underpays a short month.
+      FULL_MONTH    paid in full for anyone in service at all during the period, however
+                    few days they worked.
+      NONE          paid in full, always.
+
+    FULL_MONTH and NONE differ only for a joiner or a leaver: NONE pays a person who
+    joined on the 28th the whole amount, FULL_MONTH is the explicit statement that this is
+    intended rather than an unconsidered default.
+    """
     PAYABLE_DAYS = "Payable Days"
+    WORKING_DAYS = "Working Days"
+    FULL_MONTH   = "Full Month"
     NONE         = "None"
 
 
@@ -9511,6 +9546,31 @@ class PayslipSection(str, Enum):
     DEDUCTIONS       = "Deductions"
     EMPLOYER         = "Employer Contribution"
     HIDDEN           = "Hidden"
+
+
+class ComponentLifecycle(str, Enum):
+    """§24 Lifecycle: "Draft, Approved, Active, Superseded, Retired".
+
+    Distinct from the `active` boolean that preceded it, which conflated "not yet ready"
+    with "no longer used" -- two states that must behave differently: a Draft has never
+    been paid and can still be freely edited, while a Retired component has been paid and
+    its definition must survive for the payslips that used it (§21).
+    """
+    DRAFT      = "Draft"
+    APPROVED   = "Approved"
+    ACTIVE     = "Active"
+    SUPERSEDED = "Superseded"
+    RETIRED    = "Retired"
+
+
+# Which lifecycle states a payroll run will actually pay. A Draft or Approved-but-not-yet-
+# active component is configuration somebody is still working on, and paying it would make
+# the approval stage meaningless.
+COMPONENT_PAYABLE_LIFECYCLE = (ComponentLifecycle.ACTIVE.value,)
+
+# §24 Frequency. A component not due in a period contributes nothing to it -- enforced in
+# calculate_payroll, which previously paid everything every month regardless.
+COMPONENT_FREQUENCIES = ("Monthly", "One-time", "Quarterly", "Annual", "Ad hoc")
 
 
 class StructureStatus(str, Enum):
@@ -9647,6 +9707,15 @@ class SalaryComponentIn(BaseModel):
     formula: Optional[str] = None                  # method Formula
     slabs: Optional[list[dict]] = None             # method Slab: [{upto, amount | percent}]
     change_reason: Optional[str] = None
+    # ── §24 Lifecycle and Applicability ──
+    lifecycle: Optional[ComponentLifecycle] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    # POLICY_SCOPE_KEYS -> [values], resolved by the same specificity rule policies use.
+    applicability: Optional[dict] = None
+    # method Attendance Linked: what the rate is multiplied by.
+    attendance_basis: Optional[str] = None         # payable_days / present_days / lop_days
+    rate: Optional[float] = None
 
 
 class SalaryStructureComponentIn(BaseModel):

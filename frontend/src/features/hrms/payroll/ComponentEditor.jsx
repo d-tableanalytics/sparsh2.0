@@ -4,8 +4,7 @@ import { FIELD, LABEL, TEXTAREA } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
 import {
   COMPONENT_TYPES, METHODS, SECTIONS, ROUNDING, FREQUENCIES, COMPONENT_TYPE_TONE, methodText,
-  componentPayload, useSubmit,
-} from './payrollKit';
+  componentPayload, useSubmit, PRORATION, LIFECYCLE, ATTENDANCE_BASES,} from './payrollKit';
 
 /**
  * HRMS ▸ Payroll ▸ the salary component master (FRD §24).
@@ -97,6 +96,13 @@ export const ComponentEditorModal = ({
     calculation_base: component?.calculation_base || '',
     percentage: component?.percentage ?? '',
     proration: component?.proration || '',
+    lifecycle: component?.lifecycle || '',
+    effective_from: component?.effective_from || '',
+    effective_to: component?.effective_to || '',
+    attendance_basis: component?.attendance_basis || 'payable_days',
+    rate: component?.rate ?? '',
+    applicability: Object.fromEntries(
+      Object.entries(component?.applicability || {}).map(([k, v]) => [k, (v || []).join(', ')])),
     rounding: component?.rounding || 'None',
     min_amount: component?.min_amount ?? '',
     max_amount: component?.max_amount ?? '',
@@ -330,13 +336,76 @@ export const ComponentEditorModal = ({
         </div>
       )}
 
+      {/* FRD §24 Lifecycle and Applicability. Only an Active component is paid; blank
+          lifecycle keeps the pre-§24 behaviour where `active` is the only switch. */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div>
+          <label className={LABEL} htmlFor="comp-lifecycle">Lifecycle</label>
+          <select id="comp-lifecycle" value={form.lifecycle} className={FIELD}
+            onChange={set('lifecycle')}>
+            <option value="">Not set — uses the Active switch</option>
+            {LIFECYCLE.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="comp-eff-from">Effective from</label>
+          <input id="comp-eff-from" type="date" value={form.effective_from} className={FIELD}
+            onChange={set('effective_from')} />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="comp-eff-to">Effective to</label>
+          <input id="comp-eff-to" type="date" value={form.effective_to} className={FIELD}
+            onChange={set('effective_to')} />
+        </div>
+        {form.lifecycle && form.lifecycle !== 'Active' && (
+          <p className="text-[11.5px] text-[var(--accent-orange)] self-end pb-2">
+            Only an <b>Active</b> component is paid.
+          </p>
+        )}
+      </div>
+
+      {form.calculation_method === 'Attendance Linked' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={LABEL} htmlFor="comp-att-basis">Multiply the rate by</label>
+            <select id="comp-att-basis" value={form.attendance_basis} className={FIELD}
+              onChange={set('attendance_basis')}>
+              {ATTENDANCE_BASES.map((b) => (
+                <option key={b} value={b}>{b.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={LABEL} htmlFor="comp-rate">Rate (per day)</label>
+            <input id="comp-rate" type="number" min="0" step="0.01" value={form.rate}
+              className={FIELD} onChange={set('rate')} />
+          </div>
+        </div>
+      )}
+
+      <div>
+        <p className={LABEL}>Applies to — blank in every box means every employee</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-1">
+          {[['locations', 'Locations'], ['grades', 'Grades'],
+            ['employment_categories', 'Categories'], ['payroll_groups', 'Payroll groups']]
+            .map(([key, label]) => (
+              <div key={key}>
+                <label className={LABEL} htmlFor={`comp-ap-${key}`}>{label}</label>
+                <input id={`comp-ap-${key}`} value={form.applicability?.[key] || ''}
+                  className={FIELD} placeholder="comma separated"
+                  onChange={(e) => setForm((f) => ({
+                    ...f, applicability: { ...f.applicability, [key]: e.target.value },
+                  }))} />
+              </div>
+            ))}
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div>
           <label className={LABEL} htmlFor="comp-proration">Proration</label>
           <select id="comp-proration" value={form.proration} className={FIELD} onChange={set('proration')}>
-            <option value="">Default for the type</option>
-            <option value="Payable Days">Payable days</option>
-            <option value="None">None</option>
+            {PRORATION.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
           </select>
         </div>
         <div>
