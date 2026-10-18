@@ -172,6 +172,8 @@ CATALOGUE = [
         ("Payroll run", [("payroll.read", None), ("payroll.process", "Process payroll"),
                          ("payroll.check", "Check payroll"),
                          ("payroll.approve", "Approve payroll")]),
+        ("Configuration", [("config.read", None), ("config.draft", "Draft a rule change"),
+                           ("config.approve", "Approve a rule change")]),
         ("Salary structure", [("salary_structure.read", None),
                               ("salary_structure.manage", "Set salary structures")]),
         ("Salary advance", [("advance.read", None), ("advance.request", "Request an advance"),

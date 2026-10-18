@@ -2090,6 +2090,18 @@ class Cap(str, Enum):
     # narrower tier is not a flag on a wider one.
     PAYROLL_CHECK   = "payroll.check"
     PAYROLL_APPROVE = "payroll.approve"
+    # ── Phase 1 FRD §26-§30 — the configuration layer ──
+    # §30: "Configuration access is permission-controlled and SEPARATE from normal
+    # employee/manager access." So these are their own family rather than a widening of
+    # EMPLOYEE_WRITE or PAYROLL_PROCESS: changing the rule that computes everybody's LOP is
+    # a different act from running one payroll, and the people trusted with each differ.
+    #
+    # DRAFT writes a version; APPROVE moves it to Approved/Active (§27's approval stage);
+    # READ sees the register and the audit. The draft/approve split is the same
+    # maker-checker shape BR-021 draws for payroll, applied to configuration.
+    CONFIG_READ    = "config.read"
+    CONFIG_DRAFT   = "config.draft"
+    CONFIG_APPROVE = "config.approve"
     SALARY_STRUCTURE_READ   = "salary_structure.read"
     SALARY_STRUCTURE_MANAGE = "salary_structure.manage"
     # REQUEST is the self-service act every role gets (the same reasoning LEAVE_APPLY /
@@ -2459,6 +2471,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
         Cap.ADVANCE_READ, Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
+        # Configuration: the ceiling holds both tiers, so a company with nobody else
+        # appointed can still change a rule and approve the change.
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_APPROVE,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
         Cap.VARIABLE_PAY_HOLD_MANAGE,
         Cap.PIP_READ, Cap.PIP_MANAGE, Cap.PIP_DECIDE, Cap.PIP_ACKNOWLEDGE,
@@ -2609,6 +2624,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # enforced on the ACTOR, not merely on the role.
         Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+        # §29's administrative screens are HR's, but CONFIG_APPROVE is deliberately absent:
+        # §27 puts an approval stage between a drafted rule and a live one, and an approver
+        # who is also the only drafter is not an approval.
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
         # ── Phase PIP-1 ── HR is the process owner throughout ("HR monitors overdue
@@ -2896,6 +2915,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # same "visibility without write" split that comment already draws.
         Cap.PAYROLL_READ, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ,
+        # Finance approves the payroll these rules produce, so it reads the rules and is
+        # the §27 approver for a change to them.
+        Cap.CONFIG_READ, Cap.CONFIG_APPROVE,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },
@@ -3397,6 +3419,28 @@ COLL_EMPLOYEE_HISTORY  = "hrms_employee_history"
 COLL_FIELD_DEFINITIONS = "hrms_field_definitions"
 COLL_SHIFTS            = "hrms_shifts"
 
+# ── Phase 1 FRD §26/§28 — the versioned-policy spine ──
+#
+# NOT to be confused with COLL_POLICIES / COLL_POLICY_REVISIONS further up, which are the
+# HR POLICY DOCUMENT register (SOP §14: leave policy, POSH policy — prose an employee reads
+# and acknowledges). These three are the CONFIGURATION layer: the attendance and payroll
+# RULES the system calculates with, versioned by effective date and scoped to a population.
+# Same English word, two different things, so they stay in two different namespaces.
+#
+# Shape follows §28's ER extension:
+#   DEFINITION  - what the policy IS (code, module, category). One row per policy, ever.
+#   VERSION     - what it SAYS, from when (rule_json, effective dates, status, approval).
+#   ASSIGNMENT  - WHO it applies to (company/location/department/grade/category + priority).
+#
+# Three collections rather than versions nested on the definition, which is how the shift
+# master does it: a shift has a handful of versions and is always read whole, whereas a
+# policy version is independently approved, independently scoped and independently queried
+# ("which version was in force for this employee on this date"), and an assignment is
+# edited without touching the version it points at.
+COLL_POLICY_DEFINITIONS = "hrms_policy_definitions"
+COLL_POLICY_VERSIONS    = "hrms_policy_versions"
+COLL_POLICY_ASSIGNMENTS = "hrms_policy_assignments"
+
 MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
 BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -3538,6 +3582,91 @@ class FieldDefinitionIn(BaseModel):
 class FieldStatusIn(BaseModel):
     status: FieldStatus
     reason: Optional[str] = None
+
+
+class PolicyVersionStatus(str, Enum):
+    """§26/§27: a version's life. Draft is editable and invisible to runtime; Active is what
+    resolution finds; Superseded is what a later version displaced; Retired was withdrawn.
+    Nothing is ever deleted -- §21: "a policy version that has already been used ... must
+    not be physically deleted because historical payroll, audit and reporting must remain
+    reproducible."
+    """
+    DRAFT      = "Draft"
+    PENDING    = "Pending Approval"
+    APPROVED   = "Approved"        # approved, effective date still in the future
+    ACTIVE     = "Active"
+    SUPERSEDED = "Superseded"
+    RETIRED    = "Retired"
+
+
+# Versions a runtime resolution will consider. APPROVED is included because a version
+# approved today and effective next month is legitimately found by a resolution asking
+# about next month -- the effective-date comparison is what gates it, not the status.
+POLICY_RESOLVABLE_STATUSES = (PolicyVersionStatus.ACTIVE.value,
+                              PolicyVersionStatus.APPROVED.value,
+                              PolicyVersionStatus.SUPERSEDED.value)
+
+# §26: "Policy scope can be defined by company, location, department, grade/level,
+# employment category, shift or payroll group." Each maps to the employee-profile key it
+# is tested against -- the same mapping hrms_shift_service._PROFILE_KEY already draws for
+# shifts, widened to the full §26 list and kept in ONE place so a new scope dimension is a
+# one-line change rather than an edit in every service that resolves a policy.
+POLICY_SCOPE_KEYS = {
+    "locations":            "work_location",
+    "departments":          "department_id",
+    "grades":               "grade",
+    "levels":               "level",
+    "employment_categories": "employee_category",
+    "payroll_groups":       "payroll_group",
+    "shift_codes":          "shift_code",
+    "attendance_policy_groups": "attendance_policy_group",
+}
+
+# Which module owns a policy. Mirrors FIELD_MODULES, and for the same reason: it is what an
+# administrative screen filters by.
+POLICY_MODULES = ("attendance", "payroll")
+
+AUDIT_POLICY_VERSION_SAVED    = "policy version saved"
+AUDIT_POLICY_VERSION_STATUS   = "policy version status changed"
+AUDIT_POLICY_ASSIGNMENT_SAVED = "policy scope assigned"
+ENTITY_POLICY_VERSION = "policy_version"
+
+
+class PolicyDefinitionIn(BaseModel):
+    """§28 POLICY_DEFINITION — what the policy is. Created once; its versions carry the
+    rules."""
+    code: str
+    name: str
+    module: str = "attendance"
+    category: Optional[str] = None
+    description: Optional[str] = None
+
+
+class PolicyVersionIn(BaseModel):
+    """§28 POLICY_VERSION — what it says, and from when."""
+    policy_code: str
+    effective_from: str                          # YYYY-MM-DD
+    effective_to: Optional[str] = None
+    rules: dict = {}                             # the RuleJson of §28
+    change_reason: Optional[str] = None
+
+
+class PolicyVersionStatusIn(BaseModel):
+    status: PolicyVersionStatus
+    reason: Optional[str] = None
+
+
+class PolicyAssignmentIn(BaseModel):
+    """§28 POLICY_ASSIGNMENT — who a version applies to.
+
+    An assignment with NO scope keys is the company-wide default, which is how a company
+    states one rule for everybody without naming every location.
+    """
+    policy_code: str
+    version_no: int
+    scope: dict = {}                             # POLICY_SCOPE_KEYS -> [values]
+    priority: int = 0
+    active: bool = True
 
 
 class PhotographIn(BaseModel):
@@ -9960,6 +10089,17 @@ HRMS_INDEXES.extend([
     (COLL_FIELD_DEFINITIONS, [("company_id", 1), ("module", 1), ("code", 1)],
      {"unique": True, "name": "uniq_field_code"}),
     (COLL_SHIFTS, [("company_id", 1), ("code", 1)], {"unique": True, "name": "uniq_shift_code"}),
+    # ── §26/§28 policy spine ──
+    (COLL_POLICY_DEFINITIONS, [("company_id", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_policy_code"}),
+    (COLL_POLICY_VERSIONS, [("company_id", 1), ("policy_code", 1), ("version_no", 1)],
+     {"unique": True, "name": "uniq_policy_version"}),
+    # The resolution query: a policy's candidate versions for a date, newest effective first.
+    (COLL_POLICY_VERSIONS, [("company_id", 1), ("policy_code", 1), ("status", 1),
+                            ("effective_from", -1)],
+     {"name": "by_policy_status_effective"}),
+    (COLL_POLICY_ASSIGNMENTS, [("company_id", 1), ("policy_code", 1), ("version_no", 1)],
+     {"name": "by_policy_version"}),
     (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
      {"name": "by_target_status"}),
     (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],

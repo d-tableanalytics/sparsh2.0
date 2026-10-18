@@ -253,6 +253,10 @@ export const CAP = {
   // FRD §12 stage 8 — the Payroll/HR Checker, a tier below the stage-9 approver.
   PAYROLL_CHECK: 'payroll.check',
   PAYROLL_APPROVE: 'payroll.approve',
+  // FRD §30 — configuration access is its own family, separate from employee/manager access.
+  CONFIG_READ: 'config.read',
+  CONFIG_DRAFT: 'config.draft',
+  CONFIG_APPROVE: 'config.approve',
   SALARY_STRUCTURE_READ: 'salary_structure.read',
   SALARY_STRUCTURE_MANAGE: 'salary_structure.manage',
   ADVANCE_READ: 'advance.read',

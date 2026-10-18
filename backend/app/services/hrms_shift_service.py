@@ -248,7 +248,15 @@ async def _company_policy(company_id: str) -> dict:
 
 
 def _specificity(shift: dict, profile: dict) -> int:
-    """-1 when the shift does not apply to this person; otherwise how many rules matched."""
+    """-1 when the shift does not apply to this person; otherwise how many rules matched.
+
+    The scoring is the same "more matched dimensions wins" rule the policy spine uses
+    (hrms_policy_version_service.specificity), with ONE deliberate difference kept here: a
+    shift carrying no applicability rules scores -1 rather than 0. A shift is something a
+    person is PUT ON, so an unscoped one is only ever assigned explicitly -- whereas an
+    unscoped POLICY is the company-wide default that applies to everybody. Sharing the
+    scoring but not that rule is why this stays its own three lines rather than a call.
+    """
     rules = shift.get("applicability") or {}
     if not any(rules.get(k) for k in APPLICABILITY_KEYS):
         return -1          # a shift with no rules is only ever assigned explicitly

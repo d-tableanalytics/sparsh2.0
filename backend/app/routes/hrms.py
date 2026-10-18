@@ -6510,13 +6510,15 @@ from fastapi.responses import Response as _Response  # noqa: E402
 
 from app.models.hrms import (  # noqa: E402
     EmployeeMasterListsIn, FieldDefinitionIn, FieldStatusIn, PaymentBatchIn,
-    PhotographIn,
+    PhotographIn, PolicyAssignmentIn, PolicyDefinitionIn, PolicyVersionIn,
+    PolicyVersionStatusIn,
     PaymentStatusImportIn, PaymentStatusIn, PayrollPolicyIn, PayrollRemarksIn,
     PostLockAdjustmentIn, StructureDecisionIn,
 )
 from app.services import hrms_disbursal_service as disbursal_mgmt  # noqa: E402
 from app.services import hrms_employee_master_service as master_mgmt  # noqa: E402
 from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
+from app.services import hrms_policy_version_service as policy_versions  # noqa: E402
 
 
 # ── Employee Master ──
@@ -6934,3 +6936,128 @@ async def simulate_salary_component(
     _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
     return await payroll_mgmt.simulate_component(
         current_user, _company(current_user, company_id), code, body)
+
+
+# ── Versioned policy spine (FRD §23, §26, §28) ──
+@router.get("/config/policies")
+async def list_policy_definitions(
+    module: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's configurable policies. Configuration access is its own permission
+    family, separate from employee/manager access (FRD §30)."""
+    _require(current_user, Cap.CONFIG_READ)
+    return await policy_versions.list_definitions(
+        _company(current_user, company_id), module)
+
+
+@router.put("/config/policies")
+async def save_policy_definition(
+    body: PolicyDefinitionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await policy_versions.save_definition(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/config/policies/{policy_code}/versions")
+async def list_policy_versions(
+    policy_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every version of one policy, newest first, each with the populations it is scoped to."""
+    _require(current_user, Cap.CONFIG_READ)
+    return await policy_versions.list_versions(
+        _company(current_user, company_id), policy_code)
+
+
+@router.put("/config/policies/{policy_code}/versions")
+async def save_policy_version(
+    policy_code: str,
+    body: PolicyVersionIn,
+    version_no: Optional[int] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a new DRAFT version, or edit one not yet approved. A version never goes live
+    on save — activation is its own step (FRD §27)."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    payload = {**body.model_dump(), "policy_code": policy_code}
+    if version_no is not None:
+        payload["version_no"] = version_no
+    return await policy_versions.save_draft(
+        current_user, _company(current_user, company_id), payload)
+
+
+@router.post("/config/policies/{policy_code}/versions/{version_no}/status")
+async def set_policy_version_status(
+    policy_code: str,
+    version_no: int,
+    body: PolicyVersionStatusIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Move a version along Draft → Pending → Approved → Active → Superseded / Retired.
+
+    Drafting and approving are different capabilities on purpose (FRD §27): the submit
+    steps take CONFIG_DRAFT, the decisions take CONFIG_APPROVE.
+    """
+    status = body.status.value
+    decision = status in ("Approved", "Active")
+    _require(current_user, Cap.CONFIG_APPROVE if decision else Cap.CONFIG_DRAFT)
+    return await policy_versions.set_status(
+        current_user, _company(current_user, company_id), policy_code, version_no,
+        status, body.reason)
+
+
+@router.put("/config/policies/{policy_code}/versions/{version_no}/scope")
+async def assign_policy_scope(
+    policy_code: str,
+    version_no: int,
+    body: PolicyAssignmentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Which population a version applies to (FRD §26 scope + priority)."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    payload = {**body.model_dump(), "policy_code": policy_code, "version_no": version_no}
+    return await policy_versions.assign_scope(
+        current_user, _company(current_user, company_id), payload)
+
+
+@router.delete("/config/policy-assignments/{assignment_id}")
+async def delete_policy_assignment(
+    assignment_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await policy_versions.remove_assignment(
+        current_user, _company(current_user, company_id), assignment_id)
+
+
+@router.get("/config/policies/{policy_code}/resolve")
+async def resolve_policy_for_employee(
+    policy_code: str,
+    employee_code: str = Query(...),
+    on_date: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Which version actually applies to one employee on one date, and why it won.
+
+    The §26 "documented priority rule", made answerable rather than merely documented —
+    an administrator looking at four overlapping rules can ask the system which one wins.
+    """
+    _require(current_user, Cap.CONFIG_READ)
+    company = _company(current_user, company_id)
+    profile = await shift_mgmt.profile_for(company, employee_code)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    version = await policy_versions.resolve(company, policy_code, profile, on_date)
+    return {"policy_code": policy_code.upper(), "employee_code": employee_code,
+            "on_date": on_date, "version": version}

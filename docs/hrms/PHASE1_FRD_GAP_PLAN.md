@@ -32,7 +32,7 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 0 | Branch + baseline | **Done** — baseline 82/82 on the Phase 1 suite |
 | 1 | Payroll approval matrix (§12, §17, §20) | **Done** — `Cap.PAYROLL_CHECK`, `PayrollRunStatus.CHECKED`, `check_run`/`decide_run` split, configurable matrix, `/payroll/runs/{period}/check`, three-stage UI |
 | 12 (part) | Employee master finish (§3, §4) | **Done** — photograph as a first-class field; effective-dated changes registered as a scheduled job |
-| 2 | Policy version spine | Not started |
+| 2 | Policy version spine (§26, §28) | **Done** — definition/version/assignment collections, documented priority rule, `config.*` capability family, `/config/policies` endpoints, 28-check suite |
 | 3 | Config change approval flow | Not started |
 | 4 | Attendance policy migration + designer | Not started |
 | 5 | Attendance simulation | Not started |
