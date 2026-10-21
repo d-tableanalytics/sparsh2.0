@@ -9884,6 +9884,36 @@ DEFAULT_PAYROLL_POLICY = {
     # rule, which is never optional.
     "approver_distinct_from_checker": True,
 }
+# ── Which payroll policy keys are resolved ONCE, and which PER EMPLOYEE ─────────────
+# A PAY_POLICY version can be scoped (grade, location, category, payroll group), and a
+# scoped version is meaningless unless something resolves it against an EMPLOYEE. The split
+# is not cosmetic: it is the difference between a rule that can legitimately differ between
+# two people in the same run and one that cannot.
+#
+# RUN-LEVEL keys describe the RUN. There is one answer for the whole period by
+# construction, and resolving them per employee would mean asking which of two conflicting
+# answers governs a single indivisible decision -- whether this run needed a checker, when
+# its inputs closed, whether the month had to be locked before it could be calculated. A
+# scoped version MUST NOT move any of them: a grade-scoped policy that quietly dropped the
+# checker stage for one grade would be a separation-of-duties hole wearing a scope.
+#
+# EMPLOYEE-LEVEL keys change what an individual is paid or what their own records require,
+# so two people in one run differing is exactly the point: rounding, the sandwich rule that
+# decides whether their Sundays are LOP, whether their salary structure needs a second
+# approval. These are resolved inside the per-employee loop with that employee's profile.
+#
+# Every key of DEFAULT_PAYROLL_POLICY appears in exactly one of the two sets, and the
+# suite pins that -- a key in neither would silently lose its scoping, which is the defect
+# this split exists to close.
+PAYROLL_POLICY_RUN_LEVEL_KEYS = frozenset({
+    "require_attendance_lock", "payslip_release", "variance_threshold_percent",
+    "input_cutoff_day", "checker_required", "checker_cap", "approver_cap", "lock_cap",
+    "approver_distinct_from_checker",
+})
+PAYROLL_POLICY_EMPLOYEE_LEVEL_KEYS = frozenset({
+    "net_rounding", "sandwich_weekly_off", "structure_approval_required",
+})
+
 # The capability keys above, for validation — a policy may only name a payroll capability.
 PAYROLL_MATRIX_CAP_KEYS = ("checker_cap", "approver_cap", "lock_cap")
 PAYROLL_MATRIX_ALLOWED_CAPS = {

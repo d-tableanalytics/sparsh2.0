@@ -549,16 +549,24 @@ def _structure_totals(lines: list, meta: dict) -> dict:
             "monthly_net": round(gross - deductions, 2)}
 
 
-async def _policy_version_ref(company_id: str, on_date: str) -> Optional[dict]:
-    """Which PAY_POLICY version a run consumed, or None where the company runs on its
-    stored settings. Stamped on the run for §30 reproducibility."""
+async def _policy_version_ref(company_id: str, on_date: str,
+                              profile: Optional[dict] = None) -> Optional[dict]:
+    """Which PAY_POLICY version was consumed, or None where the company runs on its stored
+    settings. Stamped for §30 reproducibility.
+
+    `profile` is what makes this answerable per EMPLOYEE. The run-level stamp (no profile)
+    names the company-wide version; a record's stamp names the version that actually
+    decided that person's amounts, which under a scoped policy is a different version. One
+    stamp could not describe both, and the record's is the one a payslip query needs.
+    """
     from app.models.hrms import POLICY_PAY_POLICY
     from app.services import hrms_policy_version_service as PV
-    version = await PV.resolve(company_id, POLICY_PAY_POLICY, {}, on_date)
+    version = await PV.resolve(company_id, POLICY_PAY_POLICY, profile or {}, on_date)
     if not version:
         return None
     return {"policy_code": POLICY_PAY_POLICY, "version_no": version.get("version_no"),
-            "effective_from": version.get("effective_from")}
+            "effective_from": version.get("effective_from"),
+            "matched_scope": version.get("matched_scope")}
 
 
 async def _last_final_period(company_id: str) -> Optional[str]:
@@ -608,7 +616,10 @@ async def save_salary_structure(actor: dict, company_id: str, payload: dict) -> 
         annual_ctc = round((totals["monthly_gross"] + totals["monthly_employer_contributions"])
                            * 12, 2)
 
-    policy = await get_payroll_policy(company_id)
+    # Employee-level: whether THIS person's salary needs a second approval. A policy
+    # scoped to a grade or a location is the obvious way to ask for it, and passing no
+    # profile here meant such a policy applied to nobody.
+    policy = await get_payroll_policy(company_id, profile=profile)
     needs_approval = bool(policy.get("structure_approval_required"))
     now = datetime.now(timezone.utc)
     names = await _employee_names([profile])
@@ -1235,6 +1246,26 @@ def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
     return lines
 
 
+async def _employee_policy(company_id: str, run_policy: dict, profile: dict,
+                           on_date: str) -> dict:
+    """`run_policy` with this employee's EMPLOYEE-LEVEL keys resolved for them.
+
+    A PAY_POLICY version can be scoped by grade, location, category or payroll group, and
+    `get_payroll_policy` has always accepted a `profile` to resolve it against -- which
+    every caller passed as None. A version aimed at Grade M1 therefore applied to nobody,
+    and the scope UI offered a filter that changed no figure anywhere.
+
+    The run-level keys are laid back over the result deliberately, AFTER resolution. It
+    would be cheaper to resolve only the employee-level ones, but then a scoped version
+    setting `checker_required: false` would depend on nobody noticing. This way a scope
+    cannot reach a run-level decision even if someone writes one that tries.
+    """
+    from app.models.hrms import PAYROLL_POLICY_RUN_LEVEL_KEYS
+    resolved = await get_payroll_policy(company_id, profile=profile, on_date=on_date)
+    return {**resolved,
+            **{k: v for k, v in run_policy.items() if k in PAYROLL_POLICY_RUN_LEVEL_KEYS}}
+
+
 async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     """FRD §12 stages 3-6: load eligible employees, the locked attendance basis, active
     structures and monthly inputs, then calculate. Safe to rerun while the maker holds the
@@ -1294,10 +1325,12 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     from app.services.hrms_shift_service import month_calendar
     for profile in profiles:
         employee_code = profile["employee_code"]
+        # §26 scoping: the rules that decide THIS person's amounts, resolved for them.
+        emp_policy = await _employee_policy(company_id, policy, profile, end)
         calendar = await month_calendar(company_id, profile, period)
         structure = await get_current_structure(company_id, employee_code, end)
         days = await _payable_days(company_id, employee_code, period, profile, calendar,
-                                   sandwich=bool(policy.get("sandwich_weekly_off")))
+                                   sandwich=bool(emp_policy.get("sandwich_weekly_off")))
         ratio = (days["payable_days"] / days["days_in_period"]) if days["days_in_period"] else 0
         structure = _reprice_for_period(structure, meta, days, profile, end,
                                         constants=run_constants)
@@ -1381,10 +1414,13 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
             "previous_period": previous_period,
             "previous_net": previous_net.get(employee_code),
             "attendance_locked": attendance_locked,
+            # §30 — the version that decided THIS person's amounts, which under a scoped
+            # policy is not the company-wide one stamped on the run.
+            "payroll_policy_version": await _policy_version_ref(company_id, end, profile),
             "created_at": now, "updated_at": now,
         }
         doc.update(_totals(doc))
-        doc.update(_net_rounding(doc, policy.get("net_rounding")))
+        doc.update(_net_rounding(doc, emp_policy.get("net_rounding")))
         doc.update(_exceptions(doc, profile, structure, threshold, attendance_locked))
         await records_coll.insert_one(doc)
         for c in carry_by_code.get(employee_code, []):
@@ -1535,9 +1571,14 @@ async def list_records(actor: dict, company_id: str, period: str) -> list:
 
 
 async def _refresh_record(record: dict, company_id: str) -> dict:
-    policy = await get_payroll_policy(company_id)
+    # The profile is loaded anyway for _exceptions, so resolving the policy FOR this
+    # employee costs nothing and stops a hand-entered input being re-rounded under a
+    # different rule from the one that calculated the record.
     profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
         {"company_id": str(company_id), "employee_code": record["employee_code"]}) or {}
+    period = record.get("period")
+    on_date = _period_bounds(period)[4] if period else None   # the period's last day
+    policy = await get_payroll_policy(company_id, profile=profile, on_date=on_date)
     record.update(_totals(record))
     record.update(_net_rounding(record, policy.get("net_rounding")))
     structure = {"id": record.get("structure_id")} if record.get("structure_id") or \
