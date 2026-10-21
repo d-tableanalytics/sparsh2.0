@@ -9843,6 +9843,12 @@ class PayrollPolicyIn(BaseModel):
     net_rounding: Optional[RoundingRule] = None
     # LOP "sandwich" rule (FRD §23 LOP): a weekly off / holiday between LOP days is LOP.
     sandwich_weekly_off: Optional[bool] = None
+    # §21 "with versioning" / §27 Effective Dating. A payroll policy change is a GOVERNED
+    # change, so the screen has to collect the two things a governed change cannot be
+    # raised without: when it starts and why it is wanted. Neither is a policy rule, so
+    # neither reaches the version's `rules`.
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
 
 
 class PostLockAdjustmentIn(BaseModel):

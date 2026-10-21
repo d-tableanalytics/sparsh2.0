@@ -1,20 +1,39 @@
 import React, { useEffect, useState } from 'react';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
-import { getPayrollPolicy, savePayrollPolicy } from '../../../services/hrmsApi';
+import {
+  getPayrollPolicy, savePayrollPolicy, listPayrollPolicyVersions,
+} from '../../../services/hrmsApi';
 import { FIELD, LABEL } from '../internal/internalKit';
-import { Btn, Modal } from '../internal/internalKit.jsx';
+import { Btn, Chip, Modal } from '../internal/internalKit.jsx';
 import { ROUNDING, errText, useSubmit } from './payrollKit';
 
 /**
- * HRMS ▸ Payroll ▸ the company's payroll controls (FRD §19, §24 Payroll Policy).
+ * HRMS ▸ Payroll ▸ the company's payroll controls (FRD §19, §21, §24 Payroll Policy).
  *
  * Starting values the company can change — not rules frozen in code. Read by anyone who
- * runs or reviews payroll; saved only by the maker (PAYROLL_PROCESS), which `canEdit` mirrors.
+ * runs or reviews payroll; drafted only by the maker (PAYROLL_PROCESS), which `canEdit`
+ * mirrors.
+ *
+ * Saving here is a GOVERNED change (§21 "with versioning", §27). It drafts a PAY_POLICY
+ * version and raises a change request; nothing moves until that request is approved and
+ * activated in Configuration Approvals. So the screen has to collect the effective date
+ * and the business reason, and has to be honest that Save is not Apply — the version list
+ * below the form is what tells the reader which values the runs are actually using.
  */
+
+const TODAY = () => new Date().toISOString().slice(0, 10);
+
+const VERSION_TONE = {
+  Draft: 'neutral', 'Pending Approval': 'warn', Approved: 'accent',
+  Active: 'good', Superseded: 'neutral', Retired: 'neutral',
+};
 
 const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, showError }) => {
   const [form, setForm] = useState(null);
   const [error, setError] = useState(null);
+  const [versions, setVersions] = useState([]);
+  const [effectiveFrom, setEffectiveFrom] = useState(TODAY());
+  const [reason, setReason] = useState('');
   const { busy, run } = useSubmit(showSuccess, showError, onDone);
 
   useEffect(() => {
@@ -22,6 +41,11 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
     getPayrollPolicy(scope)
       .then(({ data }) => { if (live) setForm({ ...data }); })
       .catch((err) => { if (live) setError(errText(err, 'Could not load the payroll policy.')); });
+    // A company with no versions yet is the normal case, not an error: the flat settings
+    // are still the base everything resolves from, so an empty list is simply empty.
+    listPayrollPolicyVersions(scope)
+      .then(({ data }) => { if (live) setVersions(data || []); })
+      .catch(() => { if (live) setVersions([]); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -42,7 +66,13 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       showError('The input cut-off day must be 1 to 31.');
       return;
     }
+    if (!reason.trim()) {
+      showError('Say why the payroll policy is changing — the approver needs the reason.');
+      return;
+    }
     run(() => savePayrollPolicy({
+      effective_from: effectiveFrom,
+      change_reason: reason.trim(),
       require_attendance_lock: !!form.require_attendance_lock,
       variance_threshold_percent: variance,
       structure_approval_required: !!form.structure_approval_required,
@@ -54,7 +84,7 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       checker_required: !!form.checker_required,
       approver_distinct_from_checker: !!form.approver_distinct_from_checker,
       lock_cap: form.lock_cap || 'payroll.approve',
-    }, scope), 'Payroll policy saved.');
+    }, scope), 'Drafted for approval — activate it in Configuration Approvals.');
   };
 
   const check = (key, label, hint) => (
@@ -69,13 +99,17 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
 
   return (
     <Modal title="Payroll Policy" labelledBy="payroll-policy-title"
-      subtitle={canEdit ? 'Starting values — you can change them.' : 'Read-only — HR changes these.'}
+      subtitle={canEdit
+        ? 'Changes are drafted for approval — they do not take effect when you save.'
+        : 'Read-only — HR changes these.'}
       onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>{canEdit ? 'Cancel' : 'Close'}</Btn>
           {canEdit && form && (
-            <Btn tone="primary" onClick={submit} disabled={busy}>{busy ? 'Saving…' : 'Save'}</Btn>
+            <Btn tone="primary" onClick={submit} disabled={busy}>
+              {busy ? 'Drafting…' : 'Draft for approval'}
+            </Btn>
           )}
         </>
       )}
@@ -145,6 +179,75 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
                 <option value="payroll.process">Payroll Maker</option>
               </select>
             </div>
+          </div>
+
+          {/* §27 Effective Dating and Request. A governed change cannot be raised without
+              these two, so the form collects them rather than the API rejecting the save. */}
+          {canEdit && (
+            <div className="pt-3 border-t border-[var(--border-subtle)] space-y-3">
+              <div>
+                <h3 className="text-[12.5px] font-bold text-[var(--text-main)]">
+                  Raise this as a change
+                </h3>
+                <p className="text-[11.5px] text-[var(--text-muted)]">
+                  Saving drafts a new policy version and sends it for approval. A run for a
+                  closed period keeps reading the version that was in force then.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL} htmlFor="pp-eff">Effective from</label>
+                  <input id="pp-eff" type="date" value={effectiveFrom} className={FIELD}
+                    onChange={(e) => setEffectiveFrom(e.target.value)} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="pp-reason">Why (business reason)</label>
+                  <input id="pp-reason" value={reason} className={FIELD}
+                    placeholder="Required — the approver reads this"
+                    onChange={(e) => setReason(e.target.value)} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* §21 — which versions exist, and which one the runs are actually using. */}
+          <div className="pt-3 border-t border-[var(--border-subtle)] space-y-2">
+            <h3 className="text-[12.5px] font-bold text-[var(--text-main)]">Versions</h3>
+            {versions.length === 0 ? (
+              <p className="text-[11.5px] text-[var(--text-muted)]">
+                No versions yet — the values above are the company defaults, which every
+                version lays over.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11.5px]">
+                  <thead>
+                    <tr className="text-left text-[var(--text-muted)]">
+                      <th className="py-1 pr-3 font-semibold">Ver</th>
+                      <th className="py-1 pr-3 font-semibold">Status</th>
+                      <th className="py-1 pr-3 font-semibold">From</th>
+                      <th className="py-1 pr-3 font-semibold">To</th>
+                      <th className="py-1 font-semibold">Approved by</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {versions.map((v) => (
+                      <tr key={v.version_no} className="border-t border-[var(--border-subtle)]">
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">v{v.version_no}</td>
+                        <td className="py-1.5 pr-3">
+                          <Chip tone={VERSION_TONE[v.status] || 'neutral'}>{v.status}</Chip>
+                        </td>
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">{v.effective_from || '—'}</td>
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">{v.effective_to || '—'}</td>
+                        <td className="py-1.5 text-[var(--text-muted)]">
+                          {v.approved_by_name || '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -120,6 +120,10 @@ export const resolvePolicyForEmployee = (code, params) =>
 export const simulateAttendancePolicy = (code, versionNo, params) =>
   api.post(`/hrms/config/policies/${code}/versions/${versionNo}/simulate`, null, { params });
 
+/** FRD §21 — the PAY_POLICY versions behind the payroll policy screen. */
+export const listPayrollPolicyVersions = (params) =>
+  api.get('/hrms/payroll/policy/versions', { params });
+
 export const listConfigChangeRequests = (params) =>
   api.get('/hrms/config/change-requests', { params });
 export const createConfigChangeRequest = (payload, params) =>

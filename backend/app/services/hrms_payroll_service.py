@@ -145,8 +145,44 @@ async def get_payroll_policy(company_id: str, *, profile: Optional[dict] = None,
                                   default=base)
 
 
+PAYROLL_POLICY_VERSION_NAME = "Payroll policy — cut-off, rounding, eligibility, approvals"
+
+
+def _policy_changes(before: dict, after: dict) -> list:
+    """FRD §30's old/new definition, for the keys that actually moved.
+
+    Reporting every submitted key would bury the one that changed among a dozen that did
+    not: the screen posts the whole form, so "what was saved" and "what changed" are
+    different questions and the audit is asked the second one.
+    """
+    return [{"field": k, "old": before.get(k), "new": after[k]}
+            for k in sorted(after) if before.get(k) != after[k]]
+
+
 async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> dict:
+    """§21 "Change payroll cut-off, eligibility, component applicability, rounding and
+    approval controls WITH VERSIONING" — through the §27 change flow, not around it.
+
+    This used to write straight into `hrms_settings.payroll_policy`. The rules that decide
+    whether a run needs a checker, what rounds to the rupee and when inputs close went live
+    the moment one person clicked Save: no version, no effective date, no second pair of
+    eyes, and an audit row naming the KEYS that moved without the values. Meanwhile
+    PAY_POLICY versions were resolvable, effective-dated and scopeable -- and no screen
+    could create one, so the feature existed and was unreachable.
+
+    Saving now DRAFTS a version and raises a change request against it. Nothing is live
+    until that request is approved and activated, which is also what gives a February run
+    February's cut-off after HR revises it in March.
+
+    The flat settings dict stays the fallback BASE that every version lays over, so a
+    company holding no versions resolves exactly what it resolved before. It is simply no
+    longer what this screen writes.
+    """
     clean = {k: _plain(v) for k, v in payload.items() if v is not None}
+    # Neither of these is a policy rule: they describe the CHANGE, not the payroll.
+    effective_from = str(clean.pop("effective_from", "") or "").strip() or None
+    reason = str(clean.pop("change_reason", "") or "").strip()
+
     if "payslip_release" in clean and clean["payslip_release"] not in ("on_lock", "after_payment"):
         raise HTTPException(status_code=422,
                             detail="Payslip release must be on_lock or after_payment.")
@@ -163,15 +199,49 @@ async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> di
             raise HTTPException(
                 status_code=422,
                 detail=f"{key} must be one of: {', '.join(sorted(PAYROLL_MATRIX_ALLOWED_CAPS))}.")
-    merged = {**await get_payroll_policy(company_id), **clean}
-    await get_collection(COLL_SETTINGS).update_one(
-        {"company_id": str(company_id)},
-        {"$set": {"payroll_policy": merged, "updated_at": datetime.now(timezone.utc)},
-         "$setOnInsert": {"company_id": str(company_id)}},
-        upsert=True)
+    if not clean:
+        raise HTTPException(status_code=422, detail="Nothing to change.")
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="Say why the payroll policy is changing — the approver and the audit "
+                   "trail both need the business reason (FRD §27).")
+
+    from app.models.hrms import CONFIG_ENTITY_POLICY_VERSION, POLICY_PAY_POLICY
+    from app.services import hrms_config_change_service as CC
+    from app.services import hrms_policy_version_service as PV
+
+    # The POLICY_DEFINITION is a fixed fact about PAY_POLICY -- its name and module are not
+    # the company's to choose. Provisioning it here rather than making the user create it
+    # on another screen first is what stops this being a dead end for every company that
+    # has never opened the policy designer.
+    await PV.save_definition(actor, company_id, {
+        "code": POLICY_PAY_POLICY, "name": PAYROLL_POLICY_VERSION_NAME, "module": "payroll",
+        "description": "FRD §21 — versioned payroll controls."})
+
+    before = await get_payroll_policy(company_id)
+    draft = await PV.save_draft(actor, company_id, {
+        "policy_code": POLICY_PAY_POLICY,
+        "effective_from": effective_from or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "rules": clean, "change_reason": reason})
+    request = await CC.create_request(actor, company_id, {
+        "entity_type": CONFIG_ENTITY_POLICY_VERSION, "entity_code": POLICY_PAY_POLICY,
+        "version_no": draft["version_no"], "reason": reason,
+        "effective_from": draft.get("effective_from"),
+        "title": f"Payroll policy v{draft['version_no']}"})
+
+    changes = _policy_changes(before, clean)
     await audit(actor, AUDIT_PAYROLL_POLICY_SAVED, ENTITY_PAYROLL_RUN, "policy",
-                ", ".join(sorted(clean)), company_id)
-    return merged
+                f"{POLICY_PAY_POLICY} v{draft['version_no']} drafted as "
+                f"{request['request_no']}: "
+                + (", ".join(f"{c['field']} {c['old']} -> {c['new']}" for c in changes)
+                   or "no change to the policy in force"),
+                company_id, changes=changes)
+    # The effective policy is returned UNCHANGED, because it is: the draft is not live.
+    # Returning the merged-as-if-saved dict would have the screen show the new values and
+    # the runs use the old ones.
+    return {**before, "pending_version": draft, "pending_request": request,
+             "changes": changes}
 
 
 # ─────────────────────────────────────────────────────────────

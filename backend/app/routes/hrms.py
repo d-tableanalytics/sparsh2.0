@@ -6734,12 +6734,38 @@ async def get_payroll_policy(
     return await payroll_mgmt.get_payroll_policy(_company(current_user, company_id))
 
 
+@router.get("/payroll/policy/versions")
+async def list_payroll_policy_versions(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§21 — the PAY_POLICY versions behind the policy screen: which one is Active, which
+    are drafted or awaiting approval, from when, and who approved them.
+
+    Gated on PAYROLL_READ rather than config.read deliberately. The versions ARE the
+    payroll policy, and a payroll administrator who may read the policy may read the list
+    of what it has been; requiring a configuration capability to see one's own screen would
+    make the list invisible to most of the people who need it.
+    """
+    _require(current_user, Cap.PAYROLL_READ)
+    from app.models.hrms import POLICY_PAY_POLICY
+    from app.services import hrms_policy_version_service as policy_versions
+    return await policy_versions.list_versions(
+        _company(current_user, company_id), POLICY_PAY_POLICY)
+
+
 @router.put("/payroll/policy")
 async def save_payroll_policy(
     body: PayrollPolicyIn,
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
+    """§21/§27 — DRAFTS a PAY_POLICY version and raises a change request against it.
+
+    Despite the verb this no longer writes live configuration: the response carries the
+    draft and the request, and the policy it returns is still the one in force. Activation
+    is the change flow's (POST /config/change-requests/{no}/activate).
+    """
     _require(current_user, Cap.PAYROLL_PROCESS)
     return await payroll_mgmt.save_payroll_policy(
         current_user, _company(current_user, company_id), body.model_dump(exclude_unset=True))

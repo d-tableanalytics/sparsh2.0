@@ -28,11 +28,18 @@ async def audit(
     entity_id: Optional[str] = None,
     detail: Optional[str] = None,
     company_id: Optional[str] = None,
+    changes: Optional[list] = None,
 ) -> None:
     """Append one row to the HRMS audit trail. Never raises.
 
     `actor` is the session user dict (or None for system/public actions — e.g. a candidate
     submitting a public form, where there is no authenticated user).
+
+    `changes` is FRD §30's "old/new definition": a list of {field, old, new}. `detail` has
+    always been a human sentence, and a configuration change needs the VALUES as data --
+    "net_rounding, input_cutoff_day" tells a reader which settings moved and refuses to
+    tell them what to. Omitted by every caller that has nothing structured to say, and the
+    key is left off the document entirely rather than stored as null.
     """
     try:
         actor = actor or {}
@@ -51,6 +58,8 @@ async def audit(
             "company_id": str(company_id or actor.get("company_id") or "") or None,
             "created_at": datetime.now(timezone.utc),
         }
+        if changes:
+            doc["changes"] = list(changes)
         await get_collection(COLL_AUDIT_LOG).insert_one(doc)
     except Exception as e:
         # Deliberately swallowed — see module docstring.
