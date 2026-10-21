@@ -330,9 +330,22 @@ _PAYABLE_BY_STATUS = {
 }
 
 
-def _status_only(status: str) -> dict:
-    """A day decided by its status alone (an override, a weekly off, a holiday)."""
+def _status_only(status: str, half_day_fraction: Optional[float] = None) -> dict:
+    """A day decided by its status alone (an override, a weekly off, a holiday).
+
+    `half_day_fraction` is the ATT_DAY policy's answer for this employee on this date. A
+    computed half day gets it from `compute_day`; an HR OVERRIDE to Half Day came through
+    here and was given a flat 0.5, so a company that configured a quarter had the figure
+    silently depend on whether a human or the calculator decided the day. Payroll now reads
+    the frozen fraction, which makes that inconsistency a pay difference rather than a
+    cosmetic one. Unset still means 0.5.
+    """
     payable = _PAYABLE_BY_STATUS.get(status, 0.0)
+    if status == AttendanceStatus.HALF_DAY.value and half_day_fraction is not None:
+        try:
+            payable = min(1.0, max(0.0, float(half_day_fraction)))
+        except (TypeError, ValueError):
+            pass
     return {"status": status, "worked_minutes": None, "late_minutes": 0, "early_minutes": 0,
             "payable_day": payable, "lop_fraction": round(1 - payable, 2),
             "missing_out_punch": False}
@@ -364,7 +377,14 @@ async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
     from app.services.hrms_attendance_rules_service import compute_day, derived_fields
 
     if override:
-        computed = _status_only(override)
+        # Only a Half Day override needs the policy resolved; every other status is worth
+        # a whole day or nothing, so the round trip would buy nothing.
+        half_pay = None
+        if override == AttendanceStatus.HALF_DAY.value:
+            from app.services.hrms_attendance_rules_service import effective_hours
+            hours = await effective_hours(company_id, employee_code, work_date)
+            half_pay = (hours.get("policy") or {}).get("half_day_fraction")
+        computed = _status_only(override, half_day_fraction=half_pay)
     elif not actual_in and not actual_out:
         # FRD §5: weekly off and holidays come from the employee's own calendar, so a blank
         # Sunday is a Weekly Off, not an Absence.

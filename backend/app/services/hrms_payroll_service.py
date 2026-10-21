@@ -743,16 +743,61 @@ async def _unpaid_leave_refs(company_id: str, refs: set) -> set:
     return unpaid
 
 
+def _stored_share(row: dict, kind: str, default_lop: float, default_present: float,
+                  bucket: str) -> tuple:
+    """Value a day from the fractions the attendance row FROZE, not from its status.
+
+    `payable_day` / `lop_fraction` are written by the day calculator under the ATT_DAY
+    policy in force on that date, so they already carry `half_day_fraction` and anything
+    else that decided what the day was worth. Payroll's own numbers are the fallback for a
+    row that predates the policy (neither field stored) -- which is the only case where
+    re-deciding from the status is the best available answer.
+
+    The two fields are honoured INDEPENDENTLY: `lop_fraction` sets the LOP share and
+    `payable_day` the present share, which is how they are reported. A row carrying only
+    one of them has the other derived, because the calculator writes them as complements.
+    """
+    def _num(value):
+        try:
+            return min(1.0, max(0.0, float(value)))
+        except (TypeError, ValueError):     # a hand-edited row carrying a string
+            return None
+
+    lop = _num(row.get("lop_fraction"))
+    present = _num(row.get("payable_day"))
+    if lop is None and present is None:
+        return (kind, default_lop, default_present, bucket)
+    if lop is None:
+        lop = 1.0 - present
+    if present is None:
+        present = 1.0 - lop
+    return (kind, round(lop, 2), round(present, 2), bucket)
+
+
 async def _payable_days(company_id: str, employee_code: str, period: str,
                         profile: Optional[dict] = None, calendar: Optional[dict] = None,
                         sandwich: bool = False) -> dict:
     """Every in-service day of the period is either payable or LOP.
 
-    Present / On OD / paid leave / Weekly Off / Holiday are payable; Half Day is half; Absent,
+    Present / On OD / paid leave / Weekly Off / Holiday are payable; Absent,
     unpaid leave (LWP) and a working day with NO attendance row are LOP -- the
     safer-for-the-company default where the record is silent. A day with no row that the
     employee's calendar says is a weekly off or holiday is payable. Days before joining or
     after the last working day are outside service: unpaid, but not LOP.
+
+    How much a day is worth is the ATTENDANCE row's answer, not payroll's. The day
+    calculator already applied the ATT_DAY policy in force on that date -- `half_day_fraction`
+    among it -- and froze the result on the row as `payable_day` / `lop_fraction`. Payroll
+    re-deciding it from the status alone is how a company that configured a half day to cost
+    a quarter got charged a half in pay: the attendance screen and the payslip disagreed
+    about the same day. So for a day whose worth its STATUS fixes, the stored fraction wins
+    and 0.5-for-a-half-day is only the fallback for rows written before the policy existed.
+
+    Two statuses deliberately keep payroll's own answer. ON LEAVE is decided by the LEAVE
+    TYPE (paid or unpaid), which the day row does not know -- it stores 1.0 for every leave
+    day, so honouring it would pay LWP. WEEKLY OFF / HOLIDAY are "off" days whose LOP share
+    the sandwich rule below may still set, which is a payroll policy and not an attendance
+    fact.
 
     `sandwich` (payroll policy): a weekly off / holiday whose neighbouring working days are
     LOP on both sides (or on its only side) is LOP too -- otherwise somebody with no
@@ -762,7 +807,8 @@ async def _payable_days(company_id: str, employee_code: str, period: str,
     rows = await get_collection(COLL_ATTENDANCE).find(
         {"company_id": str(company_id), "employee_code": employee_code,
          "work_date": {"$gte": start, "$lte": end}},
-        {"status": 1, "work_date": 1, "leave_ref": 1},
+        {"status": 1, "work_date": 1, "leave_ref": 1,
+         "payable_day": 1, "lop_fraction": 1},
     ).to_list(40)
     by_day = {r.get("work_date") or "": r for r in rows}
     unpaid_refs = await _unpaid_leave_refs(
@@ -792,11 +838,11 @@ async def _payable_days(company_id: str, employee_code: str, period: str,
                 unrecorded += 1
             continue
         if status in (AttendanceStatus.PRESENT.value, AttendanceStatus.ON_OD.value):
-            days.append(("work", 0.0, 1.0, "present"))
+            days.append(_stored_share(row, "work", 0.0, 1.0, "present"))
         elif status == AttendanceStatus.HALF_DAY.value:
-            days.append(("work", 0.5, 0.5, "present"))
+            days.append(_stored_share(row, "work", 0.5, 0.5, "half_day"))
         elif status == AttendanceStatus.ABSENT.value:
-            days.append(("work", 1.0, 0.0, "absent"))
+            days.append(_stored_share(row, "work", 1.0, 0.0, "absent"))
         elif status == AttendanceStatus.ON_LEAVE.value:
             unpaid = row.get("leave_ref") in unpaid_refs
             days.append(("work", 1.0 if unpaid else 0.0, 0.0, "lwp" if unpaid else "leave"))
@@ -805,7 +851,7 @@ async def _payable_days(company_id: str, employee_code: str, period: str,
         elif status == AttendanceStatus.HOLIDAY.value:
             days.append(("off", 0.0, 0.0, "Holiday"))
         elif status == AttendanceStatus.PENDING.value:
-            days.append(("work", 1.0, 0.0, "pending"))
+            days.append(_stored_share(row, "work", 1.0, 0.0, "pending"))
             pending += 1
         else:
             days.append(("work", 0.0, 1.0, "present"))
