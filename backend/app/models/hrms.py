@@ -3800,7 +3800,26 @@ CONFIG_ENTITY_POLICY_VERSION = "policy_version"
 # is active -- which is also §30's "Payroll can revise a formula through a new version,
 # simulate the impact and obtain approval before activation".
 CONFIG_ENTITY_SALARY_COMPONENT = "salary_component"
-CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
+# §27/§30 — a custom field IS configuration: it decides what is mandatory on an employee
+# record, what is masked, what validates and what leaves the company in an export. Its
+# definitions saved straight to live, so "make blood group mandatory" or "unmask the PAN"
+# took effect the moment one person clicked Save.
+CONFIG_ENTITY_FIELD_DEFINITION = "field_definition"
+CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT,
+                       CONFIG_ENTITY_FIELD_DEFINITION)
+
+# Which of those types a company actually puts through the §27 flow.
+#
+# POLICY VERSIONS and SALARY COMPONENTS are governed by default because they decide pay:
+# the LOP rule, the rounding, the formula behind a component. A company cannot opt out of
+# that, which is the point of the flow existing. PAY_POLICY needs no separate entry -- it
+# IS a policy version, and the payroll policy screen drafts one.
+#
+# FIELD DEFINITIONS are NOT governed by default, deliberately. A field change cannot move
+# money, companies add fields constantly during onboarding, and making every label edit
+# wait for an approver would turn the setup phase into a queue. A company that wants the
+# control turns it on; `governed_config_types` on hrms_settings is that switch.
+DEFAULT_GOVERNED_CONFIG_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
 
 AUDIT_CONFIG_REQUESTED = "configuration change requested"
 AUDIT_CONFIG_DECIDED   = "configuration change decided"
@@ -3818,6 +3837,15 @@ class ConfigChangeRequestIn(BaseModel):
     title: Optional[str] = None
     reason: Optional[str] = None
     effective_from: Optional[str] = None
+
+
+class GovernedConfigTypesIn(BaseModel):
+    """Which configuration types this company sends through the §27 flow.
+
+    The pay-deciding ones are added back by the service whatever is posted, so this cannot
+    be used to switch governance off for salary components or policy versions.
+    """
+    entity_types: list[str] = []
 
 
 class ConfigDecisionIn(BaseModel):

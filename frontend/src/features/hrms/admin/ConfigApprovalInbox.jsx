@@ -8,7 +8,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   listConfigChangeRequests, getConfigChangeRequest, decideConfigChangeRequest,
-  activateConfigChangeRequest,
+  activateConfigChangeRequest, getGovernedConfigTypes, setGovernedConfigTypes,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL } from '../internal/internalKit';
 import { Btn, Chip, RecordList } from '../internal/internalKit.jsx';
@@ -39,6 +39,87 @@ const STATUS_TONE = {
 };
 
 const when = (value) => (value ? new Date(value).toLocaleString() : '—');
+
+const TYPE_LABEL = {
+  policy_version: 'Policy versions — attendance rules, payroll policy',
+  salary_component: 'Salary components — formulas, slabs, proration',
+  field_definition: 'Custom field definitions — what is mandatory, masked and exported',
+};
+
+/**
+ * §27 — which kinds of configuration go through this flow at all.
+ *
+ * The pay-deciding types are shown ticked and DISABLED rather than hidden: an
+ * administrator reading this needs to know they are governed, and a box they could untick
+ * would be the first thing anyone wanting to skip the flow would reach for. The service
+ * adds them back regardless of what is posted, so the lock here is a courtesy to the
+ * reader, not the enforcement.
+ */
+const GovernedTypes = ({ scope, canApprove, showSuccess, showError }) => {
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    getGovernedConfigTypes(scope)
+      .then(({ data }) => { if (live) setState(data); })
+      .catch(() => { if (live) setState(null); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggle = async (type, on) => {
+    const next = on
+      ? [...new Set([...(state.governed_config_types || []), type])]
+      : (state.governed_config_types || []).filter((t) => t !== type);
+    setBusy(true);
+    try {
+      const { data } = await setGovernedConfigTypes({ entity_types: next }, scope);
+      setState(data);
+      showSuccess(on ? `${type} changes now need approval.`
+        : `${type} changes save directly again.`);
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not change that.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state) return null;
+  const governed = new Set(state.governed_config_types || []);
+  const fixed = new Set(state.always_governed || []);
+
+  return (
+    <div className="rounded-lg border border-[var(--border)] px-3.5 py-3 space-y-2">
+      <div>
+        <h3 className="text-[12.5px] font-bold text-[var(--text-main)]">
+          What needs approval
+        </h3>
+        <p className="text-[11.5px] text-[var(--text-muted)]">
+          A governed change is drafted, analysed, approved by somebody else and then
+          activated. Anything not governed saves straight to live configuration.
+        </p>
+      </div>
+      {(state.known || []).map((type) => (
+        <label key={type} className="flex items-start gap-2.5">
+          <input type="checkbox" className="mt-0.5" checked={governed.has(type)}
+            disabled={!canApprove || busy || fixed.has(type)}
+            onChange={(e) => toggle(type, e.target.checked)} />
+          <span>
+            <span className="block text-[12px] text-[var(--text-main)]">
+              {TYPE_LABEL[type] || type}
+            </span>
+            {fixed.has(type) && (
+              <span className="block text-[11px] text-[var(--text-muted)]">
+                Always governed — it decides what people are paid.
+              </span>
+            )}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+};
 
 const RequestDetail = ({ request, canApprove, busy, onDecide, onActivate }) => {
   const [comments, setComments] = useState('');
@@ -290,6 +371,9 @@ const ConfigApprovalInbox = () => {
           <option value="">All</option>
         </select>
       </div>
+
+      <GovernedTypes scope={scope} canApprove={canApprove}
+        showSuccess={showSuccess} showError={showError} />
 
       {loading && <HrmsLoading label="Loading change requests…" />}
       {error && <HrmsError message={error} />}

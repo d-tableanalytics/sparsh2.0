@@ -388,6 +388,50 @@ async def _usage_count(company_id: str, module: str, code: str) -> int:
         {"company_id": str(company_id), f"custom_fields.{code}": {"$exists": True}})
 
 
+async def _field_change_governed(company_id: str) -> bool:
+    from app.models.hrms import CONFIG_ENTITY_FIELD_DEFINITION
+    from app.services import hrms_config_change_service as CC
+    return await CC.is_governed(company_id, CONFIG_ENTITY_FIELD_DEFINITION)
+
+
+async def _stage_field_change(actor: dict, company_id: str, current: dict, changed: dict,
+                              payload: dict, now) -> dict:
+    """Hold a governed field change on the document and raise a §27 request for it.
+
+    The staged keys live under `pending_definition`, which nothing in `_applies`,
+    `_in_force`, `_check_value` or `visible_custom_fields` reads -- that is what makes the
+    live field's behaviour unchanged while the change is pending, rather than merely
+    intended to be.
+    """
+    from app.models.hrms import CONFIG_ENTITY_FIELD_DEFINITION
+    from app.services import hrms_config_change_service as CC
+
+    reason = str(payload.get("change_reason") or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="Say why this field is changing — your company sends field changes for "
+                   "approval, and the approver needs the business reason (FRD §27).")
+    module, code = current["module"], current["code"]
+    await get_collection(COLL_FIELD_DEFINITIONS).update_one(
+        {"_id": current["_id"]},
+        {"$set": {"pending_definition": changed, "pending_reason": reason,
+                  "pending_by": _actor_id(actor), "pending_at": now, "updated_at": now}})
+    request = await CC.create_request(actor, company_id, {
+        "entity_type": CONFIG_ENTITY_FIELD_DEFINITION,
+        "entity_code": f"{module}.{code}", "reason": reason,
+        "effective_from": payload.get("effective_from"),
+        "title": f"{module}.{code} — {', '.join(sorted(changed))}"[:160]})
+    await get_collection(COLL_FIELD_DEFINITIONS).update_one(
+        {"_id": current["_id"]}, {"$set": {"pending_request_no": request["request_no"]}})
+    await audit(actor, AUDIT_FIELD_DEFINITION_SAVED, ENTITY_FIELD_DEFINITION,
+                f"{module}.{code}", f"staged as {request['request_no']}", company_id,
+                changes=[{"field": k, "old": current.get(k), "new": v}
+                         for k, v in sorted(changed.items())])
+    saved = await get_collection(COLL_FIELD_DEFINITIONS).find_one({"_id": current["_id"]})
+    return _def_out(saved)
+
+
 async def save_field_definition(actor: dict, company_id: str, payload: dict) -> dict:
     module = str(payload.get("module") or "employee")
     if module not in FIELD_MODULES:
@@ -445,6 +489,18 @@ async def save_field_definition(actor: dict, company_id: str, payload: dict) -> 
         changed = {k: v for k, v in definition.items() if old.get(k) != v}
         if not changed:
             return _def_out(current)
+        # §27 — when the company governs field definitions, a change to a LIVE field is
+        # STAGED rather than written over it. The field goes on validating, masking and
+        # exporting exactly as it did while the change waits for its approver; applying it
+        # is `_field_activate`'s and nothing else's.
+        #
+        # A DRAFT field is edited freely, on the same reasoning the component lifecycle
+        # uses: a Draft has never been live, so there is nothing to protect and no
+        # approver who would learn anything from reviewing it.
+        if current.get("status") == FieldStatus.ACTIVE.value and \
+                await _field_change_governed(company_id):
+            return await _stage_field_change(actor, company_id, current, changed, payload,
+                                             now)
         entry = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
                  "reason": payload.get("change_reason"),
                  "old": {k: old.get(k) for k in changed}, "new": changed}
@@ -495,6 +551,15 @@ async def set_field_status(actor: dict, company_id: str, module: str, code: str,
         raise HTTPException(status_code=422, detail="Unknown status.")
     if new_status == current["status"]:
         return _def_out(current)
+    # §27 — making a field LIVE is the governed move. Retiring one is not: it stops the
+    # field being collected and breaks nothing that already holds a value, and refusing it
+    # would leave a field that should not be in use waiting on an approver.
+    if new_status == FieldStatus.ACTIVE.value and await _field_change_governed(company_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{module}.{code} cannot be activated directly. Raise a configuration "
+                   f"change request for it and have somebody else approve it, then "
+                   f"activate it from the Configuration Approvals screen (FRD §27).")
     updates = {"status": new_status, "updated_at": now}
     if new_status == FieldStatus.ACTIVE.value:
         updates.update({"approved_by": _actor_id(actor), "approved_by_name": _actor_name(actor),

@@ -138,6 +138,11 @@ export const decideConfigChangeRequest = (requestNo, payload, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/decision`, payload, { params });
 export const activateConfigChangeRequest = (requestNo, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/activate`, null, { params });
+/** FRD §27 — which configuration types this company sends through the approval flow. */
+export const getGovernedConfigTypes = (params) =>
+  api.get('/hrms/config/governed-types', { params });
+export const setGovernedConfigTypes = (payload, params) =>
+  api.put('/hrms/config/governed-types', payload, { params });
 /** FRD §29 — what points at a piece of configuration, before changing or retiring it. */
 export const getConfigImpact = (entityType, code, params) =>
   api.get(`/hrms/config/impact/${entityType}/${code}`, { params });

@@ -52,6 +52,7 @@ async def expect(label, coro, status, needle=""):
 
 
 from app.services.hrms.tests.test_payroll_live_findings import FakeCollection  # noqa: E402
+from app.services.hrms.tests.governance_helper import activate_policy_version  # noqa: E402
 
 CO = "C1"
 HR = {"_id": "hr-1", "role": "superadmin", "governance_role": "HR", "full_name": "Dummy HR"}
@@ -68,6 +69,7 @@ async def main() -> int:
     import app.services.hrms_attendance_rules_service as AR
     import app.services.hrms_attendance_service as AT
     import app.services.hrms_audit_service as AU
+    import app.services.hrms_config_change_service as CC
     import app.services.hrms_id_service as ID
     import app.services.hrms_policy_version_service as PV
     import app.services.hrms_shift_service as SH
@@ -75,12 +77,12 @@ async def main() -> int:
     store: dict = {}
     getter = lambda name: store.setdefault(name, FakeCollection())  # noqa: E731
     mongo.get_collection = getter
-    for mod in (AR, AT, AU, ID, PV, SH):
+    for mod in (AR, AT, AU, CC, ID, PV, SH):
         mod.get_collection = getter
 
     async def no_audit(*a, **k):
         return None
-    for mod in (AT, PV):
+    for mod in (AT, CC, PV):
         mod.audit = no_audit
 
     # The §23 regularisation window is relative to TODAY, so the suite pins today rather
@@ -124,11 +126,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_ATT_REGULARISATION, "effective_from": "2026-01-01",
         "rules": {"approval_levels": 1}})
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 1, "Pending Approval")
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 1, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_ATT_REGULARISATION,
                                    "version_no": 1, "scope": {"locations": ["Pune"]}})
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 1, "Active")
+    await activate_policy_version(CC, HR, MGR, CO, M.POLICY_ATT_REGULARISATION, 1)
 
     pune = await AT.regularisation_rules(
         CO, {"work_location": "Pune"}, DAY)
@@ -252,11 +252,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_ATT_REGULARISATION, "effective_from": "2026-01-01",
         "rules": {"approval_levels": 2}})
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 2, "Pending Approval")
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 2, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_ATT_REGULARISATION,
                                    "version_no": 2, "scope": {"locations": ["Mumbai"]}})
-    await PV.set_status(HR, CO, M.POLICY_ATT_REGULARISATION, 2, "Active")
+    await activate_policy_version(CC, HR, MGR, CO, M.POLICY_ATT_REGULARISATION, 2)
 
     od_two = await AT.request_od(HR, CO, {
         "employee_code": "E-TWO", "od_date": "2026-05-20", "purpose": "Site audit"})

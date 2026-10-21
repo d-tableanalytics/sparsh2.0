@@ -283,13 +283,34 @@ async def _scope_signature(company_id: str, policy_code: str, version_no: int) -
         for r in rows)
 
 
+# The two statuses that make a rule REAL. §27 puts impact analysis, simulation and an
+# approval between a draft and these, so they are the flow's to set and nobody else's.
+GOVERNING_STATUSES = frozenset({PolicyVersionStatus.APPROVED.value,
+                                PolicyVersionStatus.ACTIVE.value})
+
+
 async def set_status(actor: dict, company_id: str, policy_code: str, version_no: int,
-                     status: str, reason: Optional[str] = None) -> dict:
+                     status: str, reason: Optional[str] = None, *,
+                     via_change_request: bool = False) -> dict:
     """Move a version along its lifecycle.
 
     Activating supersedes whatever was Active for the same policy — it does NOT delete it.
     §21: a version already used in history must survive, because a past payroll has to stay
     reproducible and the superseded row is what makes that possible.
+
+    APPROVED AND ACTIVE ARE NOT CALLABLE DIRECTLY for a governed policy. Anyone holding
+    config.approve could walk a version Draft → Pending → Approved → Active through this
+    one endpoint, which skipped the impact analysis, the simulation and the change request,
+    and let the person who drafted a rule approve it themselves. §27 lists seven stages
+    between wanting a rule changed and the rule being live; a second door to Active made
+    the other six decorative, and it was the door the UI used.
+
+    What stays direct is everything that does not make a rule real: Draft → Pending to hand
+    it over, Pending → Draft to take it back, and Retire with a reason. None of those can
+    change what the resolver returns for anybody.
+
+    `via_change_request` is the flow identifying itself (hrms_config_change_service's
+    `activate`). It is keyword-only and passed from exactly one place.
     """
     policy_code = _code(policy_code)
     version = await _require_version(company_id, policy_code, version_no)
@@ -301,6 +322,16 @@ async def set_status(actor: dict, company_id: str, policy_code: str, version_no:
         raise HTTPException(
             status_code=409,
             detail=f"A {current} version cannot become {status}. It can become: {allowed}.")
+    if status in GOVERNING_STATUSES and not via_change_request:
+        from app.models.hrms import CONFIG_ENTITY_POLICY_VERSION
+        from app.services import hrms_config_change_service as CC
+        if await CC.is_governed(company_id, CONFIG_ENTITY_POLICY_VERSION):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{policy_code} v{version_no} cannot be set to {status} directly. "
+                       f"Raise a configuration change request for it, run the impact "
+                       f"analysis and have somebody else approve it — then activate it "
+                       f"from the Configuration Approvals screen (FRD §27).")
     if status in (PolicyVersionStatus.RETIRED.value,) and not (reason or "").strip():
         raise HTTPException(status_code=422, detail="Say why the version is being retired.")
 

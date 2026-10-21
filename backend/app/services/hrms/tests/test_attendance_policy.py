@@ -43,6 +43,7 @@ async def expect(label, coro, status, needle=""):
 
 
 from app.services.hrms.tests.test_payroll_live_findings import FakeCollection  # noqa: E402
+from app.services.hrms.tests.governance_helper import activate_policy_version  # noqa: E402
 
 CO = "C1"
 HR = {"_id": "hr-1", "role": "admin", "full_name": "Dummy HR"}
@@ -53,6 +54,7 @@ async def main() -> int:
     import app.db.mongodb as mongo
     from app.models import hrms as M
     import app.services.hrms_attendance_rules_service as AR
+    import app.services.hrms_config_change_service as CC
     import app.services.hrms_attendance_simulation_service as SIM
     import app.services.hrms_attendance_service as AT
     import app.services.hrms_policy_version_service as PV
@@ -61,12 +63,15 @@ async def main() -> int:
     store: dict = {}
     getter = lambda name: store.setdefault(name, FakeCollection())  # noqa: E731
     mongo.get_collection = getter
-    for mod in (AR, AT, PV, SH, SIM):
+    # Gap 5: Approved and Active are the §27 flow's to set, so the suite reaches an
+    # active policy the way a user does -- through hrms_config_change_service.
+    for mod in (AR, AT, CC, PV, SH, SIM):
         mod.get_collection = getter
 
     async def no_audit(*a, **k):
         return None
     PV.audit = no_audit
+    CC.audit = no_audit
 
     # ── 1. The engine's new §23 parameters ──────────────────────────────────────────
     section("1. §23 half-day combination, LOP fraction, no-out-punch")
@@ -136,11 +141,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_ATT_DAY, "effective_from": "2026-04-01",
         "rules": {"half_day_late_minutes": 90, "half_day_fraction": 0.25}})
-    await PV.set_status(HR, CO, M.POLICY_ATT_DAY, 1, "Pending Approval")
-    await PV.set_status(APPROVER, CO, M.POLICY_ATT_DAY, 1, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_ATT_DAY, "version_no": 1,
                                    "scope": {"locations": ["Pune"]}})
-    await PV.set_status(APPROVER, CO, M.POLICY_ATT_DAY, 1, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, M.POLICY_ATT_DAY, 1)
 
     march = await AR.compute_day(CO, "E1", "2026-03-11", "11:30", "20:30")
     check("the CLOSED month before the effective date is untouched (§30)",

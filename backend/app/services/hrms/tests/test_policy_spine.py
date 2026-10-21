@@ -41,6 +41,7 @@ async def expect(label, coro, status, needle=""):
 
 
 from app.services.hrms.tests.test_payroll_live_findings import FakeCollection  # noqa: E402
+from app.services.hrms.tests.governance_helper import activate_policy_version  # noqa: E402
 
 CO = "C1"
 HR = {"_id": "hr-1", "role": "admin", "full_name": "Dummy HR"}
@@ -50,6 +51,7 @@ APPROVER = {"_id": "fin-1", "role": "admin", "full_name": "Dummy Finance"}
 async def main() -> int:
     import app.db.mongodb as mongo
     from app.models import hrms as M
+    import app.services.hrms_config_change_service as CC
     import app.services.hrms_policy_version_service as PV
 
     store: dict = {}
@@ -57,10 +59,14 @@ async def main() -> int:
     mongo.get_collection = getter
     # The service binds get_collection at import, so the module's own name is what matters.
     PV.get_collection = getter
+    # Gap 5: Approved and Active are the §27 flow's to set, so reaching them in this suite
+    # means going through it. `activate_policy_version` drives the real five calls.
+    CC.get_collection = getter
 
     async def no_audit(*a, **k):
         return None
     PV.audit = no_audit
+    CC.audit = no_audit
 
     # ── 1. Definitions and the version lifecycle ────────────────────────────────────
     section("1. Version lifecycle (FRD §21, §26, §27)")
@@ -84,9 +90,12 @@ async def main() -> int:
 
     await expect("Draft cannot jump straight to Active",
                  PV.set_status(HR, CO, "ATT_LOP", 1, "Active"), 409, "cannot become")
+    # Handing it to an approver is still a direct call: it makes no rule real.
     await PV.set_status(HR, CO, "ATT_LOP", 1, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_LOP", 1, "Approved")
-    await PV.set_status(APPROVER, CO, "ATT_LOP", 1, "Active")
+    await expect("...and a Pending version cannot be approved directly either (Gap 5)",
+                 PV.set_status(APPROVER, CO, "ATT_LOP", 1, "Approved"),
+                 409, "change request")
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_LOP", 1)
     got = await PV.resolve(CO, "ATT_LOP", {}, "2026-06-01")
     check("once Active it resolves, carrying its own provenance",
           got and got["version_no"] == 1 and got["rules"]["half_day_fraction"] == 0.5
@@ -103,14 +112,12 @@ async def main() -> int:
     v2 = await PV.save_draft(HR, CO, {
         "policy_code": "ATT_LOP", "effective_from": "2026-07-01",
         "rules": {"half_day_fraction": 0.25}, "change_reason": "Softer half day"})
-    await PV.set_status(HR, CO, "ATT_LOP", 2, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_LOP", 2, "Approved")
-    check("an approved future version does not touch today",
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_LOP", 2)
+    check("an active FUTURE-dated version does not touch today",
           (await PV.resolve(CO, "ATT_LOP", {}, "2026-06-30"))["version_no"] == 1)
-    check("...but it is already the answer on and after its date",
+    check("...but it is the answer on and after its date",
           (await PV.resolve(CO, "ATT_LOP", {}, "2026-07-01"))["version_no"] == 2)
 
-    await PV.set_status(APPROVER, CO, "ATT_LOP", 2, "Active")
     rows = {r["version_no"]: r for r in await PV.list_versions(CO, "ATT_LOP")}
     check("activating v2 SUPERSEDES v1 rather than deleting it",
           rows[1]["status"] == "Superseded" and rows[1]["superseded_by"] == 2)
@@ -133,11 +140,10 @@ async def main() -> int:
         await PV.save_draft(HR, CO, {"policy_code": "ATT_GRACE",
                                      "effective_from": "2026-01-01",
                                      "rules": {"daily_grace_minutes": mins}})
-        await PV.set_status(HR, CO, "ATT_GRACE", n, "Pending Approval")
-        await PV.set_status(APPROVER, CO, "ATT_GRACE", n, "Approved")
         if scope:
             await PV.assign_scope(HR, CO, {"policy_code": "ATT_GRACE", "version_no": n,
                                            "scope": scope, "priority": priority})
+        await activate_policy_version(CC, HR, APPROVER, CO, "ATT_GRACE", n)
 
     mumbai = {"work_location": "Mumbai", "grade": "M1"}
     pune_m1 = {"work_location": "Pune", "grade": "M1"}
@@ -158,10 +164,9 @@ async def main() -> int:
     # Equal specificity in DIFFERENT dimensions -- the administrator's priority decides.
     await PV.save_draft(HR, CO, {"policy_code": "ATT_GRACE", "effective_from": "2026-01-01",
                                  "rules": {"daily_grace_minutes": 20}})
-    await PV.set_status(HR, CO, "ATT_GRACE", 4, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_GRACE", 4, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": "ATT_GRACE", "version_no": 4,
                                    "scope": {"grades": ["M1"]}, "priority": 5})
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_GRACE", 4)
     check("two equally specific rules: the higher priority wins",
           (await PV.resolve(CO, "ATT_GRACE", pune_m1, "2026-06-01"))["rules"]
           ["daily_grace_minutes"] == 20)
@@ -182,17 +187,13 @@ async def main() -> int:
     # v1: the company-wide rule. v2: a Pune-only rule. Both must be able to be live.
     await PV.save_draft(HR, CO, {"policy_code": "ATT_LATE", "effective_from": "2026-01-01",
                                  "rules": {"late_after": 10}})
-    await PV.set_status(HR, CO, "ATT_LATE", 1, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 1, "Approved")
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 1, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_LATE", 1)
 
     await PV.save_draft(HR, CO, {"policy_code": "ATT_LATE", "effective_from": "2026-01-01",
                                  "rules": {"late_after": 20}})
-    await PV.set_status(HR, CO, "ATT_LATE", 2, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 2, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": "ATT_LATE", "version_no": 2,
                                    "scope": {"locations": ["Pune"]}})
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 2, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_LATE", 2)
 
     late = {r["version_no"]: r for r in await PV.list_versions(CO, "ATT_LATE")}
     check("activating a Pune-only rule does NOT switch off the company default",
@@ -207,9 +208,7 @@ async def main() -> int:
     # A revision of the COMPANY-WIDE rule does displace the old company-wide one.
     await PV.save_draft(HR, CO, {"policy_code": "ATT_LATE", "effective_from": "2026-02-01",
                                  "rules": {"late_after": 12}})
-    await PV.set_status(HR, CO, "ATT_LATE", 3, "Pending Approval")
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 3, "Approved")
-    await PV.set_status(APPROVER, CO, "ATT_LATE", 3, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, "ATT_LATE", 3)
     late = {r["version_no"]: r for r in await PV.list_versions(CO, "ATT_LATE")}
     check("a new company-wide rule DOES supersede the old company-wide one",
           late[1]["status"] == "Superseded" and late[1]["superseded_by"] == 3)

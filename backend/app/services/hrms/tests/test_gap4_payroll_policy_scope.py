@@ -43,6 +43,7 @@ def section(title: str) -> None:
 
 
 from app.services.hrms.tests.test_payroll_live_findings import FakeCollection  # noqa: E402
+from app.services.hrms.tests.governance_helper import activate_policy_version  # noqa: E402
 
 CO = "C1"
 HR = {"_id": "hr-1", "role": "superadmin", "governance_role": "HR", "full_name": "Dummy HR"}
@@ -58,6 +59,7 @@ async def main() -> int:
     import app.db.mongodb as mongo
     from app.models import hrms as M
     import app.services.hrms_audit_service as AU
+    import app.services.hrms_config_change_service as CC
     import app.services.hrms_payroll_service as PR
     import app.services.hrms_policy_version_service as PV
     import app.services.hrms_shift_service as SH
@@ -65,12 +67,12 @@ async def main() -> int:
     store: dict = {}
     getter = lambda name: store.setdefault(name, FakeCollection())  # noqa: E731
     mongo.get_collection = getter
-    for mod in (AU, PR, PV, SH):
+    for mod in (AU, CC, PR, PV, SH):
         mod.get_collection = getter
 
     async def no_audit(*a, **k):
         return None
-    for mod in (PR, PV):
+    for mod in (CC, PR, PV):
         mod.audit = no_audit
 
     # ── 0. Every key belongs to exactly one level ────────────────────────────────────
@@ -118,11 +120,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_PAY_POLICY, "effective_from": "2026-01-01",
         "rules": {"net_rounding": "Nearest", "checker_required": False}})
-    await PV.set_status(HR, CO, M.POLICY_PAY_POLICY, 1, "Pending Approval")
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 1, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_PAY_POLICY, "version_no": 1,
                                    "scope": {"grades": ["M1"]}})
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 1, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, M.POLICY_PAY_POLICY, 1)
 
     # ── 1. The resolver answers differently for the two employees ────────────────────
     section("1. The scoped version resolves for M1 and not for M2")
@@ -192,11 +192,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_PAY_POLICY, "effective_from": "2026-01-01",
         "rules": {"sandwich_weekly_off": True}})
-    await PV.set_status(HR, CO, M.POLICY_PAY_POLICY, 2, "Pending Approval")
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 2, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_PAY_POLICY, "version_no": 2,
                                    "scope": {"locations": ["Mumbai"]}})
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 2, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, M.POLICY_PAY_POLICY, 2)
     # The stored settings say nothing about the sandwich rule, so Pune inherits the
     # DEFAULT_PAYROLL_POLICY value and Mumbai gets the version's.
     store[M.COLL_EMPLOYEE_PROFILES].docs.append(
@@ -217,11 +215,9 @@ async def main() -> int:
     await PV.save_draft(HR, CO, {
         "policy_code": M.POLICY_PAY_POLICY, "effective_from": "2026-01-01",
         "rules": {"structure_approval_required": True}})
-    await PV.set_status(HR, CO, M.POLICY_PAY_POLICY, 3, "Pending Approval")
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 3, "Approved")
     await PV.assign_scope(HR, CO, {"policy_code": M.POLICY_PAY_POLICY, "version_no": 3,
                                    "scope": {"grades": ["M3"]}})
-    await PV.set_status(APPROVER, CO, M.POLICY_PAY_POLICY, 3, "Active")
+    await activate_policy_version(CC, HR, APPROVER, CO, M.POLICY_PAY_POLICY, 3)
     store[M.COLL_EMPLOYEE_PROFILES].docs.append(
         {"company_id": CO, "employee_code": "E-M3", "user_id": str(ObjectId()),
          "employment_status": "Active", "grade": "M3", "work_location": "Pune"})

@@ -42,9 +42,12 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_CONFIG_ACTIVATED, AUDIT_CONFIG_DECIDED, AUDIT_CONFIG_REQUESTED,
     COLL_CONFIG_APPROVALS, COLL_CONFIG_CHANGE_REQUESTS, COLL_EMPLOYEE_PROFILES,
-    CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT, CONFIG_ENTITY_TYPES,
-    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, ENTITY_CONFIG_CHANGE,
-    ConfigChangeStatus, PolicyVersionStatus, is_iso_date,
+    COLL_FIELD_DEFINITIONS, COLL_SETTINGS,
+    CONFIG_ENTITY_FIELD_DEFINITION, CONFIG_ENTITY_POLICY_VERSION,
+    CONFIG_ENTITY_SALARY_COMPONENT, CONFIG_ENTITY_TYPES,
+    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, DEFAULT_GOVERNED_CONFIG_TYPES,
+    ENTITY_CONFIG_CHANGE,
+    ConfigChangeStatus, FieldStatus, PolicyVersionStatus, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -138,15 +141,19 @@ async def _policy_activate(actor: dict, company_id: str, request: dict) -> dict:
     # Walk it up to Active through the version lifecycle rather than writing the status
     # directly: the lifecycle is what supersedes the version this one displaces, and
     # bypassing it would leave two Active versions for the same population.
+    #
+    # `via_change_request` is how the lifecycle tells this path apart from a direct API
+    # call. Approved and Active are refused to everyone else for a governed policy, so
+    # without the flag activation would refuse itself.
     if version.get("status") == PolicyVersionStatus.DRAFT.value:
         await PV.set_status(actor, company_id, code, version_no,
-                            PolicyVersionStatus.PENDING.value)
+                            PolicyVersionStatus.PENDING.value, via_change_request=True)
         version = await _policy_load(company_id, request)
     if version.get("status") == PolicyVersionStatus.PENDING.value:
         await PV.set_status(actor, company_id, code, version_no,
-                            PolicyVersionStatus.APPROVED.value)
+                            PolicyVersionStatus.APPROVED.value, via_change_request=True)
     return await PV.set_status(actor, company_id, code, version_no,
-                               PolicyVersionStatus.ACTIVE.value)
+                               PolicyVersionStatus.ACTIVE.value, via_change_request=True)
 
 
 async def _policy_describe(company_id: str, request: dict) -> dict:
@@ -245,6 +252,116 @@ async def _component_describe(company_id: str, request: dict) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────
+# Field definition (FRD §27, §29, §30)
+# ─────────────────────────────────────────────────────────────
+def _field_parts(entity_code: str) -> tuple:
+    """`employee.blood_group` out of the request's entity_code.
+
+    `create_request` upper-cases every entity_code, which suits a policy code and a
+    component code and does not suit a field, whose codes are lowercase by validation. The
+    normalisation lives here rather than in the flow because it is this entity's spelling
+    rule, not the flow's.
+    """
+    text = str(entity_code or "").strip().lower()
+    module, _, code = text.partition(".")
+    if not module or not code:
+        raise HTTPException(
+            status_code=422,
+            detail="Name a field as module.code, e.g. employee.blood_group.")
+    return module, code
+
+
+async def _field_load(company_id: str, request: dict) -> dict:
+    module, code = _field_parts(request["entity_code"])
+    doc = await get_collection(COLL_FIELD_DEFINITIONS).find_one(
+        {"company_id": str(company_id), "module": module, "code": code})
+    if not doc:
+        raise HTTPException(status_code=404,
+                            detail=f"No {module} field '{code}'.")
+    return doc
+
+
+async def _field_impact(company_id: str, request: dict) -> dict:
+    """What a field change reaches: who holds a value for it, and what reads it.
+
+    Leans on the dependency service, which already answers "what points at this field" for
+    the §29 viewer -- two implementations of that question would eventually disagree.
+    """
+    from app.services.hrms_config_dependency_service import ENTITY_FIELD, where_used
+    module, code = _field_parts(request["entity_code"])
+    definition = await _field_load(company_id, request)
+    usage = await where_used(company_id, ENTITY_FIELD, code, module)
+
+    holders = usage.get("holders")
+    if holders is None:                     # count it ourselves when the viewer does not
+        from app.services.hrms_employee_master_service import field_usage
+        holders = (await field_usage(company_id, module, code)).get("employees_with_value")
+
+    pending = definition.get("pending_definition") or {}
+    warnings = []
+    if pending.get("mandatory") and not definition.get("mandatory"):
+        warnings.append(
+            f"Becomes MANDATORY while {holders} employee(s) hold a value — every record "
+            f"without one fails validation on its next save.")
+    if definition.get("sensitive") and pending.get("sensitive") is False:
+        warnings.append("Stops being masked, so the value becomes readable on screen "
+                        "and in exports to anyone who can see the record.")
+    if usage["references"]:
+        warnings.append(f"{len(usage['references'])} other piece(s) of configuration read "
+                        f"this field.")
+
+    return {
+        "entity": f"{module}.{code} ({definition.get('label') or ''})".strip(),
+        "employees_affected": holders,
+        "total_employees": await get_collection(COLL_EMPLOYEE_PROFILES).count_documents(
+            {"company_id": str(company_id)}),
+        "effective_from": definition.get("effective_from"),
+        "references": usage["references"],
+        "history": usage["history"],
+        "retroactive": False,
+        "warnings": warnings,
+    }
+
+
+async def _field_activate(actor: dict, company_id: str, request: dict) -> dict:
+    """Apply the staged definition and make the field live.
+
+    A governed edit to a LIVE field is held on the document as `pending_definition` rather
+    than written over the live one, so the field goes on validating and masking exactly as
+    it did while the change waits. This is the step that applies it -- and the only one.
+    """
+    definition = await _field_load(company_id, request)
+    pending = definition.get("pending_definition") or {}
+    now = datetime.now(timezone.utc)
+    updates = {**pending, "status": FieldStatus.ACTIVE.value, "updated_at": now,
+               "approved_by": _actor_id(actor), "approved_by_name": _actor_name(actor),
+               "approved_at": now, "pending_definition": None, "pending_request_no": None}
+    if not definition.get("effective_from"):
+        updates["effective_from"] = now.strftime("%Y-%m-%d")
+    entry = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
+             "reason": request.get("reason"), "via": request.get("request_no"),
+             "old": {k: definition.get(k) for k in pending} or {"status": definition["status"]},
+             "new": pending or {"status": FieldStatus.ACTIVE.value}}
+    await get_collection(COLL_FIELD_DEFINITIONS).update_one(
+        {"_id": definition["_id"]}, {"$set": updates, "$push": {"history": entry}})
+    return await _field_load(company_id, request)
+
+
+async def _field_describe(company_id: str, request: dict) -> dict:
+    """§30's old/new definition -- the staged change against what is live now."""
+    definition = await _field_load(company_id, request)
+    pending = definition.get("pending_definition") or {}
+    keys = sorted(pending) or ["status"]
+    return {
+        "old": {k: definition.get(k) for k in keys},
+        "new": {**{k: pending.get(k) for k in keys},
+                **({} if pending else {"status": FieldStatus.ACTIVE.value})},
+        "old_version": definition.get("version"),
+        "new_version": int(definition.get("version") or 1),
+    }
+
+
 ENTITY_HANDLERS = {
     CONFIG_ENTITY_POLICY_VERSION: {
         "load": _policy_load,
@@ -258,7 +375,68 @@ ENTITY_HANDLERS = {
         "activate": _component_activate,
         "describe": _component_describe,
     },
+    CONFIG_ENTITY_FIELD_DEFINITION: {
+        "load": _field_load,
+        "impact": _field_impact,
+        "activate": _field_activate,
+        "describe": _field_describe,
+    },
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# Which types this company governs
+# ─────────────────────────────────────────────────────────────
+async def governed_types(company_id: str) -> set:
+    """The configuration types this company puts through the flow.
+
+    Read from `hrms_settings.governed_config_types`, defaulting to the pay-deciding ones.
+    An unknown or misspelt name is DROPPED rather than honoured: a typo in this setting
+    must not be able to un-govern the salary components by accident, and silently governing
+    a type nothing can handle would 422 every save of it.
+    """
+    doc = await get_collection(COLL_SETTINGS).find_one({"company_id": str(company_id)})
+    stored = (doc or {}).get("governed_config_types")
+    if stored is None:
+        return set(DEFAULT_GOVERNED_CONFIG_TYPES)
+    return {t for t in (str(x).strip() for x in stored) if t in CONFIG_ENTITY_TYPES}
+
+
+async def is_governed(company_id: str, entity_type: str) -> bool:
+    return entity_type in await governed_types(company_id)
+
+
+async def set_governed_types(actor: dict, company_id: str, types) -> dict:
+    """The admin toggle on the Configuration Approval Inbox.
+
+    The pay-deciding types cannot be switched off. Letting an administrator un-govern the
+    salary components would make the whole flow optional for the one thing it exists to
+    protect, and whoever could turn it off is exactly whoever would want to.
+    """
+    wanted = {str(t).strip() for t in (types or [])}
+    unknown = wanted - set(CONFIG_ENTITY_TYPES)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown configuration type(s): {', '.join(sorted(unknown))}. "
+                   f"Known: {', '.join(CONFIG_ENTITY_TYPES)}.")
+    final = sorted(wanted | set(DEFAULT_GOVERNED_CONFIG_TYPES))
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_SETTINGS).update_one(
+        {"company_id": str(company_id)},
+        {"$set": {"governed_config_types": final, "updated_at": now},
+         "$setOnInsert": {"company_id": str(company_id)}}, upsert=True)
+    await audit(actor, AUDIT_CONFIG_DECIDED, ENTITY_CONFIG_CHANGE, "governed_types",
+                ", ".join(final), company_id)
+    return {"governed_config_types": final,
+            "always_governed": sorted(DEFAULT_GOVERNED_CONFIG_TYPES),
+            "known": list(CONFIG_ENTITY_TYPES)}
+
+
+async def get_governed_types(company_id: str) -> dict:
+    return {"governed_config_types": sorted(await governed_types(company_id)),
+            "always_governed": sorted(DEFAULT_GOVERNED_CONFIG_TYPES),
+            "known": list(CONFIG_ENTITY_TYPES)}
 
 
 def _handler(entity_type: str) -> dict:

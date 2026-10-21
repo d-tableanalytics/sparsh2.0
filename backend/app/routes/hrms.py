@@ -6510,7 +6510,7 @@ from fastapi.responses import Response as _Response  # noqa: E402
 
 from app.models.hrms import (  # noqa: E402
     EmployeeMasterListsIn, FieldDefinitionIn, FieldStatusIn, PaymentBatchIn,
-    ConfigChangeRequestIn, ConfigDecisionIn,
+    ConfigChangeRequestIn, ConfigDecisionIn, GovernedConfigTypesIn,
     PhotographIn, PolicyAssignmentIn, PolicyDefinitionIn, PolicyVersionIn,
     PolicyVersionStatusIn,
     PaymentStatusImportIn, PaymentStatusIn, PayrollPolicyIn, PayrollRemarksIn,
@@ -7274,6 +7274,35 @@ async def preview_bank_file_format(
     question is easier to answer against output than against a column list."""
     _require(current_user, Cap.CONFIG_READ)
     return bank_formats.preview(body or {})
+
+
+# ── Which configuration types this company governs (FRD §27) ──
+@router.get("/config/governed-types")
+async def get_governed_config_types(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """What goes through the §27 flow here, what always does, and what could.
+
+    `always_governed` is reported rather than inferred: the screen offering the toggle has
+    to show the pay-deciding types as fixed instead of as boxes that quietly re-tick
+    themselves.
+    """
+    _require(current_user, Cap.CONFIG_READ)
+    return await config_changes.get_governed_types(_company(current_user, company_id))
+
+
+@router.put("/config/governed-types")
+async def set_governed_config_types(
+    body: GovernedConfigTypesIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """CONFIG_APPROVE, not CONFIG_DRAFT: this decides how much review the drafters are
+    subject to, which is not a drafter's call to make."""
+    _require(current_user, Cap.CONFIG_APPROVE)
+    return await config_changes.set_governed_types(
+        current_user, _company(current_user, company_id), body.entity_types)
 
 
 # ── Configuration impact / dependency viewer (FRD §22, §29, §30) ──

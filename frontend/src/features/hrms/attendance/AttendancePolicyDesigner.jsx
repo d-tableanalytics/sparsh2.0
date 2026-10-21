@@ -9,6 +9,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   listPolicyDefinitions, savePolicyDefinition, listPolicyVersions, savePolicyVersion,
   setPolicyVersionStatus, assignPolicyScope, simulateAttendancePolicy,
+  createConfigChangeRequest, analyseConfigChangeImpact, submitConfigChangeRequest,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL } from '../internal/internalKit';
 import { Btn, Chip } from '../internal/internalKit.jsx';
@@ -23,6 +24,12 @@ import { Btn, Chip } from '../internal/internalKit.jsx';
  * Every field here is OPTIONAL and blank means "inherit". That is the whole design: a
  * company configuring the half-day combination must not have to restate the grace its
  * shift already gives, and a blank that meant zero would silently remove it.
+ *
+ * This screen DRAFTS and SENDS FOR APPROVAL; it does not approve or activate. It used to
+ * do both through the version status endpoint, which skipped the impact analysis, the
+ * simulation and the change request §27 puts between a draft and a live rule — and let
+ * whoever drafted a rule approve it themselves. Approval and activation now belong to
+ * Configuration Approvals, where the approver can see the impact before deciding.
  */
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
@@ -132,6 +139,34 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
   const move = (status) => run(
     () => setPolicyVersionStatus(code, version.version_no, { status }, scope),
     `Version ${status.toLowerCase()}.`);
+
+  /**
+   * §27 Request → Impact Analysis → Approval. Raising the request and running the impact
+   * analysis are the drafter's two steps, so they go together behind one button: a request
+   * sitting un-analysed cannot be submitted anyway, and asking the drafter to click twice
+   * only produces requests stuck at the first stage.
+   *
+   * The version is also handed to Pending Approval so the designer reflects that it is no
+   * longer the drafter's to edit — that transition is still a direct call, because it
+   * makes no rule real.
+   */
+  const sendForApproval = () => run(async () => {
+    if (!reason.trim()) {
+      throw { response: { data: { detail: 'Say why this change is wanted — the approver and the audit trail both need it.' } } };
+    }
+    const { data } = await createConfigChangeRequest({
+      entity_type: 'policy_version', entity_code: code,
+      version_no: version.version_no, reason: reason.trim(),
+      effective_from: effectiveFrom,
+      title: `${code} v${version.version_no}`,
+    }, scope);
+    await analyseConfigChangeImpact(data.request_no, scope);
+    await submitConfigChangeRequest(data.request_no, scope);
+    if (version.status === 'Draft') {
+      await setPolicyVersionStatus(code, version.version_no,
+        { status: 'Pending Approval' }, scope);
+    }
+  }, 'Sent for approval — an approver activates it in Configuration Approvals.');
 
   return (
     <div className="rounded-lg border border-[var(--border)] px-3.5 py-3 space-y-4">
@@ -272,22 +307,30 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
             {busy ? 'Saving…' : (version ? 'Save draft' : 'Create draft')}
           </Btn>
         )}
-        {canDraft && version?.status === 'Draft' && (
-          <Btn onClick={() => move('Pending Approval')} disabled={busy}>
-            <Send size={14} /> Send for approval
+        {canDraft && ['Draft', 'Pending Approval'].includes(version?.status) && (
+          <Btn tone="primary" onClick={sendForApproval} disabled={busy}>
+            <Send size={14} /> {busy ? 'Working…' : 'Send for approval'}
           </Btn>
         )}
-        {canApprove && version?.status === 'Pending Approval' && (
-          <Btn tone="primary" onClick={() => move('Approved')} disabled={busy}>
-            <CheckCircle2 size={14} /> Approve
-          </Btn>
-        )}
-        {canApprove && version?.status === 'Approved' && (
-          <Btn tone="primary" onClick={() => move('Active')} disabled={busy}>
-            Activate
-          </Btn>
+        {canDraft && version?.status === 'Pending Approval' && (
+          <Btn onClick={() => move('Draft')} disabled={busy}>Take back to draft</Btn>
         )}
       </div>
+      {version?.status === 'Pending Approval' && (
+        <p className="text-[11.5px] text-[var(--text-muted)]">
+          <CheckCircle2 size={12} className="inline" /> With an approver. They review the
+          impact and activate it in Configuration Approvals — somebody other than whoever
+          raised it, which is why this screen cannot do it.
+          {canApprove && (
+            <>
+              {' '}You hold that approval: open{' '}
+              <a href="/hrms/config-approvals"
+                className="underline text-[var(--text-main)]">Configuration Approvals</a>
+              {' '}to decide on it.
+            </>
+          )}
+        </p>
+      )}
       {version?.status === 'Approved' && (
         <p className="text-[11.5px] text-[var(--text-muted)]">
           Approved. It takes effect on {version.effective_from} once activated — activating
