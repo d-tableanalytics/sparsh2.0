@@ -59,8 +59,53 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 10 | Configurable bank file (§13, §19) | **Done** — named formats per company, column designer, fixed-width/delimited, amount + date conventions, header/trailer records, live preview; DEFAULT reproduces the old output byte for byte |
 | 11 | Impact + config audit viewers (§22, §29, §30) | **Done** — `where_used` across components/fields/policies, references vs history separated, retirement blocked and the blockers named, Audit & Impact screen |
 
-Phase 1 suite **92/92**. New suites: policy spine 28, config change 29, attendance policy 27, component lifecycle 42, bank format 24, dependency 19. Full HRMS suite **100 modules pass**; the 10 that fail do so on a missing `httpx` and failed identically before this work. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
-in the backend venv and failed identically before this work began.
+Phase 1 suite **92/92**. New suites: policy spine 28, config change 29, attendance policy 27, component lifecycle 42, bank format 24, dependency 19.
+
+### Post-review gaps (21 Oct)
+
+A code review of commit `7021508` against the client's Phase 1 acceptance
+checklist found eight further gaps. All eight are closed on this branch, one
+commit each.
+
+| Gap | What it was | Checklist rows | State |
+|---|---|---|---|
+| 1 | Half-day LOP fraction ignored by payroll — attendance said a quarter, the payslip charged a half | P1-030, P1-047, P1-056, P1-077 | **Done** |
+| 2 | `ATT_REGULARISATION.approval_levels` resolved, displayed and enforced by nothing | P1-034, P1-051 | **Done** |
+| 3 | Payroll Policy screen wrote live settings, bypassing versioning, approval and old/new audit | P1-072, P1-117 (part), P1-120 | **Done** |
+| 4 | `get_payroll_policy(profile=)` passed `None` by every caller, so a scoped PAY_POLICY version applied to nobody | P1-073 | **Done** |
+| 5 | Direct status endpoint walked a version to Active around the §27 flow; field definitions saved straight to live | P1-117 | **Done** |
+| 6 | No exports: employee master, attendance, payment batch, payroll-vs-bank reconciliation, configuration audit | P1-112, P1-124, P1-125, P1-127, P1-128 | **Done** |
+| 7 | The three §27/§29 governance screens had routes but no sidebar entry | P1-038, P1-117, P1-120 | **Done** |
+| 8 | Month-end closure had no leave-mismatch check | P1-054 | **Done** |
+
+Two defects were found while closing the above and are fixed in the same
+commits, because neither could be left standing:
+
+| Found in | Defect |
+|---|---|
+| Gap 1 | An HR **override** to Half Day went through `_status_only`, which hard-coded 0.5 and never read the policy — so what a day was worth depended on whether a human or the calculator decided it |
+| Gap 6 | A row-scoping leak in `list_employees`: the "has this user moved companies" test compared against the ROLE-SCOPED result set, so a manager saw every colleague appended as a broken link and everyone saw every leaver. Harmless-looking on screen; the whole company in one file as a download |
+
+Scope deliberately **not** touched, per the review's own out-of-scope list:
+the Appointment Letter for directly-added employees (awaiting the client),
+statutory PF/ESI/PT/TDS rules, the bank-specific file layout and the payslip
+template (decisions D-005, D-007, D-008), and manual QA / UAT / the test
+evidence pack.
+
+**Gap 8 is reported, not blocking.** `leave_mismatch` appears on the closure
+dashboard but is absent from `ready_to_lock`: locking a month is how payroll
+gets its basis, so a company with one disputed day would be unable to run
+payroll at all. Making it block is a one-line change awaiting the client's
+answer.
+
+Full HRMS suite **117 modules pass, 0 fail**. New suites: Gap 1 15, Gap 2 30,
+Gap 3 23, Gap 4 20, Gap 5 34, Gap 6 59, Gap 8 20. Frontend builds clean and
+every file touched lints clean.
+
+> The suite needs `pypdf` and `boto3` installed. Before this work 18 modules
+> failed on their absence — not on anything in the code — which is where the
+> earlier "10 fail on a missing `httpx`" note came from. With all three
+> installed the baseline was 110/110 and is now 117/117.
 
 ---
 
