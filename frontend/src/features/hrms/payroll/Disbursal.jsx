@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Download, Landmark, RotateCcw } from 'lucide-react';
+import {
+  AlertTriangle, Download, Landmark, RotateCcw, FileSpreadsheet, Scale,
+} from 'lucide-react';
 import { CAP } from '../access';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   listPaymentBatches, generatePaymentBatch, getPaymentBatch, downloadBankFile,
   updatePaymentStatus, importPaymentStatuses,
+  exportPaymentBatch, exportPeriodPayments,
+  getPayrollReconciliation, exportPayrollReconciliation,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, money, day } from '../internal/internalKit';
 import { Btn, Chip, Modal } from '../internal/internalKit.jsx';
@@ -37,6 +41,10 @@ const Disbursal = ({ period, runStatus, scope, can, showSuccess, showError, onCh
   const [justSkipped, setJustSkipped] = useState(null);
   const [openBatch, setOpenBatch] = useState(null);
   const [downloading, setDownloading] = useState(null);
+  // P1-127 / P1-112. `exporting` names WHICH export is running, because three of them
+  // share this toolbar and a single boolean would grey out all three.
+  const [exporting, setExporting] = useState(null);
+  const [recon, setRecon] = useState(null);
 
   const canPay = can(CAP.PAYROLL_APPROVE);
   const canGenerate = canPay && (runStatus === 'Locked' || runStatus === 'Paid');
@@ -77,6 +85,34 @@ const Disbursal = ({ period, runStatus, scope, can, showSuccess, showError, onCh
       showError(await blobErrText(err, 'Could not download the bank file.'));
     } finally {
       setDownloading(null);
+    }
+  };
+
+  /** P1-127. A status and reconciliation document, so the account stays masked — the
+   *  full numbers are in the bank file, which is gated and audited separately. */
+  const exportRows = (key, fn, label) => async () => {
+    setExporting(key);
+    try {
+      const result = await fn();
+      showSuccess(`Exported ${result.rows} ${label}.`);
+    } catch (err) {
+      showError(await blobErrText(err, 'Could not export that.'));
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  /** P1-112. Shown before it is downloaded: the figures are the point, and a difference
+   *  of zero is the answer somebody wants on screen rather than in a file. */
+  const loadRecon = async () => {
+    setExporting('recon-view');
+    try {
+      const { data } = await getPayrollReconciliation(period, scope);
+      setRecon(data);
+    } catch (err) {
+      showError(errText(err, 'Could not reconcile this period.'));
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -135,6 +171,74 @@ const Disbursal = ({ period, runStatus, scope, can, showSuccess, showError, onCh
         <SkippedBox batchNo={justSkipped.batchNo} skipped={justSkipped.skipped} strong />
       )}
 
+      {/* P1-127 and P1-112, for the PERIOD rather than one batch. */}
+      <div className="flex flex-wrap gap-2">
+        <Btn disabled={!!exporting}
+          onClick={exportRows('period', () => exportPeriodPayments(period, scope),
+            'payment row(s) for the period')}>
+          <FileSpreadsheet size={14} />
+          {exporting === 'period' ? 'Exporting…' : 'Export all payments'}
+        </Btn>
+        <Btn disabled={!!exporting} onClick={loadRecon}>
+          <Scale size={14} />
+          {exporting === 'recon-view' ? 'Reconciling…' : 'Reconcile with payroll'}
+        </Btn>
+        {recon && (
+          <Btn disabled={!!exporting}
+            onClick={exportRows('recon', () => exportPayrollReconciliation(period, {
+              ...scope, fmt: 'csv',
+            }), 'reconciliation line(s)')}>
+            <Download size={14} />
+            {exporting === 'recon' ? 'Exporting…' : 'Export reconciliation'}
+          </Btn>
+        )}
+      </div>
+
+      {recon && (
+        <div className="rounded-xl border border-[var(--border)] p-3.5 space-y-2">
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-[13px] font-bold text-[var(--text-main)]">
+              Payroll versus the bank · {period}
+            </p>
+            <Chip tone={recon.difference_processed === 0 ? 'good' : 'warn'}>
+              {recon.difference_processed === 0 ? 'Settled'
+                : `${money(recon.difference_processed)} outstanding`}
+            </Chip>
+          </div>
+          {!recon.final && (
+            <p className="text-[11.5px] text-[var(--accent-orange)]">
+              The run is {recon.run_status}, not final — these figures are provisional.
+            </p>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px]">
+              <thead>
+                <tr className="text-left text-[var(--text-muted)]">
+                  <th className="py-1 pr-3 font-semibold">Measure</th>
+                  <th className="py-1 pr-3 font-semibold">Employees</th>
+                  <th className="py-1 pr-3 font-semibold">Amount</th>
+                  <th className="py-1 font-semibold">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(recon.lines || []).map((l) => (
+                  <tr key={l.Measure} className="border-t border-[var(--border-subtle)]">
+                    <td className="py-1.5 pr-3 text-[var(--text-main)]">{l.Measure}</td>
+                    <td className="py-1.5 pr-3 tabular-nums text-[var(--text-main)]">
+                      {l.Employees === '' ? '—' : l.Employees}
+                    </td>
+                    <td className="py-1.5 pr-3 tabular-nums text-[var(--text-main)]">
+                      {money(l.Amount)}
+                    </td>
+                    <td className="py-1.5 text-[var(--text-muted)]">{l.Note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {!batches.length ? (
         <p className="text-[12px] text-[var(--text-muted)]">
           No payment batches yet.{canGenerate ? ' Generate one above to make the bank file.' : ''}
@@ -165,6 +269,14 @@ const Disbursal = ({ period, runStatus, scope, can, showSuccess, showError, onCh
                     <Download size={14} /> {downloading === b.batch_no ? 'Downloading…' : 'Bank file'}
                   </Btn>
                 )}
+                {/* Deliberately available to anyone who can READ payroll, unlike the bank
+                    file above: this carries no payable account number. */}
+                <Btn disabled={!!exporting}
+                  onClick={exportRows(b.batch_no,
+                    () => exportPaymentBatch(b.batch_no, scope), 'payment row(s)')}>
+                  <FileSpreadsheet size={14} />
+                  {exporting === b.batch_no ? 'Exporting…' : 'Export'}
+                </Btn>
                 {canPay && runStatus !== 'Closed' && retryableIn(b) && (
                   <Btn disabled={busy} onClick={() => generate(b.batch_no, b.payment_mode)}>
                     <RotateCcw size={14} /> Retry failed

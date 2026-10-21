@@ -445,6 +445,57 @@ export const exportHrmsReport = async (entity, params) => {
   };
 };
 
+/**
+ * Post-review Gap 6 — the five checklist exports (P1-112, P1-124, P1-125, P1-127, P1-128).
+ *
+ * One helper for all of them, for the same reason the backend has one export module: the
+ * file is rendered SERVER-side from already-scoped rows, so the browser's whole job is to
+ * save the blob and report the truncation headers. A screen that assembled its own CSV from
+ * a list endpoint would be shipping the rows the API withheld.
+ */
+const downloadExport = async (path, params, fallbackName) => {
+  const res = await api.get(path, { params, responseType: 'blob' });
+  const disposition = res.headers?.['content-disposition'] || '';
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const url = URL.createObjectURL(res.data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = match?.[1] || fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return {
+    truncated: res.headers?.['x-export-truncated'] === 'true',
+    rows: Number(res.headers?.['x-export-rows'] || 0),
+    total: Number(res.headers?.['x-export-total'] || 0),
+  };
+};
+
+/** FRD §3 employee master (P1-124). Masked fields stay masked; needs employee.export. */
+export const exportEmployeeMaster = (params) =>
+  downloadExport('/hrms/employees/export', params, 'hrms_employees.csv');
+/** Attendance for a month, per day or per employee (P1-125). */
+export const exportAttendance = (params) =>
+  downloadExport('/hrms/attendance/export', params, 'hrms_attendance.csv');
+/** One payment batch, account masked (P1-127). */
+export const exportPaymentBatch = (batchNo, params) =>
+  downloadExport(`/hrms/payment-batches/${batchNo}/export`, params,
+    `hrms_payments_${batchNo}.csv`);
+/** Every payment of a period, retries included (P1-127). */
+export const exportPeriodPayments = (period, params) =>
+  downloadExport(`/hrms/payroll/runs/${period}/payments/export`, params,
+    `hrms_payments_${period}.csv`);
+/** Payroll against the bank (P1-112). No `fmt` returns JSON for the screen. */
+export const getPayrollReconciliation = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/reconciliation`, { params });
+export const exportPayrollReconciliation = (period, params) =>
+  downloadExport(`/hrms/payroll/runs/${period}/reconciliation`, params,
+    `hrms_reconciliation_${period}.csv`);
+/** FRD §29/§30 configuration audit (P1-128). Needs config.audit_read. */
+export const exportConfigAudit = (params) =>
+  downloadExport('/hrms/config/audit/export', params, 'hrms_config_audit.csv');
+
 // ══════════════════════════════════════════════════════════════
 // Internal (in-house) recruitment track
 // ══════════════════════════════════════════════════════════════

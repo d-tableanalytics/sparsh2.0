@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { History, Search, AlertTriangle } from 'lucide-react';
+import { History, Search, AlertTriangle, Download } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
-import { getConfigAudit, getConfigImpact } from '../../../services/hrmsApi';
+import {
+  getConfigAudit, getConfigImpact, exportConfigAudit,
+} from '../../../services/hrmsApi';
+import { CAP } from '../access';
 import { FIELD, LABEL } from '../internal/internalKit';
 import { Btn, Chip, RecordList } from '../internal/internalKit.jsx';
 
@@ -36,11 +39,28 @@ const ENTITY_TYPES = [
 ];
 
 const AuditTab = () => {
-  const { scope, companyId } = useHrms();
+  const { scope, companyId, can } = useHrms();
   const [rows, setRows] = useState([]);
   const [open, setOpen] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // P1-128. The export is gated on config.audit_read specifically, which is the
+  // capability an auditor is given — reading the register is a different question.
+  const [exporting, setExporting] = useState(false);
+  const [entityType, setEntityType] = useState('');
+
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      await exportConfigAudit({
+        ...scope, limit: 1000, entity_type: entityType || undefined,
+      });
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not export the configuration audit.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -95,17 +115,37 @@ const AuditTab = () => {
 
   const current = rows.find((r) => r.request_no === open);
 
+  // Filtered on the client because the list is already capped at 200 rows and a
+  // round trip to drop a few of them would be slower than keeping them. The EXPORT
+  // passes the filter to the server, where it narrows a thousand.
+  const shown = entityType ? rows.filter((r) => r.entity_type === entityType) : rows;
+
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <select value={entityType} aria-label="Configuration type"
+          onChange={(e) => setEntityType(e.target.value)}
+          className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] font-semibold text-[var(--text-main)]">
+          <option value="">Every configuration type</option>
+          <option value="policy_version">Policy versions</option>
+          <option value="salary_component">Salary components</option>
+          <option value="field_definition">Field definitions</option>
+        </select>
+        {can(CAP.CONFIG_AUDIT_READ) && (
+          <Btn onClick={runExport} disabled={exporting}>
+            <Download size={14} /> {exporting ? 'Exporting…' : 'Export'}
+          </Btn>
+        )}
+      </div>
       {loading && <HrmsLoading label="Loading the configuration audit…" />}
       {error && <HrmsError message={error} />}
-      {!loading && !error && !rows.length && (
+      {!loading && !error && !shown.length && (
         <HrmsEmpty icon={History} title="No configuration changes yet"
           message="Governed rule changes appear here with their requester, approver and reason." />
       )}
-      {!loading && !error && !!rows.length && (
+      {!loading && !error && !!shown.length && (
         <>
-          <RecordList rows={rows} columns={columns} keyOf={(r) => r.request_no} />
+          <RecordList rows={shown} columns={columns} keyOf={(r) => r.request_no} />
           {current && (
             <div className="rounded-lg border border-[var(--border)] px-3.5 py-3 space-y-3">
               <p className="text-[12.5px] text-[var(--text-main)]">

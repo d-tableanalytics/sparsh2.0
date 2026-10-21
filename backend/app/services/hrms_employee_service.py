@@ -578,9 +578,9 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
     # Employees created by onboarding have no login yet, so they are absent from the user
     # query above. Fetch them separately rather than leaving a new hire invisible in the
     # directory the moment their Employee ID is issued.
-    unlinked = await _unlinked_profiles(
+    unlinked = await _profile_rows_visible(actor, company_id, await _unlinked_profiles(
         company_id, search=search, department_id=department_id,
-        designation_id=designation_id, status=status)
+        designation_id=designation_id, status=status))
 
     departments, designations, managers = await _resolve_lookups(
         company_id, users, list(profiles.values()) + list(unlinked))
@@ -602,9 +602,12 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
     # wrong one to begin with. `_unlinked_profiles` correctly skips it (its `user_id` field
     # IS set), and the query above never finds it either, so without this it vanishes from
     # the directory entirely instead of surfacing the inconsistency HR needs to fix.
+    # Deliberately the COMPANY's id set, not `matched_user_ids` from the scoped query:
+    # see _company_user_ids for why the difference is a scoping leak rather than a nicety.
     orphaned = await _orphaned_linked_profiles(
-        company_id, matched_user_ids, search=search, department_id=department_id,
-        designation_id=designation_id, status=status)
+        company_id, await _company_user_ids(company_id), search=search,
+        department_id=department_id, designation_id=designation_id, status=status)
+    orphaned = await _profile_rows_visible(actor, company_id, orphaned)
     for profile in orphaned:
         row = _compose(None, profile, departments=departments, designations=designations,
                        managers=managers, include_salary=include_salary)
@@ -651,6 +654,42 @@ async def _unlinked_profiles(company_id: str, *, search: str = None,
             or needle in (r.get("employee_code") or "").lower()
         ]
     return rows
+
+
+async def _company_user_ids(company_id: str) -> set:
+    """Every user id this company's identity collection resolves, ignoring role scope.
+
+    The orphan test below asks "does this profile's user still belong to this company",
+    which is a question about the COMPANY. Answering it from the role-scoped result set --
+    as it used to -- means a manager's own narrow result makes every colleague look
+    orphaned, and the directory then appends them all as broken links. That is a row-scoping
+    leak dressed as a data-quality warning, and an export built on the same list would have
+    carried the whole company in one file.
+    """
+    source, query = await _identity_source(company_id)
+    rows = await get_collection(source).find(query, {"_id": 1}).to_list(20000)
+    return {str(r["_id"]) for r in rows}
+
+
+async def _profile_rows_visible(actor: dict, company_id: str, rows: list) -> list:
+    """Narrow profile-derived rows (no login, or a broken link) to what `actor` may see.
+
+    These rows bypass the user query, so they bypass the role scope applied to it. HR and
+    above see them all -- an unlinked or orphaned profile is a data problem they are the
+    ones to fix. A MANAGER sees only their own reports and their own department, and an
+    EMPLOYEE sees none: fail closed, exactly as `_manager_scope` does.
+    """
+    role = hrms_role(actor)
+    if role == HrmsRole.EMPLOYEE:
+        return []
+    if role != HrmsRole.MANAGER:
+        return rows
+    actor_id = str(actor.get("_id") or "")
+    own = await get_collection(COLL_EMPLOYEE_PROFILES).find_one({"user_id": actor_id})
+    dept = (own or {}).get("department_id")
+    return [r for r in rows
+            if r.get("reporting_manager_id") == actor_id
+            or (dept and r.get("department_id") == dept)]
 
 
 async def _orphaned_linked_profiles(company_id: str, matched_user_ids: set, *,

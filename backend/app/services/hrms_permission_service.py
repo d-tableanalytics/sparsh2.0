@@ -139,6 +139,7 @@ CATALOGUE = [
     ("Employees & organisation", [
         ("Employees", [
             ("employee.read", "View employees"), ("employee.write", "Add & edit employees"),
+            ("employee.export", "Download the employee master"),
             ("employee.salary.read", "View salaries"), ("employee.salary.write", "Change salaries"),
         ]),
         ("Departments & designations", [
@@ -173,7 +174,8 @@ CATALOGUE = [
                          ("payroll.check", "Check payroll"),
                          ("payroll.approve", "Approve payroll")]),
         ("Configuration", [("config.read", None), ("config.draft", "Draft a rule change"),
-                           ("config.approve", "Approve a rule change")]),
+                           ("config.approve", "Approve a rule change"),
+                           ("config.audit_read", "Read the configuration audit trail")]),
         ("Salary structure", [("salary_structure.read", None),
                               ("salary_structure.manage", "Set salary structures")]),
         ("Salary advance", [("advance.read", None), ("advance.request", "Request an advance"),

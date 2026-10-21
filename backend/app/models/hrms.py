@@ -1795,6 +1795,10 @@ class Cap(str, Enum):
 
     # ── Phase 2: employee master ──
     EMPLOYEE_READ         = "employee.read"          # browse the directory (row-scoped by role)
+    # Taking the directory OUT of the system as a file, which is a different act from
+    # reading it on screen -- the same split REPORT_EXPORT already draws against
+    # REPORT_READ. A manager browses their team and cannot download it.
+    EMPLOYEE_EXPORT       = "employee.export"
     EMPLOYEE_WRITE        = "employee.write"         # create / edit employee profiles
     EMPLOYEE_SALARY_READ  = "employee.salary.read"   # SEE pay figures
     EMPLOYEE_SALARY_WRITE = "employee.salary.write"  # SET pay figures
@@ -2102,6 +2106,11 @@ class Cap(str, Enum):
     CONFIG_READ    = "config.read"
     CONFIG_DRAFT   = "config.draft"
     CONFIG_APPROVE = "config.approve"
+    # §29/§30's Configuration Audit Viewer. Separate from CONFIG_READ because the audit is
+    # a different question from the register: the register says what the rules ARE, the
+    # audit says who changed them, when, why, and from what -- which is what an auditor
+    # asks for and what a drafter has no particular need to read.
+    CONFIG_AUDIT_READ = "config.audit_read"
     SALARY_STRUCTURE_READ   = "salary_structure.read"
     SALARY_STRUCTURE_MANAGE = "salary_structure.manage"
     # REQUEST is the self-service act every role gets (the same reasoning LEAVE_APPLY /
@@ -2296,7 +2305,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_OFFER_READ,
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
         # Sparsh staff support and observe the hiring pipeline, but the approval chain is
@@ -2383,7 +2392,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_HANDOVER,
         Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
@@ -2473,7 +2482,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.ADVANCE_READ, Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
         # Configuration: the ceiling holds both tiers, so a company with nobody else
         # appointed can still change a rule and approve the change.
-        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_APPROVE,
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_APPROVE, Cap.CONFIG_AUDIT_READ,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
         Cap.VARIABLE_PAY_HOLD_MANAGE,
         Cap.PIP_READ, Cap.PIP_MANAGE, Cap.PIP_DECIDE, Cap.PIP_ACKNOWLEDGE,
@@ -2506,7 +2515,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_MANAGE,
         Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
@@ -2627,7 +2636,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # §29's administrative screens are HR's, but CONFIG_APPROVE is deliberately absent:
         # §27 puts an approval stage between a drafted rule and a live one, and an approver
         # who is also the only drafter is not an approval.
-        Cap.CONFIG_READ, Cap.CONFIG_DRAFT,
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_AUDIT_READ,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
         # ── Phase PIP-1 ── HR is the process owner throughout ("HR monitors overdue
@@ -2917,7 +2926,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SALARY_STRUCTURE_READ,
         # Finance approves the payroll these rules produce, so it reads the rules and is
         # the §27 approver for a change to them.
-        Cap.CONFIG_READ, Cap.CONFIG_APPROVE,
+        Cap.CONFIG_READ, Cap.CONFIG_APPROVE, Cap.CONFIG_AUDIT_READ,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },

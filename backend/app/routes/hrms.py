@@ -549,6 +549,36 @@ async def create_employee(
         current_user, _company(current_user, company_id), body.model_dump(exclude_unset=True))
 
 
+# Post-review Gap 6 (P1-124). Declared HERE, above `/employees/{user_id}`, rather than
+# with the rest of the Gap 6 block: FastAPI matches in declaration order, so left below it
+# this path would resolve to get_employee(user_id="export"). The renderer it calls,
+# `_export_response`, is defined with that block further down -- which is fine, the
+# reference resolves at call time.
+@router.get("/employees/export")
+async def export_employee_master(
+    fmt: ExportFormat = Query(ExportFormat.CSV),
+    search: Optional[str] = Query(None),
+    department_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§3's employee master as a file (P1-124).
+
+    EMPLOYEE_EXPORT, not EMPLOYEE_READ: reading the directory on screen and taking a file
+    of personal data off the system are different acts, and a reporting manager is
+    deliberately granted the first and not the second. Masked identity fields stay masked
+    unless the caller holds what unmasks them on screen, and custom fields appear only
+    where their definition says `exportable`.
+    """
+    _require(current_user, Cap.EMPLOYEE_EXPORT)
+    data = await exports.employee_master(
+        current_user, _company(current_user, company_id), search=search,
+        department_id=department_id, status=status, include_inactive=include_inactive)
+    return _export_response(data, fmt, "employees")
+
+
 @router.get("/employees/{user_id}")
 async def get_employee(
     user_id: str,
@@ -6521,6 +6551,7 @@ from app.services import hrms_employee_master_service as master_mgmt  # noqa: E4
 from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
 from app.services import hrms_policy_version_service as policy_versions  # noqa: E402
 from app.services import hrms_config_change_service as config_changes  # noqa: E402
+from app.services import hrms_export_service as exports  # noqa: E402
 from app.services import hrms_attendance_simulation_service as att_sim  # noqa: E402
 from app.services import hrms_bank_format_service as bank_formats  # noqa: E402
 from app.services import hrms_config_dependency_service as config_deps  # noqa: E402
@@ -7274,6 +7305,140 @@ async def preview_bank_file_format(
     question is easier to answer against output than against a column list."""
     _require(current_user, Cap.CONFIG_READ)
     return bank_formats.preview(body or {})
+
+
+# =============================================================================
+# Post-review Gap 6 — the exports the checklist asks for
+# =============================================================================
+# P1-124, P1-125, P1-127, P1-128 and P1-112. All five render SERVER-SIDE from rows the
+# service already scoped; see hrms_export_service for why that is not negotiable.
+#
+# Every one takes `fmt` and streams through the analytics renderers, so a reader of any of
+# them already knows how the others behave — and the truncation headers mean a caller
+# cannot mistake a capped file for a complete one.
+def _export_response(payload: dict, fmt: ExportFormat, name: str, suffix: str = ""):
+    if fmt == ExportFormat.XLSX:
+        body = exports.render_xlsx(payload)
+        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        body = exports.render_csv(payload)
+        media = "text/csv; charset=utf-8"
+    return StreamingResponse(
+        iter([body]),
+        media_type=media,
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{exports.filename(name, fmt.value, suffix)}"',
+            # Announced in a header AND inside the file, so it cannot be missed by
+            # whichever one the recipient looks at.
+            "X-Export-Truncated": "true" if payload.get("truncated") else "false",
+            "X-Export-Rows": str(payload.get("returned") or 0),
+            "X-Export-Total": str(payload.get("total") or 0),
+        },
+    )
+
+
+@router.get("/attendance/export")
+async def export_attendance(
+    period: str = Query(..., description="YYYY-MM"),
+    view: str = Query("daily", pattern="^(daily|monthly)$"),
+    employee_code: Optional[str] = Query(None),
+    fmt: ExportFormat = Query(ExportFormat.CSV),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Attendance for a month, per day or per employee (P1-125).
+
+    ATTENDANCE_READ and the attendance list's own row scoping, because it IS the attendance
+    list: a manager downloads their team's month and nobody else's.
+    """
+    _require(current_user, Cap.ATTENDANCE_READ)
+    if len(period) != 7 or period[4] != "-":
+        raise HTTPException(status_code=422, detail="Period must be YYYY-MM.")
+    company = _company(current_user, company_id)
+    data = (await exports.attendance_monthly(current_user, company, period, employee_code)
+            if view == "monthly"
+            else await exports.attendance_daily(current_user, company, period,
+                                                employee_code))
+    return _export_response(data, fmt, f"attendance_{view}", period)
+
+
+@router.get("/payment-batches/{batch_no}/export")
+async def export_payment_batch(
+    batch_no: str,
+    fmt: ExportFormat = Query(ExportFormat.CSV),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One batch's payments with their status, UTR and failure reason (P1-127).
+
+    A reconciliation document, NOT a payment instruction: the account stays masked. Full
+    account numbers exist only in `bank_file`, which is gated on payroll approval and
+    audited on every download.
+    """
+    _require(current_user, Cap.PAYROLL_READ)
+    data = await exports.payment_batch(
+        current_user, _company(current_user, company_id), batch_no)
+    return _export_response(data, fmt, "payments", batch_no)
+
+
+@router.get("/payroll/runs/{period}/payments/export")
+async def export_period_payments(
+    period: str,
+    fmt: ExportFormat = Query(ExportFormat.CSV),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every payment of a period across all its batches, retries included (P1-127)."""
+    _require(current_user, Cap.PAYROLL_READ)
+    data = await exports.payment_period(
+        current_user, _company(current_user, company_id), period)
+    return _export_response(data, fmt, "payments", period)
+
+
+@router.get("/payroll/runs/{period}/reconciliation")
+async def payroll_bank_reconciliation(
+    period: str,
+    fmt: Optional[ExportFormat] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Payroll against the bank, for one period (P1-112).
+
+    Returns JSON with no `fmt` so the screen can show the figures, and a file with one --
+    the same numbers either way, from one calculation. Two endpoints would eventually
+    disagree, and the disagreement would be in the one report whose entire purpose is
+    agreeing.
+    """
+    _require(current_user, Cap.PAYROLL_READ)
+    data = await exports.reconciliation(
+        current_user, _company(current_user, company_id), period)
+    if fmt is None:
+        return {"period": period, **data["summary"],
+                "lines": [dict(zip([k for k, _ in data["columns"]], row))
+                          for row in data["rows"]]}
+    return _export_response(data, fmt, "reconciliation", period)
+
+
+@router.get("/config/audit/export")
+async def export_config_audit(
+    entity_type: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=5000),
+    fmt: ExportFormat = Query(ExportFormat.CSV),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§29/§30's configuration audit as a file (P1-128).
+
+    `config.audit_read`, which is its own capability: the register says what the rules ARE,
+    the audit says who changed them and from what, and an auditor needs the second without
+    necessarily being given the first.
+    """
+    _require(current_user, Cap.CONFIG_AUDIT_READ)
+    data = await exports.config_audit(
+        current_user, _company(current_user, company_id),
+        entity_type=entity_type, limit=limit)
+    return _export_response(data, fmt, "config_audit")
 
 
 # ── Which configuration types this company governs (FRD §27) ──

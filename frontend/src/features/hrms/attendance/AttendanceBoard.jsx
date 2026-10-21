@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Clock, Search, Lock, Unlock, AlertTriangle } from 'lucide-react';
+import { Clock, Search, Lock, Unlock, AlertTriangle, Download } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP, HRMS_ROLE } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -19,7 +19,7 @@ import {
   getClosureDashboard, lockPeriod, unlockPeriod,
   getLateComingSummary,
   getShiftPolicy, saveShiftPolicy, getFlexiRequests, requestFlexi, actOnFlexi, importBiometric,
-  listFieldDefinitions, getEmployeeMonthCalendar,
+  listFieldDefinitions, getEmployeeMonthCalendar, exportAttendance,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
@@ -426,6 +426,28 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
   // The company's attendance fields (FRD §21): only ACTIVE ones take new values, in the
   // order HR set. Optional — a company with none configured just sees the plain form.
   const [fieldDefs, setFieldDefs] = useState([]);
+  // P1-125. The month to export and which shape: a row per day, or per-employee totals.
+  // They answer different questions — "what happened on the 11th" and "how many payable
+  // days did she have" — so the choice is the user's rather than two buttons.
+  const [exportPeriod, setExportPeriod] = useState(() => new Date().toISOString().slice(0, 7));
+  const [exportView, setExportView] = useState('daily');
+  const [exporting, setExporting] = useState(false);
+
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      const result = await exportAttendance({
+        ...scope, period: exportPeriod, view: exportView,
+      });
+      showSuccess(result.truncated
+        ? `Exported the first ${result.rows} rows — narrow the month to get the rest.`
+        : `Exported ${result.rows} row(s).`);
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not export attendance.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   useEffect(() => {
     if (!companyId) return;
@@ -561,7 +583,21 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap gap-2 justify-end">
+      <div className="flex flex-wrap gap-2 justify-end items-center">
+        {/* P1-125. Scoped by the attendance list's own rules, so a manager's download is
+            their team's month and nobody else's. */}
+        <input type="month" value={exportPeriod} aria-label="Month to export"
+          onChange={(e) => setExportPeriod(e.target.value)}
+          className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] text-[var(--text-main)]" />
+        <select value={exportView} aria-label="Export shape"
+          onChange={(e) => setExportView(e.target.value)}
+          className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] font-semibold text-[var(--text-main)]">
+          <option value="daily">A row per day</option>
+          <option value="monthly">Per-employee totals</option>
+        </select>
+        <Btn onClick={runExport} disabled={exporting}>
+          <Download size={14} /> {exporting ? 'Exporting…' : 'Export'}
+        </Btn>
         {can(CAP.ATTENDANCE_REGULARIZE_REQUEST) && (
           <Btn onClick={() => setRegularizing(true)}>Request Regularisation</Btn>
         )}
