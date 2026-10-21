@@ -8896,9 +8896,13 @@ class CorrectionStatus(str, Enum):
 
 
 class OdStatus(str, Enum):
-    PENDING  = "Pending"
-    APPROVED = "Approved"
-    REJECTED = "Rejected"
+    PENDING          = "Pending"
+    # §23 `approval_levels` = 2. An OD has always been a single decision, so this rung is
+    # only ever reached by a company that asked for two; one level (and unset) never
+    # produces it, and no existing row can hold it.
+    MANAGER_APPROVED = "Manager Approved"
+    APPROVED         = "Approved"
+    REJECTED         = "Rejected"
 
 
 class LockStatus(str, Enum):

@@ -841,6 +841,9 @@ const RegularizationsTab = ({ scope, companyId, can, showSuccess, showError }) =
     { key: 'status', label: 'Status', align: 'right', render: (r) => (
       <div className="flex flex-col items-end gap-1.5">
         <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
+        {r.approval_levels === 1 && r.status === 'Pending' && (
+          <span className="text-[11px] text-[var(--text-muted)]">Manager approval is final</span>
+        )}
         {can(CAP.ATTENDANCE_REGULARIZE_APPROVE) &&
           (r.status === 'Pending' || r.status === 'Manager Approved') && (
           <Btn tone="ghost" onClick={() => setActing(r)}>Act</Btn>
@@ -862,6 +865,8 @@ const RegularizationsTab = ({ scope, companyId, can, showSuccess, showError }) =
         { label: 'Exception', value: r.exception_type },
         { label: 'Proposed', value: `${r.proposed_in || '—'} – ${r.proposed_out || '—'}` },
         { label: 'Reason', value: r.reason },
+        ...(r.approval_levels === 1
+          ? [{ label: 'Approval', value: 'Manager approval is final' }] : []),
       ]} />
       {can(CAP.ATTENDANCE_REGULARIZE_APPROVE) &&
         (r.status === 'Pending' || r.status === 'Manager Approved') && (
@@ -894,7 +899,17 @@ const RegularizationsTab = ({ scope, companyId, can, showSuccess, showError }) =
 const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showError }) => {
   const [remarks, setRemarks] = useState('');
   const { busy, run } = useSubmit(showSuccess, showError, onDone);
-  const nextStep = row.status === 'Pending' ? 'Manager Approved' : 'Approved';
+  // §23 approval_levels. One level makes the manager's approval the decision, so the
+  // approver has to be told that BEFORE they click: the button is still labelled
+  // "Manager Approved" (it is the manager step) but it closes the request and rewrites
+  // the day, and under two levels the same button hands the request on to HR.
+  const oneLevel = row.approval_levels === 1;
+  const nextStep = (row.status === 'Pending' || oneLevel) ? 'Manager Approved' : 'Approved';
+  const subtitle = oneLevel
+    ? 'One approval level — your approval is FINAL and recalculates the attendance record.'
+    : (row.status === 'Pending'
+      ? 'Manager step — HR still gives the final sign-off after this.'
+      : 'HR-final step — only HR can approve now; approving recalculates the attendance record.');
 
   const act = (decision) => run(
     () => actOnRegularization(row.req_no, { decision, remarks: remarks.trim() || undefined }, scope),
@@ -902,9 +917,7 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
 
   return (
     <Modal title={`Act on ${row.req_no}`} labelledBy="reg-act-title"
-      subtitle={row.status === 'Pending'
-        ? 'Manager step — HR still gives the final sign-off after this.'
-        : 'HR-final step — only HR can approve now; approving recalculates the attendance record.'}
+      subtitle={subtitle}
       onClose={onClose}
       footer={(
         <>
@@ -923,6 +936,7 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
         { label: 'Exception', value: row.exception_type },
         { label: 'Reason', value: row.reason },
         { label: 'Evidence', value: row.evidence },
+        { label: 'Approval levels', value: oneLevel ? '1 — manager only' : '2 — manager, then HR' },
       ]} />
       <div>
         <label className={LABEL} htmlFor="reg-act-remarks">Remarks</label>
@@ -934,6 +948,10 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
 };
 
 // ── Outdoor Duty tab ──
+// §23 approval_levels = 2 gives an OD a manager rung before HR's sign-off, so both
+// statuses are still awaiting a decision. One level (and unset) never produces the second.
+const OD_ACTIONABLE = new Set(['Pending', 'Manager Approved']);
+
 const OdTab = ({ scope, companyId, can, showSuccess, showError }) => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -970,7 +988,10 @@ const OdTab = ({ scope, companyId, can, showSuccess, showError }) => {
     { key: 'status', label: 'Status', align: 'right', render: (r) => (
       <div className="flex flex-col items-end gap-1.5">
         <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
-        {can(CAP.OD_APPROVE) && r.status === 'Pending' && (
+        {r.approval_levels === 2 && r.status === 'Pending' && (
+          <span className="text-[11px] text-[var(--text-muted)]">HR signs off after you</span>
+        )}
+        {can(CAP.OD_APPROVE) && OD_ACTIONABLE.has(r.status) && (
           <Btn tone="ghost" onClick={() => setActing(r)}>Act</Btn>
         )}
       </div>
@@ -987,7 +1008,7 @@ const OdTab = ({ scope, companyId, can, showSuccess, showError }) => {
         <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
       </div>
       <Facts items={[{ label: 'Purpose', value: r.purpose }, { label: 'Location', value: r.location }]} />
-      {can(CAP.OD_APPROVE) && r.status === 'Pending' && (
+      {can(CAP.OD_APPROVE) && OD_ACTIONABLE.has(r.status) && (
         <Btn tone="ghost" onClick={() => setActing(r)}>Act</Btn>
       )}
     </div>
@@ -1073,12 +1094,19 @@ const OdModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
 const OdActionModal = ({ row, scope, onClose, onDone, showSuccess, showError }) => {
   const [remarks, setRemarks] = useState('');
   const { busy, run } = useSubmit(showSuccess, showError, onDone);
+  const twoLevel = row.approval_levels === 2;
+  const subtitle = twoLevel
+    ? (row.status === 'Pending'
+      ? 'Manager step — HR still gives the final sign-off after this.'
+      : 'HR-final step — approving marks the day as On OD.')
+    : 'One approval level — your approval is FINAL and marks the day as On OD.';
   const act = (approved) => run(
     () => actOnOd(row.od_no, { approved, remarks: remarks.trim() || undefined }, scope),
     `${row.od_no} ${approved ? 'approved' : 'rejected'}.`);
 
   return (
-    <Modal title={`Act on ${row.od_no}`} labelledBy="od-act-title" onClose={onClose}
+    <Modal title={`Act on ${row.od_no}`} labelledBy="od-act-title" subtitle={subtitle}
+      onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
@@ -1093,6 +1121,7 @@ const OdActionModal = ({ row, scope, onClose, onDone, showSuccess, showError }) 
         { label: 'Employee', value: row.employee_name || row.employee_code },
         { label: 'OD Date', value: day(row.od_date) },
         { label: 'Purpose', value: row.purpose },
+        { label: 'Approval levels', value: twoLevel ? '2 — manager, then HR' : '1 — single decision' },
       ]} />
       <div>
         <label className={LABEL} htmlFor="od-act-remarks">Remarks</label>

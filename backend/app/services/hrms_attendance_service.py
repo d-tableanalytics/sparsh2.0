@@ -272,7 +272,12 @@ async def regularisation_rules(company_id: str, profile: Optional[dict] = None,
                                     DEFAULT_ATTENDANCE_RULES["regularisation_window_days"]),
         "evidence_required": bool(settings.get("regularisation_evidence_required")),
         "max_requests_per_month": settings.get("regularisation_max_per_month"),
-        "approval_levels": settings.get("regularisation_approval_levels") or 1,
+        # Deliberately NOT coerced to 1. Unconfigured has to stay distinguishable from an
+        # explicit 1, because the two now mean different things: 1 makes the manager's
+        # approval final, while unset means "whatever this flow already did". Reporting 1
+        # for an unconfigured company (as this did) described a one-step flow that the code
+        # never ran -- the designer showed "1" beside a request that still needed two.
+        "approval_levels": settings.get("regularisation_approval_levels"),
         "request_types": settings.get("regularisation_request_types") or None,
     }
     return await PV.resolve_rules(company_id, POLICY_ATT_REGULARISATION, profile or {},
@@ -589,6 +594,11 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
         "reason": payload.get("reason"),
         "evidence": payload.get("evidence"),
         "status": CorrectionStatus.PENDING.value,
+        # §23 "Approval levels", frozen at REQUEST time. Resolving it again at decision
+        # time would let a policy change move the goalposts under a request already sitting
+        # with the manager -- approved at one level, then found to need a second. It is
+        # also what the approver screen reads to say whether their click is final.
+        "approval_levels": rules.get("approval_levels"),
         "manager_action_by": None, "manager_action_at": None, "manager_remarks": None,
         "hr_action_by": None, "hr_action_at": None, "hr_remarks": None,
         "created_at": now, "updated_at": now,
@@ -597,6 +607,30 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
     await audit(actor, AUDIT_CORRECTION_REQUESTED, ENTITY_CORRECTION, req_no,
                f"{employee_code}, {work_date}, {payload.get('exception_type')}", company_id)
     return _out(doc)
+
+
+async def _fill_approval_levels(company_id: str, rows: list, date_key: str,
+                                open_statuses: set) -> list:
+    """Report `approval_levels` on every row, resolving it for the ones that predate it.
+
+    An approver has to know whether the button in front of them closes the request or hands
+    it on, and a row raised before the level was frozen carries no answer. Only rows that
+    are still ACTIONABLE are resolved -- a decided request's level cannot change what
+    anyone does next, and resolving the policy for a hundred closed rows would be a hundred
+    round trips to say nothing. Memoised per employee and date, because a screenful of one
+    person's requests is the normal shape of this list.
+    """
+    cache: dict = {}
+    out = []
+    for row in rows:
+        doc = _out(row)
+        if doc.get("approval_levels") is None and doc.get("status") in open_statuses:
+            key = (doc.get("employee_code"), doc.get(date_key))
+            if key not in cache:
+                cache[key] = await _approval_levels(company_id, doc, date_key)
+            doc["approval_levels"] = cache[key]
+        out.append(doc)
+    return out
 
 
 async def list_regularizations(actor: dict, company_id: str, *, status: Optional[str] = None,
@@ -609,14 +643,101 @@ async def list_regularizations(actor: dict, company_id: str, *, status: Optional
     query = await _scope_query(actor, company_id, query)
     rows = await get_collection(COLL_ATTENDANCE_CORRECTIONS).find(query).sort(
         "created_at", -1).to_list(min(limit, MAX_ATTENDANCE_LIST_PAGE))
-    return [_out(r) for r in rows]
+    return await _fill_approval_levels(
+        company_id, rows, "work_date",
+        {CorrectionStatus.PENDING.value, CorrectionStatus.MANAGER_APPROVED.value})
+
+
+async def _assert_regularisation_unlocked(company_id: str, work_date: str) -> None:
+    """A regularisation rewrites an attendance day, so a locked month refuses it -- on
+    EVERY path that writes, not only the HR-final one (FRD §18)."""
+    if await _month_locked(company_id, work_date):
+        raise HTTPException(status_code=409,
+                            detail=f"{work_date} is in a locked month — unlock it first.")
+
+
+async def _apply_regularization(company_id: str, doc: dict, req_no: str, actor: dict,
+                                remarks, now, *, hr_signed: bool) -> None:
+    """Recalculate the day from the approved punches -- §7.9 step 69.
+
+    The original record is PRESERVED: this is an update to the one row, not a second row,
+    and the raw punches stay as original_in/out (FRD §18). Extracted from the HR-final
+    branch because a one-level company reaches exactly the same write through the manager's
+    approval, and two copies of this would be two chances for the paths to drift.
+
+    `hr_signed` records whether an HR sign-off actually happened. Under one level it did
+    not, and writing hr_status "Approved" anyway would put a sign-off in the record that
+    nobody gave.
+    """
+    from app.services.hrms_attendance_rules_service import compute_day, derived_fields
+    computed = await compute_day(company_id, doc["employee_code"], doc["work_date"],
+                                 doc.get("proposed_in"), doc.get("proposed_out"))
+    key = {"company_id": str(company_id), "employee_code": doc["employee_code"],
+           "work_date": doc["work_date"]}
+    before = await get_collection(COLL_ATTENDANCE).find_one(key) or {}
+    await get_collection(COLL_ATTENDANCE).update_one(
+        key,
+        {"$set": {"actual_in": doc.get("proposed_in"), "actual_out": doc.get("proposed_out"),
+                  "status": computed["status"], "worked_minutes": computed["worked_minutes"],
+                  "late_minutes": computed["late_minutes"], "source": "regularization",
+                  **derived_fields(computed), "flexi_no": computed.get("flexi_no"),
+                  "regularized_from": req_no, "regularization_flag": True,
+                  "corrected_in": doc.get("proposed_in"),
+                  "corrected_out": doc.get("proposed_out"),
+                  "manager_status": CorrectionStatus.MANAGER_APPROVED.value,
+                  "hr_status": CorrectionStatus.APPROVED.value if hr_signed else None,
+                  "approver_comments": remarks, "updated_at": now},
+         "$setOnInsert": {"created_at": now, "locked": False, "original_in": None,
+                          "original_out": None, "original_status": None,
+                          "original_source": None},
+         "$push": {"modification_history": {
+             "at": now, "by": str(actor.get("_id") or ""), "via": req_no,
+             "old": {k: before.get(k) for k in ("actual_in", "actual_out", "status",
+                                                "source")},
+             "new": {"actual_in": doc.get("proposed_in"),
+                     "actual_out": doc.get("proposed_out"),
+                     "status": computed["status"], "source": "regularization"}}}},
+        upsert=True,
+    )
+
+
+async def _approval_levels(company_id: str, doc: dict, date_key: str):
+    """How many approvals this request needs, as resolved when it was raised.
+
+    Falls back to resolving the policy for a request raised before the level was frozen --
+    which is every request in flight on the day this ships.
+    """
+    levels = doc.get("approval_levels")
+    if levels is None:
+        profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+            {"company_id": str(company_id), "employee_code": doc["employee_code"]})
+        rules = await regularisation_rules(company_id, profile or {}, doc.get(date_key))
+        levels = rules.get("approval_levels")
+    try:
+        return int(levels) if levels is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 async def act_on_regularization(actor: dict, company_id: str, req_no: str, payload: dict) -> dict:
-    """§7.9 steps 66-69: manager decides first; HR gives the final sign-off. A caller who
-    holds both levels (HR/MD/ADMIN) may also record the manager step directly — the same
-    "no separate manager, no dead end" reasoning Phase EXIT-1's MD fallback already uses —
-    but the ORDER itself (manager step before HR-final) is never skipped."""
+    """§7.9 steps 66-69, at the number of levels the policy asks for.
+
+    TWO LEVELS (the default): the manager decides first and HR gives the final sign-off. A
+    caller who holds both levels (HR/MD/ADMIN) may also record the manager step directly --
+    the same "no separate manager, no dead end" reasoning Phase EXIT-1's MD fallback
+    already uses -- but the ORDER itself (manager step before HR-final) is never skipped.
+
+    ONE LEVEL (§23 `approval_levels` = 1): the manager's approval IS the decision. It runs
+    the same recompute and the same attendance write the HR step runs, and lands the request
+    on Approved. Before this, the setting was resolved, shown in the designer and editable,
+    and then ignored: a company that configured one level still had every request stop at
+    Manager Approved, where it sat until an HR user noticed. The day was never recalculated,
+    so the employee's punch correction simply did not happen.
+
+    UNSET stays two-level. The number has never been read, so no company's configured value
+    should silently change what their approvals mean; `regularisation_rules` keeps unset
+    distinguishable from an explicit 1 for exactly this reason.
+    """
     doc = await get_collection(COLL_ATTENDANCE_CORRECTIONS).find_one(
         {"company_id": str(company_id), "req_no": req_no})
     if not doc:
@@ -626,6 +747,7 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
     await _assert_may_decide(actor, company_id, doc["employee_code"], "regularisation")
 
     decision = payload.get("decision")
+    levels = await _approval_levels(company_id, doc, "work_date")
     now = datetime.now(timezone.utc)
     updates = {"updated_at": now}
 
@@ -639,7 +761,22 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
         updates.update({"status": CorrectionStatus.MANAGER_APPROVED.value,
                         "manager_action_by": str(actor.get("_id") or ""),
                         "manager_action_at": now, "manager_remarks": payload.get("remarks")})
+        if levels == 1:
+            # The manager is the only approver this company asked for, so this click is the
+            # decision: the same locked-month refusal and the same attendance write the HR
+            # step performs, and the request lands on Approved rather than waiting for a
+            # sign-off nobody is going to give.
+            await _assert_regularisation_unlocked(company_id, doc["work_date"])
+            await _apply_regularization(company_id, doc, req_no, actor,
+                                        payload.get("remarks"), now, hr_signed=False)
+            updates["status"] = CorrectionStatus.APPROVED.value
     elif decision == CorrectionStatus.APPROVED.value:
+        if levels == 1:
+            # Not a 409 about ordering: there is no second level to be out of order with.
+            raise HTTPException(
+                status_code=409,
+                detail=f"{req_no} needs one approval only — the manager's approval closes "
+                       f"it. Record that decision instead.")
         if doc["status"] != CorrectionStatus.MANAGER_APPROVED.value:
             raise HTTPException(
                 status_code=409,
@@ -649,41 +786,9 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
         if hrms_role(actor) not in (HrmsRole.HR, HrmsRole.MD, HrmsRole.ADMIN, None):
             raise HTTPException(status_code=403,
                                 detail="HR gives the final sign-off on a regularisation.")
-        if await _month_locked(company_id, doc["work_date"]):
-            raise HTTPException(status_code=409,
-                                detail=f"{doc['work_date']} is in a locked month — unlock it first.")
-        # HR-final: recalculate attendance, preserving the original record (the update, not a
-        # second row) — §7.9 step 69. The raw punches stay as original_in/out (FRD §18).
-        from app.services.hrms_attendance_rules_service import compute_day, derived_fields
-        computed = await compute_day(company_id, doc["employee_code"], doc["work_date"],
-                                     doc.get("proposed_in"), doc.get("proposed_out"))
-        key = {"company_id": str(company_id), "employee_code": doc["employee_code"],
-               "work_date": doc["work_date"]}
-        before = await get_collection(COLL_ATTENDANCE).find_one(key) or {}
-        await get_collection(COLL_ATTENDANCE).update_one(
-            key,
-            {"$set": {"actual_in": doc.get("proposed_in"), "actual_out": doc.get("proposed_out"),
-                      "status": computed["status"], "worked_minutes": computed["worked_minutes"],
-                      "late_minutes": computed["late_minutes"], "source": "regularization",
-                      **derived_fields(computed), "flexi_no": computed.get("flexi_no"),
-                      "regularized_from": req_no, "regularization_flag": True,
-                      "corrected_in": doc.get("proposed_in"),
-                      "corrected_out": doc.get("proposed_out"),
-                      "manager_status": CorrectionStatus.MANAGER_APPROVED.value,
-                      "hr_status": CorrectionStatus.APPROVED.value,
-                      "approver_comments": payload.get("remarks"), "updated_at": now},
-             "$setOnInsert": {"created_at": now, "locked": False, "original_in": None,
-                              "original_out": None, "original_status": None,
-                              "original_source": None},
-             "$push": {"modification_history": {
-                 "at": now, "by": str(actor.get("_id") or ""), "via": req_no,
-                 "old": {k: before.get(k) for k in ("actual_in", "actual_out", "status",
-                                                    "source")},
-                 "new": {"actual_in": doc.get("proposed_in"),
-                         "actual_out": doc.get("proposed_out"),
-                         "status": computed["status"], "source": "regularization"}}}},
-            upsert=True,
-        )
+        await _assert_regularisation_unlocked(company_id, doc["work_date"])
+        await _apply_regularization(company_id, doc, req_no, actor, payload.get("remarks"),
+                                    now, hr_signed=True)
         updates.update({"status": CorrectionStatus.APPROVED.value,
                         "hr_action_by": str(actor.get("_id") or ""),
                         "hr_action_at": now, "hr_remarks": payload.get("remarks")})
@@ -723,7 +828,12 @@ async def request_od(actor: dict, company_id: str, payload: dict) -> dict:
         "purpose": payload.get("purpose"),
         "location": payload.get("location"),
         "status": OdStatus.PENDING.value,
+        # Frozen at request time, for the same reason a regularisation freezes it: a policy
+        # change must not move the goalposts under a request already in flight.
+        "approval_levels": (await regularisation_rules(
+            company_id, profile, od_date)).get("approval_levels"),
         "action_by": None, "action_at": None, "remarks": None,
+        "manager_action_by": None, "manager_action_at": None, "manager_remarks": None,
         "created_at": now, "updated_at": now,
     }
     await get_collection(COLL_OD_REQUESTS).insert_one(doc)
@@ -742,24 +852,59 @@ async def list_od_requests(actor: dict, company_id: str, *, status: Optional[str
     query = await _scope_query(actor, company_id, query)
     rows = await get_collection(COLL_OD_REQUESTS).find(query).sort(
         "created_at", -1).to_list(min(limit, MAX_ATTENDANCE_LIST_PAGE))
-    return [_out(r) for r in rows]
+    return await _fill_approval_levels(
+        company_id, rows, "od_date",
+        {OdStatus.PENDING.value, OdStatus.MANAGER_APPROVED.value})
 
 
 async def act_on_od(actor: dict, company_id: str, od_no: str, payload: dict) -> dict:
+    """§7.8 step 59, at the number of levels the policy asks for.
+
+    The §23 setting the designer labels "OD / Regularisation" governs both flows, and
+    ignored both: regularisation was hard-wired to two levels and an OD to one. Under TWO
+    levels an OD now takes the manager's approval first and an HR sign-off second, which is
+    the only way the configured number means the same thing in the two places it is offered.
+
+    ONE LEVEL and UNSET are a single decision, exactly as every OD has worked until now. An
+    OD is approved BEFORE the day in the ordinary case, so making a second approver the
+    default would strand requests that used to clear in one step.
+    """
     doc = await get_collection(COLL_OD_REQUESTS).find_one(
         {"company_id": str(company_id), "od_no": od_no})
     if not doc:
         raise HTTPException(status_code=404, detail=f"OD request '{od_no}' not found.")
-    if doc["status"] != OdStatus.PENDING.value:
+    if doc["status"] not in (OdStatus.PENDING.value, OdStatus.MANAGER_APPROVED.value):
         raise HTTPException(status_code=409, detail=f"{od_no} is already \"{doc['status']}\".")
     await _assert_may_decide(actor, company_id, doc["employee_code"], "Outdoor Duty request")
 
     approved = bool(payload.get("approved"))
+    levels = await _approval_levels(company_id, doc, "od_date")
+    now = datetime.now(timezone.utc)
+
+    # Two levels, still on the manager's desk: record the manager step and stop. Nothing is
+    # written to attendance yet, so the locked-month check belongs on the step that writes.
+    if approved and levels == 2 and doc["status"] == OdStatus.PENDING.value:
+        await get_collection(COLL_OD_REQUESTS).update_one(
+            {"company_id": str(company_id), "od_no": od_no},
+            {"$set": {"status": OdStatus.MANAGER_APPROVED.value,
+                      "manager_action_by": str(actor.get("_id") or ""),
+                      "manager_action_at": now, "manager_remarks": payload.get("remarks"),
+                      "updated_at": now}})
+        await audit(actor, AUDIT_OD_ACTIONED, ENTITY_OD, od_no,
+                    OdStatus.MANAGER_APPROVED.value, company_id)
+        saved = await get_collection(COLL_OD_REQUESTS).find_one(
+            {"company_id": str(company_id), "od_no": od_no})
+        return _out(saved)
+
+    if approved and levels == 2 and \
+            hrms_role(actor) not in (HrmsRole.HR, HrmsRole.MD, HrmsRole.ADMIN, None):
+        raise HTTPException(status_code=403,
+                            detail="HR gives the final sign-off on an Outdoor Duty request.")
+
     if approved and await _month_locked(company_id, doc["od_date"]):
         raise HTTPException(status_code=409,
                             detail=f"{doc['od_date']} is in a locked month — an OD cannot change "
                                    f"it without an authorised unlock.")
-    now = datetime.now(timezone.utc)
     new_status = OdStatus.APPROVED.value if approved else OdStatus.REJECTED.value
     await get_collection(COLL_OD_REQUESTS).update_one(
         {"company_id": str(company_id), "od_no": od_no},
@@ -797,9 +942,11 @@ async def closure_dashboard(actor: dict, company_id: str, period: str) -> dict:
     pending_regularizations = await get_collection(COLL_ATTENDANCE_CORRECTIONS).count_documents(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end},
          "status": {"$in": [CorrectionStatus.PENDING.value, CorrectionStatus.MANAGER_APPROVED.value]}})
+    # Manager Approved counts as OPEN: under two levels the OD has not written the day yet,
+    # so locking the month would strand it exactly as an untouched one.
     pending_od = await get_collection(COLL_OD_REQUESTS).count_documents(
         {"company_id": str(company_id), "od_date": {"$gte": start, "$lte": end},
-         "status": OdStatus.PENDING.value})
+         "status": {"$in": [OdStatus.PENDING.value, OdStatus.MANAGER_APPROVED.value]}})
     unexplained_absence = await get_collection(COLL_ATTENDANCE).count_documents(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end},
          "status": AttendanceStatus.ABSENT.value})
