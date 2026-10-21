@@ -493,15 +493,17 @@ const AppRoutes = () => {
         {/* SM-HR-052 — Audit Viewer. The read API and Cap.AUDIT_READ gate already existed;
             this is the first screen to call it. */}
         <Route path="audit"                element={<AuditViewer />} />
-        {/* FRD §29 — Configuration Approval Inbox. Not advertised in the sidebar, matching
-            the 2026-09-23 decision that governance screens keep their routes without a
-            nav entry; reachable at /hrms/config-approvals. */}
+        {/* FRD §27/§29 — the configuration governance screens. These were deliberately
+            unadvertised under the 2026-09-23 "routes without a nav entry" decision, and
+            post-review Gap 7 reversed that for these three specifically: Gap 5 made the
+            change-request flow the ONLY way to activate a rule, so an approver who cannot
+            find the inbox cannot approve anything. They are now in the sidebar's
+            Configuration section, each shown to whoever holds the matching capability. */}
         <Route path="config-approvals"     element={<ConfigApprovalInbox />} />
-        {/* FRD §23/§29 — Attendance Policy Designer. Same nav decision as above:
-            routed at /hrms/attendance-policies, not advertised in the sidebar. */}
         <Route path="attendance-policies"  element={<AttendancePolicyDesigner />} />
-        {/* FRD §29 — Configuration Audit Viewer + Impact/Dependency Viewer, as two tabs
-            of one screen. Routed at /hrms/config-audit; same nav decision as above. */}
+        {/* Configuration Audit Viewer + Impact/Dependency Viewer, as two tabs of one
+            screen -- somebody reading a change is usually one click from wanting its
+            dependencies. */}
         <Route path="config-audit"         element={<ConfigAuditViewer />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
