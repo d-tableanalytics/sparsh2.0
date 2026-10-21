@@ -933,6 +933,87 @@ async def act_on_od(actor: dict, company_id: str, od_no: str, payload: dict) -> 
 # ─────────────────────────────────────────────────────────────
 # §7.12 — monthly closure
 # ─────────────────────────────────────────────────────────────
+# How many mismatching days the dashboard will name before it stops listing them. The
+# COUNT is always exact; only the examples are capped, because a screen listing four
+# hundred dates helps nobody and HR fixes these a few at a time.
+MAX_MISMATCH_EXAMPLES = 25
+
+
+async def leave_mismatches(company_id: str, period: str) -> dict:
+    """§7.12 — days where the leave record and the attendance record contradict each other.
+
+    Two shapes, reported separately because they are fixed differently:
+
+      * PUNCHED WHILE ON LEAVE. An approved leave day that also carries a punch. Either the
+        person worked and should cancel the leave, or somebody punched on their behalf.
+        Payroll currently pays the leave and ignores the punch, so nobody finds out.
+      * ABSENT WITH NOTHING BEHIND IT. An Absent day with no leave reference, no OD and no
+        approved leave covering it. That is a full day of LOP about to be deducted with no
+        record of why -- the single most disputed line on a payslip.
+
+    This is NOT in the lock-blocking set, deliberately. Locking a month is how payroll gets
+    its basis, and a company with one disputed day would be unable to run payroll at all;
+    `unexplained_absence` has always been reported without blocking for the same reason.
+    Adding it to `ready_to_lock` would change behaviour for every existing company, which
+    is the client's call and not ours.
+    """
+    from datetime import date as _date, timedelta as _td
+    from app.models.hrms import COLL_LEAVES, LeaveStatus
+
+    start, end = f"{period}-01", f"{period}-31"
+    approved = await get_collection(COLL_LEAVES).find(
+        {"company_id": str(company_id), "status": LeaveStatus.APPROVED.value,
+         "start_date": {"$lte": end}, "end_date": {"$gte": start}},
+        {"employee_code": 1, "start_date": 1, "end_date": 1, "leave_no": 1}).to_list(5000)
+
+    # (employee, date) pairs the leave register says are leave. Expanded from the ranges
+    # because attendance is addressed per DAY and a range cannot be compared to one.
+    on_leave: dict = {}
+    for lv in approved:
+        try:
+            first = _date.fromisoformat(max(str(lv.get("start_date") or ""), start)[:10])
+            last = _date.fromisoformat(min(str(lv.get("end_date") or ""), end)[:10])
+        except ValueError:
+            continue                      # a malformed stored date is not a mismatch
+        day = first
+        while day <= last:
+            on_leave[(lv.get("employee_code"), day.isoformat())] = lv.get("leave_no")
+            day += _td(days=1)
+
+    rows = await get_collection(COLL_ATTENDANCE).find(
+        {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end},
+         "$or": [{"status": AttendanceStatus.ABSENT.value},
+                 {"actual_in": {"$ne": None}}, {"actual_out": {"$ne": None}}]},
+        {"employee_code": 1, "work_date": 1, "status": 1, "actual_in": 1, "actual_out": 1,
+         "leave_ref": 1, "od_ref": 1}).to_list(20000)
+
+    punched_on_leave, absent_unexplained = [], []
+    for r in rows:
+        key = (r.get("employee_code"), r.get("work_date"))
+        punched = bool(r.get("actual_in") or r.get("actual_out"))
+        if key in on_leave and punched:
+            punched_on_leave.append({
+                "employee_code": r.get("employee_code"), "work_date": r.get("work_date"),
+                "leave_no": on_leave[key], "actual_in": r.get("actual_in"),
+                "actual_out": r.get("actual_out"),
+                "why": "Approved leave, but the day carries a punch"})
+        elif r.get("status") == AttendanceStatus.ABSENT.value and not (
+                r.get("leave_ref") or r.get("od_ref") or key in on_leave):
+            absent_unexplained.append({
+                "employee_code": r.get("employee_code"), "work_date": r.get("work_date"),
+                "why": "Absent with no leave or OD behind it"})
+
+    both = sorted(punched_on_leave + absent_unexplained,
+                  key=lambda x: (x["work_date"], x["employee_code"] or ""))
+    return {
+        "leave_mismatch": len(both),
+        "punched_while_on_leave": len(punched_on_leave),
+        "absent_without_leave_or_od": len(absent_unexplained),
+        "examples": both[:MAX_MISMATCH_EXAMPLES],
+        "examples_truncated": len(both) > MAX_MISMATCH_EXAMPLES,
+    }
+
+
 async def closure_dashboard(actor: dict, company_id: str, period: str) -> dict:
     """§7.12 steps 84-85: what is still open for this period, before HR can lock it."""
     start, end = f"{period}-01", f"{period}-31"
@@ -958,6 +1039,7 @@ async def closure_dashboard(actor: dict, company_id: str, period: str) -> dict:
     pending_leaves = await get_collection(COLL_LEAVES).count_documents(
         {"company_id": str(company_id), "status": {"$in": list(OPEN_LEAVE_STATUSES)},
          "start_date": {"$lte": end}, "end_date": {"$gte": start}})
+    mismatches = await leave_mismatches(company_id, period)
     lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})
     policy = await get_shift_policy(company_id)
@@ -970,6 +1052,9 @@ async def closure_dashboard(actor: dict, company_id: str, period: str) -> dict:
         "pending_od": pending_od,
         "pending_leaves": pending_leaves,
         "unexplained_absence": unexplained_absence,
+        # §7.12 — reported, not blocking. See leave_mismatches for why `ready_to_lock`
+        # deliberately does not include it.
+        **mismatches,
         "ready_to_lock": not (missing_punches or missing_out_punches or pending_regularizations
                               or pending_od or pending_leaves),
         "closing_day": policy.get("attendance_closing_day"),

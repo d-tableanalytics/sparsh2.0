@@ -1218,6 +1218,9 @@ const ClosureTab = ({ scope, companyId, can, showSuccess, showError }) => {
               ['Pending OD', dash.pending_od],
               ['Pending Leaves', dash.pending_leaves],
               ['Unexplained Absence', dash.unexplained_absence],
+              // Post-review Gap 8. Reported, NOT blocking — see leave_mismatches in
+              // hrms_attendance_service for why the lock does not wait on it.
+              ['Leave Mismatches', dash.leave_mismatch],
             ].map(([label, value]) => (
               <div key={label} className="rounded-xl border border-[var(--border)]
                 bg-[var(--bg-card)] p-3.5">
@@ -1266,6 +1269,57 @@ const ClosureTab = ({ scope, companyId, can, showSuccess, showError }) => {
               Resolve every exception above before this period is locked. Locking with
               exceptions still open needs a recorded reason.
             </p>
+          )}
+
+          {/* Gap 8. The two shapes are listed separately because they are FIXED
+              differently — one cancels a leave, the other records why somebody was away —
+              and the dates are named, because "12 mismatches" sends HR hunting. */}
+          {dash.leave_mismatch > 0 && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3.5 space-y-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-[12.5px] font-bold text-[var(--accent-orange)]">
+                  <AlertTriangle size={14} className="shrink-0" />
+                  {dash.leave_mismatch} day(s) where leave and attendance disagree
+                </p>
+                <p className="text-[11.5px] text-[var(--text-muted)]">
+                  {dash.punched_while_on_leave} punched while on approved leave ·{' '}
+                  {dash.absent_without_leave_or_od} absent with no leave or OD behind it.
+                  These do not stop the month being locked — but an unexplained absence is
+                  a full day of LOP, so it is worth settling first.
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11.5px]">
+                  <thead>
+                    <tr className="text-left text-[var(--text-muted)]">
+                      <th className="py-1 pr-3 font-semibold">Employee</th>
+                      <th className="py-1 pr-3 font-semibold">Date</th>
+                      <th className="py-1 font-semibold">What is wrong</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(dash.examples || []).map((m) => (
+                      <tr key={`${m.employee_code}:${m.work_date}`}
+                        className="border-t border-[var(--border-subtle)]">
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">{m.employee_code}</td>
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">{day(m.work_date)}</td>
+                        <td className="py-1.5 text-[var(--text-muted)]">
+                          {m.why}
+                          {m.leave_no ? ` (${m.leave_no})` : ''}
+                          {m.actual_in || m.actual_out
+                            ? ` · ${m.actual_in || '—'} – ${m.actual_out || '—'}` : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {dash.examples_truncated && (
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Showing the first {(dash.examples || []).length} of {dash.leave_mismatch}.
+                </p>
+              )}
+            </div>
           )}
           {dash.status === 'Locked' && canLock && (
             <p className="text-[11.5px] text-[var(--text-muted)]">
