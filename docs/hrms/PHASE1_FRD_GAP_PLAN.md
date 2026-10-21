@@ -718,7 +718,7 @@ These block or reshape specific steps. Recommend raising all of them before Step
 | # | Decision | Blocks | What we need |
 |---|---|---|---|
 | 1 | Employee Categories | Step 6 (applicability) | Final list and applicability |
-| 2 | Attendance Source | Step 4 | Google / biometric / API / manual / import or combination. **Google and API are enum values with no ingestion path today** — if either is in scope, add an integration step (≈4 d each). |
+| 2 | Attendance Source | — | **CLOSED 19 Oct by the client:** the source is a LABEL recording where a punch came from, not an integration. Manual / Import / Self are the capture paths; Google and API are stored values only. No integration work is in scope. |
 | 3 | Late / Half-Day / LOP rules | Step 4 | Exact thresholds after grace/buffer; half-day fraction; approved-leave interaction |
 | 4 | Monthly attendance cut-off | Step 4 | Date **and unlock authority** — today the cut-off is stored but not enforced |
 | 5 | Salary components | Step 6 | Complete earning / deduction / employer-contribution catalogue |
