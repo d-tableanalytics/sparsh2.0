@@ -38,11 +38,15 @@ import EmployeeSalaryStructure from '../payroll/EmployeeSalaryStructure';
  * History tab until the day arrives).
  */
 
+// Ordered as the client asked on 21 Oct: who the person IS, then how to reach them, then
+// their place in the company, then the operational setup. The `key` of each tab is
+// UNCHANGED -- every `tab === '...'` block and every `setTab(...)` call below addresses a
+// tab by key, so reordering and relabelling this list moves nothing but the strip itself.
 const TABS = [
-  { key: 'job', label: 'Job & Organisation' },
   { key: 'personal', label: 'Personal' },
-  { key: 'contact', label: 'Contact & Address' },
-  { key: 'reporting', label: 'Reporting' },
+  { key: 'contact', label: 'Contact/Address/Emergency' },
+  { key: 'job', label: 'Employment & Organization' },
+  { key: 'reporting', label: 'Reporting Manager' },
   { key: 'work', label: 'Work Setup' },
   { key: 'statutory', label: 'Statutory & Bank' },
   // What payroll pays from — the same panel as Payroll ▸ Salary Structure.

@@ -34,15 +34,40 @@ import {
 /**
  * HRMS ▸ Attendance (BA/Functional Design §7.8, §7.9, §7.12, §22.9).
  *
- * Four tabs over the same underlying case: the day's raw capture, the regularisation queue
- * it feeds, Outdoor Duty as its own small workflow (§7.8 step 59), and the monthly-closure
- * dashboard HR uses to lock a payroll-ready period. One page rather than four routes because
- * none of these is a "case" with its own detail URL the way a separation is — they are all
- * views onto the same rolling operational data.
+ * Nine tabs over the same underlying case: the day's raw capture, the late/early summary
+ * it produces, flexible working hours, the regularisation and OD queues it feeds (§7.8
+ * step 59), the shift / holiday / policy configuration that judges a day, and the
+ * monthly-closure dashboard HR uses to validate and lock a payroll-ready period. One page
+ * rather than nine routes because none of these is a "case" with its own detail URL the
+ * way a separation is — they are all views onto the same rolling operational data.
  */
 
-const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Flexible Timing', 'Late Coming',
-  'Shifts', 'Holidays', 'Monthly Closure', 'Settings'];
+/**
+ * Labelled in the requirement document's own vocabulary (21 Oct) -- shift/policy
+ * configuration, daily attendance, late/early, working hours, OD/regularisation,
+ * approvals, month-end validation and lock -- so a reader can map a screen to the clause
+ * that asked for it without a translation table.
+ *
+ * `key` is deliberately the OLD label. Every `tab === '...'` below, the `useState` default
+ * and the capability filter all address a tab by this value, so keeping it fixed makes
+ * this change provably presentational: the only thing that moved is the text in the strip.
+ * The keys are internal identifiers and never reach the screen.
+ */
+const TABS = [
+  { key: 'Attendance', label: 'Daily Attendance' },
+  { key: 'Late Coming', label: 'Late / Early' },
+  { key: 'Flexible Timing', label: 'Working Hours' },
+  // The approval queue for both request types is these two tabs, which is where the
+  // document's "approvals" lives -- it is an action on a request, not a screen of its own.
+  { key: 'Regularizations', label: 'Regularisation & Approvals' },
+  { key: 'Outdoor Duty', label: 'OD (Outdoor Duty)' },
+  { key: 'Shifts', label: 'Shift Configuration' },
+  { key: 'Holidays', label: 'Holiday Calendar' },
+  { key: 'Settings', label: 'Policy Configuration' },
+  // Validation and the lock are one screen because they are one decision: the dashboard
+  // lists what is still open, and locking it is what freezes the basis payroll reads.
+  { key: 'Monthly Closure', label: 'Month-End Validation & Lock' },
+];
 
 const EXCEPTION_TYPES = ['Missing Punch', 'Wrong Time', 'Forgot to Mark', 'System Error', 'Other'];
 
@@ -141,12 +166,14 @@ const AttendanceBoard = () => {
   const { scope, companyId, can, role } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [tab, setTab] = useState('Attendance');
-  const tabs = TABS.filter((t) => (t !== 'Monthly Closure' || can(CAP.ATTENDANCE_CLOSURE_READ))
-    && (t !== 'Settings' || can(CAP.LEAVE_POLICY_MANAGE))
+  // Gated on t.key, not on the visible label: a tab's name is the client's to change and
+  // its permission is not, so the two must not be the same string.
+  const tabs = TABS.filter(({ key: k }) => (k !== 'Monthly Closure' || can(CAP.ATTENDANCE_CLOSURE_READ))
+    && (k !== 'Settings' || can(CAP.LEAVE_POLICY_MANAGE))
     // The shift master is HR's to read (closure) and to change (policy); the rest of the
     // board already shows each person the shift that judged their day.
-    && (t !== 'Shifts' || can(CAP.LEAVE_POLICY_MANAGE) || can(CAP.ATTENDANCE_CLOSURE_READ))
-    && (t !== 'Holidays' || can(CAP.LEAVE_POLICY_MANAGE) || can(CAP.ATTENDANCE_CLOSURE_READ)));
+    && (k !== 'Shifts' || can(CAP.LEAVE_POLICY_MANAGE) || can(CAP.ATTENDANCE_CLOSURE_READ))
+    && (k !== 'Holidays' || can(CAP.LEAVE_POLICY_MANAGE) || can(CAP.ATTENDANCE_CLOSURE_READ)));
   // Re-reads the attendance list after a self punch (the tab remounts on a new key).
   const [punchTick, setPunchTick] = useState(0);
 
