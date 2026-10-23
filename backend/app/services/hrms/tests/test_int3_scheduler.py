@@ -325,6 +325,7 @@ async def main() -> None:
     # =========================================================================
     import app.services.hrms_sla_service as SLA
     import app.services.hrms_policy_service as POL
+    import app.services.hrms_employee_master_service as EMASTER
 
     calls: list = []
 
@@ -338,17 +339,26 @@ async def main() -> None:
         calls.append(("policy", company_id))
         return {"notified": 1, "total": 1}
 
+    async def fake_effective_dated(company_id):
+        calls.append(("effective_dated", company_id))
+        return 0
+
     SLA.sweep_open_breaches = fake_sweep
     POL.notify_due_reviews = fake_policy
     PURGE.propose = fake_propose_empty
     PRE.due_touchpoints = fake_due_empty
+    EMASTER.apply_due_changes = fake_effective_dated
 
     store[M.COLL_JOB_RUNS].docs.clear()
 
     # -- Before any job's hour, nothing runs --
+    # 00:00, not 02:00: the effective-dated-changes job (FRD §4) deliberately holds the
+    # earliest slot at 01:00, because a scheduled transfer or pay revision must be in force
+    # before anything else reads the profile that day. The property under test is the hour
+    # gate itself, which is unchanged — only the quiet hour moved.
     calls.clear()
-    early = await SCH.run_due_jobs({}, now=NOW.replace(hour=2))
-    check("at 02:00 no job has reached its hour", not early["ran"] and not calls)
+    early = await SCH.run_due_jobs({}, now=NOW.replace(hour=0))
+    check("at 00:00 no job has reached its hour", not early["ran"] and not calls)
 
     # -- At 09:00 every job is due --
     calls.clear()

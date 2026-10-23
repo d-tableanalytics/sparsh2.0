@@ -57,7 +57,7 @@ from app.models.hrms import (
     JOB_PREBOARDING,
     JOB_PROBATION, JOB_PULSE_SURVEY, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
     PROBATION_REMINDED_FIELD, ProbationOutcome,
-    JOB_LWD, PurgeBatchStatus, SCHEDULED_JOBS,
+    JOB_EFFECTIVE_DATED, JOB_LWD, PurgeBatchStatus, SCHEDULED_JOBS,
 )
 
 
@@ -404,6 +404,17 @@ async def run_last_working_day(company_id: str) -> dict:
     return await run_lwd_sweep(company_id)
 
 
+async def run_effective_dated_changes(company_id: str) -> dict:
+    """FRD §4/§20 — apply today's scheduled employee changes (§4, last bullet).
+
+    A registration shim over hrms_employee_master_service.apply_due_changes, exactly as the
+    pulse, orientation and LWD jobs are over theirs.
+    """
+    from app.services.hrms_employee_master_service import apply_due_changes
+    applied = await apply_due_changes(company_id)
+    return {"applied": applied}
+
+
 JOB_HANDLERS = {
     JOB_SLA_SWEEP:     run_sla_sweep,
     JOB_PROBATION:     run_probation_reminders,
@@ -414,6 +425,7 @@ JOB_HANDLERS = {
     JOB_PULSE_SURVEY:  run_pulse_survey_issue,
     JOB_POLICY_ACK:    run_policy_acknowledgement_reminders,
     JOB_LWD:           run_last_working_day,
+    JOB_EFFECTIVE_DATED: run_effective_dated_changes,
 }
 
 

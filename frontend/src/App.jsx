@@ -85,6 +85,8 @@ import EmployeeProfile from './features/hrms/people/EmployeeProfile';
 // ── Phase 360-1 — Employee 360° (§6) ──
 import Employee360 from './features/hrms/people/Employee360';
 import MasterManager from './features/hrms/people/MasterManager';
+// Phase 1 FRD — Employee Master Setup: dropdown lists + configurable fields (§3, §21-22).
+import EmployeeMasterSetup from './features/hrms/people/EmployeeMasterSetup';
 import JdLibrary from './features/hrms/recruitment/JdLibrary';
 import PostingList from './features/hrms/recruitment/PostingList';
 import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
@@ -150,6 +152,9 @@ import PayrollBoard from './features/hrms/payroll/PayrollBoard';
 import PipBoard from './features/hrms/pip/PipBoard';
 // ── SM-HR-052 — Audit Viewer ──
 import AuditViewer from './features/hrms/admin/AuditViewer';
+import ConfigApprovalInbox from './features/hrms/admin/ConfigApprovalInbox';
+import AttendancePolicyDesigner from './features/hrms/attendance/AttendancePolicyDesigner';
+import ConfigAuditViewer from './features/hrms/admin/ConfigAuditViewer';
 // ── SM-HR-051 — User / Role / Permission Administration ──
 import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
 import RolesPermissions from './features/hrms/admin/RolesPermissions';
@@ -379,6 +384,7 @@ const AppRoutes = () => {
         <Route path="employees/:userId/360" element={<Employee360 />} />
         <Route path="departments"        element={<MasterManager kind="department" />} />
         <Route path="designations"       element={<MasterManager kind="designation" />} />
+        <Route path="employee-master-setup" element={<EmployeeMasterSetup />} />
         {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
         {/* The generic "both tracks" requisition list is superseded by the internal
             requisition experience (gates, SLA, escalation) now that every requisition runs
@@ -487,6 +493,18 @@ const AppRoutes = () => {
         {/* SM-HR-052 — Audit Viewer. The read API and Cap.AUDIT_READ gate already existed;
             this is the first screen to call it. */}
         <Route path="audit"                element={<AuditViewer />} />
+        {/* FRD §27/§29 — the configuration governance screens. These were deliberately
+            unadvertised under the 2026-09-23 "routes without a nav entry" decision, and
+            post-review Gap 7 reversed that for these three specifically: Gap 5 made the
+            change-request flow the ONLY way to activate a rule, so an approver who cannot
+            find the inbox cannot approve anything. They are now in the sidebar's
+            Configuration section, each shown to whoever holds the matching capability. */}
+        <Route path="config-approvals"     element={<ConfigApprovalInbox />} />
+        <Route path="attendance-policies"  element={<AttendancePolicyDesigner />} />
+        {/* Configuration Audit Viewer + Impact/Dependency Viewer, as two tabs of one
+            screen -- somebody reading a change is usually one click from wanting its
+            dependencies. */}
+        <Route path="config-audit"         element={<ConfigAuditViewer />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
         {/* Dynamic Roles & Permissions — MD / Super Admin / Admin decide who does what. */}

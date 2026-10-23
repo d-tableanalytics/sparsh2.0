@@ -36,6 +36,9 @@ export const CAP = {
 
   // Phase 2
   EMPLOYEE_READ: 'employee.read',
+  // Taking the directory out as a FILE, which a reporting manager deliberately does not
+  // hold even though they can browse their own team.
+  EMPLOYEE_EXPORT: 'employee.export',
   EMPLOYEE_WRITE: 'employee.write',
   EMPLOYEE_SALARY_READ: 'employee.salary.read',
   EMPLOYEE_SALARY_WRITE: 'employee.salary.write',
@@ -250,7 +253,16 @@ export const CAP = {
   // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
   PAYROLL_READ: 'payroll.read',
   PAYROLL_PROCESS: 'payroll.process',
+  // FRD §12 stage 8 — the Payroll/HR Checker, a tier below the stage-9 approver.
+  PAYROLL_CHECK: 'payroll.check',
   PAYROLL_APPROVE: 'payroll.approve',
+  // FRD §30 — configuration access is its own family, separate from employee/manager access.
+  CONFIG_READ: 'config.read',
+  CONFIG_DRAFT: 'config.draft',
+  CONFIG_APPROVE: 'config.approve',
+  // Who changed a rule, when, why and from what — a different question from what the
+  // rules are, and the one an auditor asks.
+  CONFIG_AUDIT_READ: 'config.audit_read',
   SALARY_STRUCTURE_READ: 'salary_structure.read',
   SALARY_STRUCTURE_MANAGE: 'salary_structure.manage',
   ADVANCE_READ: 'advance.read',

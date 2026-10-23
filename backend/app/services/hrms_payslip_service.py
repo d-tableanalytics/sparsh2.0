@@ -35,8 +35,8 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     COLL_DEPARTMENTS, COLL_DESIGNATIONS,
     COLL_EMPLOYEE_PROFILES, COLL_PAYROLL_RECORDS, COLL_PAYROLL_RUNS, COLL_PAYROLL_TEMPLATES,
-    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES,
-    ComponentType, HrmsRole,
+    COLL_PAYSLIP_TEMPLATE_VERSIONS, COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES,
+    DEDUCTING_TYPES, PAYROLL_FINAL_STATUSES, ComponentType, HrmsRole, PayslipSection,
 )
 from app.utils.hrms_access import hrms_role
 
@@ -130,6 +130,11 @@ def _compose_payslip(record: dict, *, period: str, run_status: Optional[str],
     `structured_gross` total). Nothing is recalculated. Shared by `get_payslip` (one
     employee) and `list_payslips` (a whole run), so the two can never render differently for
     the same record."""
+    if record.get("lines") is not None:
+        return _compose_from_lines(record, period=period, run_status=run_status,
+                                   employee_name=employee_name,
+                                   department_name=department_name,
+                                   designation_name=designation_name, template=template)
     earnings, structured_deductions = [], []
     for c in (structure or {}).get("components", []):
         meta = component_meta.get(c.get("code")) or {}
@@ -215,6 +220,173 @@ def _compose_payslip(record: dict, *, period: str, run_status: Optional[str],
     }
 
 
+def _compose_from_lines(record: dict, *, period: str, run_status: Optional[str],
+                        employee_name: Optional[str], department_name: Optional[str],
+                        designation_name: Optional[str], template: dict) -> dict:
+    """FRD §14 / §18: the payslip shows the component values ACTUALLY USED in the final
+    payroll -- the lines stored on the record at calculation, each mapped to its configured
+    payslip section -- not a fresh read of today's structure or component master."""
+    hide_zero = template.get("hide_zero_lines", True) is not False
+
+    def row(label, amount, full=None):
+        amount = round(float(amount or 0), 2)
+        if hide_zero and not amount:
+            return None
+        out = {"label": label, "amount": amount}
+        if full is not None and round(float(full), 2) != amount:
+            out["full_amount"] = round(float(full), 2)
+        return out
+
+    earnings, other_earnings, deductions, employer = [], [], [], []
+    for line in record.get("lines") or []:
+        section = line.get("section") or PayslipSection.REGULAR_EARNINGS.value
+        r = row(line.get("name") or line.get("code"), line.get("amount"), line.get("full_amount"))
+        if not r or section == PayslipSection.HIDDEN.value:
+            continue
+        if section == PayslipSection.EMPLOYER.value:
+            employer.append(r)
+        elif section == PayslipSection.DEDUCTIONS.value or \
+                line.get("component_type") in DEDUCTING_TYPES:
+            deductions.append(r)
+        elif section == PayslipSection.OTHER_EARNINGS.value:
+            other_earnings.append(r)
+        else:
+            earnings.append(r)
+
+    for label, key in (("Variable Pay / Incentive", "variable_pay_payout"),
+                       ("Arrears", "arrears"), ("Reimbursements", "reimbursements"),
+                       ("Bonus", "bonus"), ("Other Earnings", "other_earnings")):
+        r = row(label, record.get(key))
+        if r:
+            other_earnings.append(r)
+    for label, key in (("PF", "pf"), ("ESI", "esi"), ("Professional Tax", "pt"),
+                       ("TDS", "tds"), ("Salary Advance Recovery", "advance_recovery"),
+                       ("Notice Period Recovery", "notice_recovery"),
+                       ("Other Deductions", "other_deductions")):
+        r = row(label, record.get(key))
+        if r:
+            deductions.append(r)
+    for a in record.get("adjustments") or []:
+        r = row(a.get("name") or a.get("code"), a.get("amount"))
+        if not r:
+            continue
+        if a.get("reason"):
+            r["note"] = a["reason"]
+        ctype = a.get("component_type")
+        if ctype == ComponentType.EMPLOYER_CONTRIBUTION.value:
+            employer.append(r)
+        elif ctype in DEDUCTING_TYPES:
+            deductions.append(r)
+        elif ctype != ComponentType.INFORMATIONAL.value:
+            other_earnings.append(r)
+
+    proration_note = None
+    if record.get("lop_days"):
+        proration_note = (f'Prorated for {record["payable_days"]} of '
+                          f'{record["days_in_period"]} payable days '
+                          f'({record["lop_days"]} LOP).')
+    return {
+        "period": period,
+        "run_status": run_status,
+        "employee_code": record["employee_code"],
+        "employee_name": record.get("employee_name") or employee_name,
+        "designation": designation_name,
+        "department": department_name,
+        "date_of_joining": record.get("date_of_joining"),
+        "days_in_period": record["days_in_period"], "payable_days": record["payable_days"],
+        "lop_days": record["lop_days"], "present_days": record.get("present_days"),
+        "proration_note": proration_note,
+        "earnings": earnings,
+        "other_earnings": other_earnings,
+        "deductions": deductions,
+        "employer_contributions": employer if template.get("show_employer_contributions") else [],
+        "gross_earnings": record["gross_earnings"],
+        "total_deductions": record["total_deductions"],
+        "total_employer_contributions": record.get("total_employer_contributions"),
+        "net_pay": record["net_pay"],
+        "net_pay_words": _in_words(record["net_pay"]) if template.get(
+            "show_net_in_words", True) is not False else None,
+        "template": template,
+    }
+
+
+_ONES = ("Zero One Two Three Four Five Six Seven Eight Nine Ten Eleven Twelve Thirteen "
+         "Fourteen Fifteen Sixteen Seventeen Eighteen Nineteen").split()
+_TENS = "Zero Ten Twenty Thirty Forty Fifty Sixty Seventy Eighty Ninety".split()
+
+
+def _words_below_1000(n: int) -> str:
+    parts = []
+    if n >= 100:
+        parts.append(f"{_ONES[n // 100]} Hundred")
+        n %= 100
+    if n >= 20:
+        parts.append(_TENS[n // 10] + (f" {_ONES[n % 10]}" if n % 10 else ""))
+    elif n:
+        parts.append(_ONES[n])
+    return " ".join(parts)
+
+
+def _in_words(amount) -> Optional[str]:
+    """Indian numbering: crore / lakh / thousand."""
+    try:
+        amount = round(float(amount or 0), 2)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
+    rupees, paise = int(amount), int(round((amount - int(amount)) * 100))
+    if rupees == 0 and paise == 0:
+        return "Rupees Zero Only"
+    parts = []
+    for size, name in ((10_000_000, "Crore"), (100_000, "Lakh"), (1000, "Thousand")):
+        if rupees >= size:
+            parts.append(f"{_words_below_1000(rupees // size)} {name}")
+            rupees %= size
+    if rupees:
+        parts.append(_words_below_1000(rupees))
+    text = "Rupees " + " ".join(parts) if parts else "Rupees Zero"
+    if paise:
+        text += f" and {_words_below_1000(paise)} Paise"
+    return text + " Only"
+
+
+async def _released(actor: dict, company_id: str, period: str, employee_code: str,
+                    run: Optional[dict]) -> bool:
+    """FRD §14 Release: an employee sees their payslip only after final approval and lock
+    (or, if the company chose so, only once their payment is confirmed). Payroll roles see
+    the provisional one while they work on it."""
+    from app.utils.hrms_access import sees_all_payroll
+    if sees_all_payroll(actor):
+        return True
+    status = (run or {}).get("status")
+    if status not in PAYROLL_FINAL_STATUSES:
+        return False
+    from app.services.hrms_payroll_service import get_payroll_policy
+    policy = await get_payroll_policy(company_id)
+    if policy.get("payslip_release") == "after_payment" and status != "Closed":
+        from app.services.hrms_disbursal_service import my_payment
+        payment = await my_payment(company_id, period, employee_code)
+        return bool(payment and payment.get("status") == "Processed")
+    return True
+
+
+async def _identifiers(company_id: str, employee_code: str, template: dict) -> dict:
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": employee_code}) or {}
+    from app.services.hrms_employee_master_service import mask
+    out = {}
+    if template.get("show_identifiers", True) is not False:
+        out.update({"pan": mask(profile.get("pan")), "uan": profile.get("uan"),
+                    "pf_number": profile.get("pf_number"), "esi_number": profile.get("esi_number"),
+                    "work_location": profile.get("work_location"),
+                    "grade": profile.get("grade")})
+    if template.get("show_bank", True) is not False:
+        out.update({"bank_name": profile.get("bank_name"),
+                    "bank_account": mask(profile.get("bank_account"))})
+    return out
+
+
 async def get_payslip(actor: dict, company_id: str, period: str,
                        employee_code: Optional[str] = None) -> dict:
     employee_code = await _resolve_employee_code(actor, company_id, employee_code)
@@ -227,7 +399,13 @@ async def get_payslip(actor: dict, company_id: str, period: str,
             detail=f"No payroll record for {employee_code} in {period}.")
 
     run = await get_collection(COLL_PAYROLL_RUNS).find_one(
-        {"company_id": str(company_id), "period": period}, {"status": 1})
+        {"company_id": str(company_id), "period": period},
+        {"status": 1, "payslip_template": 1})
+    if not await _released(actor, company_id, period, employee_code, run):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Your {period} payslip is not released yet. It is published once payroll "
+                   f"is approved and locked.")
 
     profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
         {"company_id": str(company_id), "employee_code": employee_code},
@@ -241,14 +419,19 @@ async def get_payslip(actor: dict, company_id: str, period: str,
     structure = await _latest_structure(company_id, employee_code, period)
     component_meta = {c["code"]: c for c in await get_collection(COLL_SALARY_COMPONENTS).find(
         {"company_id": str(company_id)}).to_list(200)}
-    template = await get_payslip_template(company_id)
+    # A locked payroll keeps the template version it was released with (FRD §14).
+    template = (run or {}).get("payslip_template") or await get_payslip_template(company_id)
 
-    return _compose_payslip(
+    slip = _compose_payslip(
         record, period=period, run_status=(run or {}).get("status"),
         employee_name=(profile or {}).get("display_name") or (profile or {}).get("full_name"),
         department_name=departments.get((profile or {}).get("department_id")),
         designation_name=designations.get((profile or {}).get("designation_id")),
         structure=structure, component_meta=component_meta, template=template)
+    slip["identifiers"] = await _identifiers(company_id, employee_code, template)
+    from app.services.hrms_disbursal_service import my_payment
+    slip["payment"] = await my_payment(company_id, period, employee_code)
+    return slip
 
 
 async def list_payslips(actor: dict, company_id: str, period: str) -> list:
@@ -265,7 +448,8 @@ async def list_payslips(actor: dict, company_id: str, period: str) -> list:
         return []
 
     run = await get_collection(COLL_PAYROLL_RUNS).find_one(
-        {"company_id": str(company_id), "period": period}, {"status": 1})
+        {"company_id": str(company_id), "period": period},
+        {"status": 1, "payslip_template": 1})
     run_status = (run or {}).get("status")
 
     codes = [r["employee_code"] for r in records]
@@ -279,7 +463,7 @@ async def list_payslips(actor: dict, company_id: str, period: str) -> list:
         company_id, {p.get("designation_id") for p in profiles.values()})
     component_meta = {c["code"]: c for c in await get_collection(COLL_SALARY_COMPONENTS).find(
         {"company_id": str(company_id)}).to_list(200)}
-    template = await get_payslip_template(company_id)
+    template = (run or {}).get("payslip_template") or await get_payslip_template(company_id)
 
     out = []
     for record in records:
@@ -291,34 +475,58 @@ async def list_payslips(actor: dict, company_id: str, period: str) -> list:
             department_name=departments.get(profile.get("department_id")),
             designation_name=designations.get(profile.get("designation_id")),
             structure=structure, component_meta=component_meta, template=template))
+        out[-1]["identifiers"] = await _identifiers(company_id, record["employee_code"], template)
     return out
 
 
 # ─────────────────────────────────────────────────────────────
 # SM-HR-064 — Payslip Template Configuration
 # ─────────────────────────────────────────────────────────────
+TEMPLATE_DEFAULTS = {
+    "company_name": None, "header_note": None, "footer_note": None, "company_address": None,
+    "show_lop_days": True, "show_identifiers": True, "show_bank": True,
+    "show_employer_contributions": False, "hide_zero_lines": True, "show_net_in_words": True,
+    "version": 0,
+}
+
+
 async def get_payslip_template(company_id: str) -> dict:
     doc = await get_collection(COLL_PAYROLL_TEMPLATES).find_one({"company_id": str(company_id)})
-    if not doc:
-        return {"company_id": str(company_id), "company_name": None,
-                "header_note": None, "footer_note": None}
-    return _out(doc)
+    out = {**TEMPLATE_DEFAULTS, "company_id": str(company_id)}
+    if doc:
+        out.update({k: v for k, v in _out(doc).items() if v is not None or k in TEMPLATE_DEFAULTS})
+    return out
+
+
+async def list_template_versions(company_id: str) -> list:
+    rows = await get_collection(COLL_PAYSLIP_TEMPLATE_VERSIONS).find(
+        {"company_id": str(company_id)}).sort("version", -1).to_list(100)
+    return [_out(r) for r in rows]
 
 
 async def save_payslip_template(actor: dict, company_id: str, payload: dict) -> dict:
-    """§7.13's own BR defers full statutory/component configuration to a payroll workshop —
-    what is configurable today is the header/footer note every issued payslip carries."""
+    """FRD §14 Template: the Sparsh-approved layout options. Every save is a new VERSION
+    (kept in hrms_payslip_template_versions); a locked payroll stores the version it was
+    released with, so editing the template never changes an issued payslip."""
     now = datetime.now(timezone.utc)
+    current = await get_payslip_template(company_id)
     clean = {
         "company_name": (payload.get("company_name") or "").strip() or None,
         "header_note": (payload.get("header_note") or "").strip() or None,
         "footer_note": (payload.get("footer_note") or "").strip() or None,
-        "updated_by": str(actor.get("_id") or ""),
-        "updated_at": now,
+        "company_address": (payload.get("company_address") or "").strip() or None,
     }
+    for flag in ("show_lop_days", "show_identifiers", "show_bank",
+                 "show_employer_contributions", "hide_zero_lines", "show_net_in_words"):
+        value = payload.get(flag)
+        clean[flag] = bool(value) if value is not None else current.get(flag)
+    clean.update({"version": int(current.get("version") or 0) + 1,
+                  "updated_by": str(actor.get("_id") or ""), "updated_at": now})
     await get_collection(COLL_PAYROLL_TEMPLATES).update_one(
         {"company_id": str(company_id)},
         {"$set": clean, "$setOnInsert": {"company_id": str(company_id), "created_at": now}},
         upsert=True,
     )
+    await get_collection(COLL_PAYSLIP_TEMPLATE_VERSIONS).insert_one(
+        {"company_id": str(company_id), **clean, "created_at": now})
     return await get_payslip_template(company_id)

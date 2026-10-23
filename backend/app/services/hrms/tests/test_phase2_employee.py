@@ -73,7 +73,17 @@ def _dotted_get(doc, key, default=None):
     if "." not in key:
         return doc.get(key, default)
     cursor = doc
-    for part in key.split("."):
+    for i, part in enumerate(key.split(".")):
+        # Mongo descends THROUGH an array: {"lines.code": "BASIC"} matches a document whose
+        # `lines` array holds an element with code "BASIC". Without this the fake answers
+        # None for every such query, which lets a broken "is this component still used"
+        # check pass its tests (Step 11 found exactly that).
+        if isinstance(cursor, list):
+            rest = ".".join(key.split(".")[i:])
+            found = [_dotted_get(item, rest, default) for item in cursor
+                     if isinstance(item, dict)]
+            found = [f for f in found if f is not default]
+            return found if found else default
         if not isinstance(cursor, dict) or part not in cursor:
             return default
         cursor = cursor[part]

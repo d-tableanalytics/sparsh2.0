@@ -63,7 +63,9 @@ async def main() -> int:
     U_FULL, U_PART = ObjectId(), ObjectId()
     profiles = FakeCollection([
         {"company_id": CO, "employee_code": "EMP-FULL", "user_id": str(U_FULL), "employment_status": "Active"},
-        {"company_id": CO, "employee_code": "EMP-PART", "user_id": str(U_PART), "employment_status": "Active"},
+        # Joined on the 16th: days 1-15 are outside service (unpaid, not LOP).
+        {"company_id": CO, "employee_code": "EMP-PART", "user_id": str(U_PART), "employment_status": "Active",
+         "joined_on": f"{PERIOD}-16"},
     ])
     staff = FakeCollection([
         {"_id": U_FULL, "full_name": "Dummy HR"},
@@ -88,9 +90,12 @@ async def main() -> int:
            for d in range(16, 32)])
     runs = FakeCollection([{"_id": ObjectId(), "company_id": CO, "period": PERIOD, "status": "Draft"}])
     records = FakeCollection()
+    # FRD §18: payroll runs only on a LOCKED attendance month.
+    locks = FakeCollection([{"company_id": CO, "period": PERIOD, "status": "Locked"}])
     store = {M.COLL_EMPLOYEE_PROFILES: profiles, "staff": staff, "learners": FakeCollection(),
              M.COLL_SALARY_COMPONENTS: components, M.COLL_SALARY_STRUCTURES: structures,
-             M.COLL_ATTENDANCE: attendance, M.COLL_PAYROLL_RUNS: runs, M.COLL_PAYROLL_RECORDS: records}
+             M.COLL_ATTENDANCE: attendance, M.COLL_PAYROLL_RUNS: runs, M.COLL_PAYROLL_RECORDS: records,
+             M.COLL_ATTENDANCE_LOCKS: locks}
     mongo.get_collection = lambda name: store.setdefault(name, FakeCollection())
 
     import app.services.hrms_payroll_service as PR
@@ -117,6 +122,10 @@ async def main() -> int:
     section("   ...but not when nothing was earned")
     profiles.docs.append({"company_id": CO, "employee_code": "EMP-NONE", "user_id": str(ObjectId()),
                           "employment_status": "Active"})
+    # Absent every day of the month (a blank Sunday would now be a paid weekly off).
+    attendance.docs.extend({"company_id": CO, "employee_code": "EMP-NONE",
+                            "work_date": f"{PERIOD}-{d:02d}", "status": "Absent"}
+                           for d in range(1, 32))
     structures.docs.append({"company_id": CO, "employee_code": "EMP-NONE",
                             "effective_from": "2025-01-01", "components": salary})
     await PR.calculate_payroll(HR, CO, PERIOD)
@@ -162,7 +171,8 @@ async def main() -> int:
           == [("Professional Tax", 200), ("PF", 1800), ("TDS", 500)])
 
     section("   A record calculated BEFORE this fix is shown as it was paid")
-    legacy = {k: v for k, v in part.items() if k != "structured_deductions"}
+    # A record from before that fix predates stored component lines too.
+    legacy = {k: v for k, v in part.items() if k not in ("structured_deductions", "lines")}
     s_old = slip(legacy)
     check("no Professional Tax line the old total never took",
           not any(d["label"] == "Professional Tax" for d in s_old["deductions"]))

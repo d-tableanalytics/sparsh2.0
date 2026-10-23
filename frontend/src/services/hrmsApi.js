@@ -97,6 +97,74 @@ export const updateEmployee = (userId, payload, params) =>
   api.patch(`/hrms/employees/${userId}`, payload, { params });
 export const getEmployeeHierarchy = (userId, params) =>
   api.get(`/hrms/employees/${userId}/hierarchy`, { params });
+// ── Employee photograph (FRD §3 Basic Identity) ──
+export const saveEmployeePhotograph = (userId, payload, params) =>
+  api.put(`/hrms/employees/${userId}/photograph`, payload, { params });
+export const deleteEmployeePhotograph = (userId, params) =>
+  api.delete(`/hrms/employees/${userId}/photograph`, { params });
+// ── Configuration: versioned policies and the §27 change approval flow ──
+export const listPolicyDefinitions = (params) => api.get('/hrms/config/policies', { params });
+export const savePolicyDefinition = (payload, params) =>
+  api.put('/hrms/config/policies', payload, { params });
+export const listPolicyVersions = (code, params) =>
+  api.get(`/hrms/config/policies/${code}/versions`, { params });
+export const savePolicyVersion = (code, payload, params) =>
+  api.put(`/hrms/config/policies/${code}/versions`, payload, { params });
+export const setPolicyVersionStatus = (code, versionNo, payload, params) =>
+  api.post(`/hrms/config/policies/${code}/versions/${versionNo}/status`, payload, { params });
+export const assignPolicyScope = (code, versionNo, payload, params) =>
+  api.put(`/hrms/config/policies/${code}/versions/${versionNo}/scope`, payload, { params });
+export const resolvePolicyForEmployee = (code, params) =>
+  api.get(`/hrms/config/policies/${code}/resolve`, { params });
+/** FRD §23/§25 — re-judge a recorded month under a DRAFT rule. Writes nothing. */
+export const simulateAttendancePolicy = (code, versionNo, params) =>
+  api.post(`/hrms/config/policies/${code}/versions/${versionNo}/simulate`, null, { params });
+
+/** FRD §21 — the PAY_POLICY versions behind the payroll policy screen. */
+export const listPayrollPolicyVersions = (params) =>
+  api.get('/hrms/payroll/policy/versions', { params });
+
+export const listConfigChangeRequests = (params) =>
+  api.get('/hrms/config/change-requests', { params });
+export const createConfigChangeRequest = (payload, params) =>
+  api.post('/hrms/config/change-requests', payload, { params });
+export const getConfigChangeRequest = (requestNo, params) =>
+  api.get(`/hrms/config/change-requests/${requestNo}`, { params });
+export const analyseConfigChangeImpact = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/impact`, null, { params });
+export const submitConfigChangeRequest = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/submit`, null, { params });
+export const decideConfigChangeRequest = (requestNo, payload, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/decision`, payload, { params });
+export const activateConfigChangeRequest = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/activate`, null, { params });
+/** FRD §27 — which configuration types this company sends through the approval flow. */
+export const getGovernedConfigTypes = (params) =>
+  api.get('/hrms/config/governed-types', { params });
+export const setGovernedConfigTypes = (payload, params) =>
+  api.put('/hrms/config/governed-types', payload, { params });
+/** FRD §29 — what points at a piece of configuration, before changing or retiring it. */
+export const getConfigImpact = (entityType, code, params) =>
+  api.get(`/hrms/config/impact/${entityType}/${code}`, { params });
+/** FRD §29/§30 — every governed change with requester, approver, reason and old/new. */
+export const getConfigAudit = (params) => api.get('/hrms/config/audit', { params });
+export const listBankFileFormats = (params) =>
+  api.get('/hrms/config/bank-file-formats', { params });
+export const saveBankFileFormat = (payload, params) =>
+  api.put('/hrms/config/bank-file-formats', payload, { params });
+export const previewBankFileFormat = (payload, params) =>
+  api.post('/hrms/config/bank-file-formats/preview', payload, { params });
+/** FRD §25/§29 — every variable a formula may read, plus the company's own constants. */
+export const listCalculationVariables = (params) =>
+  api.get('/hrms/payroll/calculation-variables', { params });
+export const saveCalculationVariable = (payload, params) =>
+  api.put('/hrms/payroll/calculation-variables', payload, { params });
+export const deleteCalculationVariable = (name, params) =>
+  api.delete(`/hrms/payroll/calculation-variables/${name}`, { params });
+
+/** A short-lived signed link — re-fetch rather than caching the URL. */
+export const getEmployeePhotographUrl = (userId, params) =>
+  api.get(`/hrms/employees/${userId}/photograph`, { params });
 /** Company users who do not yet have an employee profile — the "Add employee" picker. */
 export const getLinkableUsers = (params) => api.get('/hrms/employees/linkable', { params });
 /** Your own employee record. Never gated by employee.read, and always includes your salary. */
@@ -376,6 +444,57 @@ export const exportHrmsReport = async (entity, params) => {
     total: Number(res.headers?.['x-export-total'] || 0),
   };
 };
+
+/**
+ * Post-review Gap 6 — the five checklist exports (P1-112, P1-124, P1-125, P1-127, P1-128).
+ *
+ * One helper for all of them, for the same reason the backend has one export module: the
+ * file is rendered SERVER-side from already-scoped rows, so the browser's whole job is to
+ * save the blob and report the truncation headers. A screen that assembled its own CSV from
+ * a list endpoint would be shipping the rows the API withheld.
+ */
+const downloadExport = async (path, params, fallbackName) => {
+  const res = await api.get(path, { params, responseType: 'blob' });
+  const disposition = res.headers?.['content-disposition'] || '';
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const url = URL.createObjectURL(res.data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = match?.[1] || fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return {
+    truncated: res.headers?.['x-export-truncated'] === 'true',
+    rows: Number(res.headers?.['x-export-rows'] || 0),
+    total: Number(res.headers?.['x-export-total'] || 0),
+  };
+};
+
+/** FRD §3 employee master (P1-124). Masked fields stay masked; needs employee.export. */
+export const exportEmployeeMaster = (params) =>
+  downloadExport('/hrms/employees/export', params, 'hrms_employees.csv');
+/** Attendance for a month, per day or per employee (P1-125). */
+export const exportAttendance = (params) =>
+  downloadExport('/hrms/attendance/export', params, 'hrms_attendance.csv');
+/** One payment batch, account masked (P1-127). */
+export const exportPaymentBatch = (batchNo, params) =>
+  downloadExport(`/hrms/payment-batches/${batchNo}/export`, params,
+    `hrms_payments_${batchNo}.csv`);
+/** Every payment of a period, retries included (P1-127). */
+export const exportPeriodPayments = (period, params) =>
+  downloadExport(`/hrms/payroll/runs/${period}/payments/export`, params,
+    `hrms_payments_${period}.csv`);
+/** Payroll against the bank (P1-112). No `fmt` returns JSON for the screen. */
+export const getPayrollReconciliation = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/reconciliation`, { params });
+export const exportPayrollReconciliation = (period, params) =>
+  downloadExport(`/hrms/payroll/runs/${period}/reconciliation`, params,
+    `hrms_reconciliation_${period}.csv`);
+/** FRD §29/§30 configuration audit (P1-128). Needs config.audit_read. */
+export const exportConfigAudit = (params) =>
+  downloadExport('/hrms/config/audit/export', params, 'hrms_config_audit.csv');
 
 // ══════════════════════════════════════════════════════════════
 // Internal (in-house) recruitment track
@@ -797,8 +916,11 @@ export const actOnOd = (odNo, payload, params) =>
 /** §7.12 monthly closure — what is still open, then lock/unlock the period. */
 export const getClosureDashboard = (period, params) =>
   api.get(`/hrms/attendance/closure/${period}`, { params });
-export const lockPeriod = (period, params) =>
-  api.post(`/hrms/attendance/closure/${period}/lock`, null, { params });
+/** Lock the month. With exceptions still open the backend refuses unless the lock
+ *  authority gives `overrideReason` (FRD §5 Monthly Cut-off). */
+export const lockPeriod = (period, params, overrideReason) =>
+  api.post(`/hrms/attendance/closure/${period}/lock`,
+    overrideReason ? { override_reason: overrideReason } : null, { params });
 export const unlockPeriod = (period, reason, params) =>
   api.post(`/hrms/attendance/closure/${period}/unlock`, { reason }, { params });
 
@@ -1142,3 +1264,72 @@ export const sourceFromClientPool = (payload, params) =>
 // ── Status history, read from the audit trail ──
 export const getClientHistory = (entity, recordNo, params) =>
   api.get(`/hrms/client-history/${entity}/${recordNo}`, { params });
+
+// ── Phase 1 FRD — Configurable Employee, Attendance & Payroll ──
+// Employee Master (FRD §3-4): company dropdown lists, duplicate check, effective-dated
+// change history (a future effective date SCHEDULES the change).
+export const getEmployeeMasterLists = (params) => api.get('/hrms/employee-master/lists', { params });
+export const saveEmployeeMasterLists = (lists, params) =>
+  api.put('/hrms/employee-master/lists', { lists }, { params });
+export const checkEmployeeDuplicates = (payload, params) =>
+  api.post('/hrms/employee-master/duplicate-check', payload, { params });
+export const getEmployeeHistory = (userId, params) =>
+  api.get(`/hrms/employees/${userId}/history`, { params });
+export const cancelScheduledEmployeeChange = (historyId, params) =>
+  api.post(`/hrms/employee-master/history/${historyId}/cancel`, null, { params });
+
+// Configurable fields (FRD §21-22). module: 'employee' | 'attendance'.
+export const listFieldDefinitions = (params) => api.get('/hrms/field-definitions', { params });
+export const saveFieldDefinition = (payload, params) =>
+  api.put('/hrms/field-definitions', payload, { params });
+export const setFieldDefinitionStatus = (module, code, payload, params) =>
+  api.post(`/hrms/field-definitions/${module}/${code}/status`, payload, { params });
+export const deleteFieldDefinition = (module, code, params) =>
+  api.delete(`/hrms/field-definitions/${module}/${code}`, { params });
+export const getFieldDefinitionUsage = (module, code, params) =>
+  api.get(`/hrms/field-definitions/${module}/${code}/usage`, { params });
+
+// Shift master + the employee's month calendar (FRD §5, §23).
+export const listShifts = (params) => api.get('/hrms/attendance/shifts', { params });
+export const saveShift = (payload, params) => api.put('/hrms/attendance/shifts', payload, { params });
+export const getEmployeeMonthCalendar = (employeeCode, period, params) =>
+  api.get(`/hrms/attendance/calendar/${employeeCode}/${period}`, { params });
+
+// Payroll controls (FRD §9-§12, §18, §20).
+export const getPayrollPolicy = (params) => api.get('/hrms/payroll/policy', { params });
+export const savePayrollPolicy = (payload, params) => api.put('/hrms/payroll/policy', payload, { params });
+export const decideSalaryStructure = (structureId, payload, params) =>
+  api.post(`/hrms/salary-structures/${structureId}/decision`, payload, { params });
+export const submitPayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/submit`, payload || {}, { params });
+/** FRD §12 stage 8 — the Payroll/HR Checker verifies and passes it on, or sends it back. */
+export const checkPayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/check`, payload || {}, { params });
+export const lockPayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/lock`, payload || {}, { params });
+export const closePayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/close`, payload || {}, { params });
+export const downloadPayrollRegister = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/register`, { params, responseType: 'blob' });
+export const listPostLockAdjustments = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/post-lock-adjustments`, { params });
+export const createPostLockAdjustment = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/post-lock-adjustments`, payload, { params });
+export const listPayslipTemplateVersions = (params) =>
+  api.get('/hrms/payslip-template/versions', { params });
+
+// Salary disbursal (FRD §13): batch from a LOCKED payroll, bank file, UTR / status.
+export const listPaymentBatches = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/payment-batches`, { params });
+export const generatePaymentBatch = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/payment-batches`, payload, { params });
+export const getPaymentBatch = (batchNo, params) => api.get(`/hrms/payment-batches/${batchNo}`, { params });
+export const downloadBankFile = (batchNo, params) =>
+  api.get(`/hrms/payment-batches/${batchNo}/bank-file`, { params, responseType: 'blob' });
+export const updatePaymentStatus = (batchNo, employeeCode, payload, params) =>
+  api.patch(`/hrms/payment-batches/${batchNo}/payments/${employeeCode}`, payload, { params });
+/** FRD §25 — old vs proposed amounts for every affected employee; writes nothing. */
+export const simulateSalaryComponent = (code, payload, params) =>
+  api.post(`/hrms/salary-components/${code}/simulate`, payload, { params });
+export const importPaymentStatuses = (batchNo, rows, params) =>
+  api.post(`/hrms/payment-batches/${batchNo}/import`, { rows }, { params });

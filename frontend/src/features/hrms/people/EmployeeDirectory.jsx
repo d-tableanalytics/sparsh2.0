@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Users2, Search, Plus, ChevronLeft, ChevronRight, ShieldAlert } from 'lucide-react';
+import {
+  Users2, Search, Plus, ChevronLeft, ChevronRight, ShieldAlert, Download,
+} from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -8,6 +10,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getEmployees, getDepartments, getDesignations, getLinkableUsers, linkEmployeeUser,
+  exportEmployeeMaster,
 } from '../../../services/hrmsApi';
 import AddEmployeeModal from './AddEmployeeModal';
 
@@ -142,6 +145,30 @@ const EmployeeDirectory = () => {
   const [linking, setLinking] = useState(null);
 
   const canWrite = can(CAP.EMPLOYEE_WRITE);
+  const canExport = can(CAP.EMPLOYEE_EXPORT);
+  const [exporting, setExporting] = useState(false);
+
+  // The same filters the list is showing. The server renders the file from rows it has
+  // already scoped and masked, so this only has to ask and save.
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      const result = await exportEmployeeMaster({
+        ...scope,
+        search: debounced || undefined,
+        department_id: departmentId || undefined,
+        status: status || undefined,
+      });
+      if (result.truncated) {
+        setError(`Exported the first ${result.rows} of ${result.total} employees. `
+          + 'Narrow the filters to export the rest.');
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not export the employee master.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Debounce so typing does not fire a request per keystroke against a 500-row directory.
   useEffect(() => {
@@ -202,6 +229,17 @@ const EmployeeDirectory = () => {
         actions={
           <div className="flex items-center gap-2">
             <HrmsScopeBar />
+            {/* P1-124. The file matches WHAT IS ON SCREEN: the same search, department
+                and status go to the server, so "export this list" means this list. The
+                server renders it from scoped rows, so a manager's file is their team. */}
+            {canExport && (
+              <button
+                type="button" onClick={runExport} disabled={exporting}
+                className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)] flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <Download size={14} /> {exporting ? 'Exporting…' : 'Export'}
+              </button>
+            )}
             {canWrite && (
               <button
                 type="button" onClick={() => setShowAdd(true)}
@@ -254,10 +292,10 @@ const EmployeeDirectory = () => {
       ) : (
         <>
           <div className="rounded-xl border border-[var(--border)] overflow-x-auto">
-            <table className="w-full text-[13px] min-w-[720px]">
+            <table className="w-full text-[13px] min-w-[900px]">
               <thead className="bg-[var(--input-bg)] text-[var(--text-muted)]">
                 <tr>
-                  {['Employee', 'Code', 'Department', 'Designation', 'Status'].map((h) => (
+                  {['Employee', 'Code', 'Department', 'Designation', 'Location', 'Grade', 'Status'].map((h) => (
                     <th key={h} className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{h}</th>
                   ))}
                   {data.salary_visible && (
@@ -312,6 +350,12 @@ const EmployeeDirectory = () => {
                     </td>
                     <td className="px-4 py-2.5 text-[var(--text-main)]">
                       {e.designation || <span className="text-[var(--text-muted)]">{e.legacy_designation || '—'}</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-[var(--text-main)]">
+                      {e.work_location || <span className="text-[var(--text-muted)]">—</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-[var(--text-main)]">
+                      {e.grade || <span className="text-[var(--text-muted)]">—</span>}
                     </td>
                     <td className="px-4 py-2.5"><StatusPill value={e.employment_status} /></td>
                     {data.salary_visible && (

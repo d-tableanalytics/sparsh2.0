@@ -259,24 +259,62 @@ export const MOVEMENT_GUIDES = {
 export const PAYROLL_GUIDE = {
   id: 'payroll',
   title: 'How a month’s payroll works',
-  intro: 'Set salaries once, then each month: create, calculate, check, approve.',
+  intro: 'Set salaries once, then each month: calculate, submit, check, lock, pay and close. The person who submits a month can never be the person who checks it.',
   steps: [
     { title: 'Set salaries', text: 'Each employee needs a salary in the Salary Structure tab — without one, their pay shows as 0.' },
     { title: 'Lock attendance', text: 'In Attendance → Monthly Closure, lock the month so the days cannot change.' },
     { title: 'Create the run', text: 'Click Create Run and choose the month.' },
-    { title: 'Calculate', text: 'Open the run and click Calculate. Pay is worked out for everyone.' },
-    { title: 'Check and adjust', text: 'Look through each person. Use Adjust for a one-off bonus or deduction.' },
-    { title: 'Approve and lock', text: 'An approver clicks Approve & Lock. Payslips become final.' },
+    { title: 'Calculate and adjust', text: 'Open the run and click Calculate. Use Adjust for PF, tax, a bonus or a one-off line, and fix anything marked red.' },
+    { title: 'Submit', text: 'HR clicks Submit for approval once the figures are right.' },
+    { title: 'Check', text: 'A checker — not the person who submitted — approves it, or returns / rejects it with a reason.' },
+    { title: 'Lock', text: 'Finance clicks Lock. The figures are final and payslips are released.' },
+    { title: 'Pay', text: 'Under Disbursal, generate the bank file, upload it to the bank, then record each payment’s UTR.' },
+    { title: 'Close', text: 'When everyone is paid, click Close period. Later corrections go into a later month as an arrear or recovery.' },
   ],
 };
 
-export const payrollNextStep = (run) => {
-  switch (run?.status) {
-    case 'Draft': return { tone: 'action', text: 'Open it and click Calculate.', step: 3 };
-    case 'Calculated': return { tone: 'action', text: 'Check the figures. An approver then clicks Approve & Lock.', step: 4 };
-    case 'Rejected': return { tone: 'action', text: 'Sent back by the approver — fix the figures and click Calculate again.', step: 4 };
+/**
+ * `canApprove`: the viewer holds payroll approval (the checker / Finance). Several stages are
+ * someone else's job for the maker but the viewer's own job for the checker, so the same run
+ * reads as "waiting" to one and "do this now" to the other — the same split leaveNextStep makes.
+ */
+export const payrollNextStep = (run, { canApprove = false } = {}) => {
+  if (!run) return null;
+  const critical = run.totals?.critical_exceptions || 0;
+  const needsAttendance = run.attendance_locked === false
+    && run.policy?.require_attendance_lock !== false;
+  const why = run.decision_remarks ? ` Reason given: “${run.decision_remarks}”.` : '';
+  switch (run.status) {
+    case 'Draft':
+      return needsAttendance
+        ? { tone: 'action', text: 'Lock this month’s attendance first (Attendance → Monthly Closure), then click Calculate.', step: 1 }
+        : { tone: 'action', text: 'Open it and click Calculate.', step: 3 };
+    case 'Calculated':
+      return critical
+        ? { tone: 'action', text: `Fix the ${critical} problem(s) marked red and click Calculate again before submitting.`, step: 3 }
+        : { tone: 'action', text: 'Check the figures, then click Submit for approval.', step: 4 };
+    case 'Returned':
+      return { tone: 'action', text: `Returned by the checker — correct it, click Calculate again and submit.${why}`, step: 3 };
+    case 'Rejected':
+      return { tone: 'action', text: `Rejected by the checker — fix the figures, click Calculate again and submit.${why}`, step: 3 };
+    case 'Submitted':
+      return canApprove
+        ? { tone: 'action', text: 'Check the figures, then approve it, or return / reject it with a reason.', step: 5 }
+        : { tone: 'waiting', text: 'Waiting for a checker to approve it.', step: 5 };
     case 'Approved':
-    case 'Locked': return { tone: 'done', text: 'Final. Payslips are ready.', step: PAYROLL_GUIDE.steps.length };
+      return canApprove
+        ? { tone: 'action', text: 'Approved — click Lock to make it final and release payslips.', step: 6 }
+        : { tone: 'waiting', text: 'Approved — waiting for Finance to lock it.', step: 6 };
+    case 'Locked':
+      return canApprove
+        ? { tone: 'action', text: 'Final. Pay salaries: generate a bank file under Disbursal and record each payment.', step: 7 }
+        : { tone: 'waiting', text: 'Final — Finance is paying salaries.', step: 7 };
+    case 'Paid':
+      return canApprove
+        ? { tone: 'action', text: 'Everyone is paid — click Close period.', step: 8 }
+        : { tone: 'waiting', text: 'Everyone is paid — waiting for Finance to close the period.', step: 8 };
+    case 'Closed':
+      return { tone: 'done', text: 'Closed. Any correction now goes into a later month as an arrear or recovery.', step: PAYROLL_GUIDE.steps.length };
     default: return null;
   }
 };

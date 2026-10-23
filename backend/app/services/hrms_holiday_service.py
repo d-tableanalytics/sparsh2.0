@@ -126,10 +126,15 @@ async def add_holiday(actor: dict, company_id: str, payload: dict) -> dict:
                     f"a working calendar should need. Remove the years you no longer "
                     f"report on."))
 
+    calendar = clean_text(payload.get("calendar"), limit=80) or None
+    locations = sorted({clean_text(x, limit=80) for x in (payload.get("locations") or [])
+                        if clean_text(x, limit=80)})
     doc = {
         "company_id": str(company_id),
         "holiday_date": date,
         "holiday_name": name,
+        "calendar": calendar,
+        "locations": locations,
         "created_at": datetime.now(timezone.utc),
         "created_by": str((actor or {}).get("_id") or "") or None,
         "created_by_name": (actor or {}).get("full_name") or (actor or {}).get("email"),

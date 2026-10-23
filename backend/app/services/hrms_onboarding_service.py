@@ -1175,7 +1175,20 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
         "pan", "aadhaar", "date_of_birth", "gender", "address",
         "bank_name", "bank_account", "bank_ifsc",
         "emergency_contact_name", "emergency_contact_phone", "emergency_contact_relation",
+        "passport", "driving_license", "uan", "pf_number", "personal_email", "bank_branch",
     )}
+    # Same facts under the Employee Master's names (FRD §3).
+    for source, target in (("personal_phone", "personal_mobile"),
+                           ("bank_account_name", "bank_account_holder"),
+                           ("esic_number", "esi_number")):
+        if submission.get(source):
+            extra[target] = submission[source]
+    if submission.get("address"):
+        extra["current_address"] = {"line1": submission["address"]}
+    if submission.get("permanent_address"):
+        extra["permanent_address"] = {"line1": submission["permanent_address"]}
+    # The reporting manager chosen at joining is kept on the profile until a login is
+    # linked (the user document owns it after that).
 
     # Claim the ID on the onboarding FIRST, conditioned on it still being unissued. Two
     # simultaneous clicks then produce one employee, not two: the loser's update matches

@@ -9,6 +9,11 @@ import {
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, KeyRound, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
   Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
+  // ── Post-review Gap 7 ── the §27/§29 governance screens. GitPullRequest for the
+  // approval inbox (a change awaiting a decision is exactly that shape) and History for
+  // the audit; SlidersHorizontal is reused for the policy designer, as it already means
+  // "a screen of rules" on HRMS Settings below.
+  GitPullRequest, History,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
   HeartHandshake, Bookmark, Scale, Mail,
   // ── Phase EXIT-1 ── Exit Management. Not LogOut — that icon is already the literal
@@ -38,6 +43,8 @@ import {
   HeartPulse,
   // Source Analytics (candidates by platform).
   Radar,
+  // ── Phase 1 FRD ── Employee Master Setup (dropdown lists + configurable fields).
+  ListTree,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -208,6 +215,21 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     || (user?.governance_role || '').trim().toUpperCase() === 'HR';
   const canManagePermissions = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
     || (user?.governance_role || '').trim().toUpperCase() === 'MD';
+  // ── Post-review Gap 7 ── the three §27/§29 governance screens were routed without a
+  // nav entry, so the only way to reach the approval inbox was to know its URL. A
+  // configuration change cannot be approved by somebody who cannot find the screen, and
+  // Gap 5 made that the ONLY way to activate one -- which turned an unadvertised route
+  // into a dead end rather than a tidy nav.
+  //
+  // Gated by who actually holds the capability (utils/hrms_access.ROLE_CAPABILITIES), as
+  // every entry in this file is: the capability check in the API is the real control, this
+  // list only decides whether a door is shown. FINANCE is included where the capability
+  // is -- they are the §27 approver for a payroll rule change, and `isHrmsAdminUser` below
+  // deliberately excludes them, so these cannot simply live in the Setup block.
+  const gov = (user?.governance_role || '').trim().toUpperCase();
+  const isPlatformAdmin = ['superadmin', 'admin', 'clientadmin'].includes(user?.role);
+  const canReadConfig = isPlatformAdmin || ['MD', 'HR', 'FINANCE'].includes(gov);
+  const canDraftConfig = isPlatformAdmin || ['MD', 'HR'].includes(gov);
   // The hiring pipeline's ten stages are deliberately ABSENT here — they live in the
   // workspace tab strip (features/hrms/common/HrmsWorkspaceBar). Listing them in both
   // places put the same links twice and made HRMS the longest group in the sidebar.
@@ -360,10 +382,24 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
 
     // ── Governance, not a lifecycle stage: an internal-hiring control surface. ──
     { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
+    // ── FRD §27/§29 ── configuration governance. Its own section rather than part of
+    // Setup: Setup is a master-data area for HR, while these are the approval and audit
+    // surfaces Finance also works in.
+    ...(canReadConfig || canDraftConfig ? [{ section: 'Configuration' }] : []),
+    ...(canReadConfig ? [
+      { name: 'Configuration Approvals', path: '/hrms/config-approvals', icon: GitPullRequest },
+    ] : []),
+    ...(canDraftConfig ? [
+      { name: 'Attendance Policies', path: '/hrms/attendance-policies', icon: SlidersHorizontal },
+    ] : []),
+    ...(canReadConfig ? [
+      { name: 'Configuration Audit', path: '/hrms/config-audit', icon: History },
+    ] : []),
     ...(isHrmsAdminUser ? [
       { section: 'Setup' },
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+      { name: 'Employee Master Setup', path: '/hrms/employee-master-setup', icon: ListTree },
       // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
       // Companies section. A second master here is the duplication this replaced.
       { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },

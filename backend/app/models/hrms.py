@@ -1795,6 +1795,10 @@ class Cap(str, Enum):
 
     # ── Phase 2: employee master ──
     EMPLOYEE_READ         = "employee.read"          # browse the directory (row-scoped by role)
+    # Taking the directory OUT of the system as a file, which is a different act from
+    # reading it on screen -- the same split REPORT_EXPORT already draws against
+    # REPORT_READ. A manager browses their team and cannot download it.
+    EMPLOYEE_EXPORT       = "employee.export"
     EMPLOYEE_WRITE        = "employee.write"         # create / edit employee profiles
     EMPLOYEE_SALARY_READ  = "employee.salary.read"   # SEE pay figures
     EMPLOYEE_SALARY_WRITE = "employee.salary.write"  # SET pay figures
@@ -2081,7 +2085,32 @@ class Cap(str, Enum):
     # Payroll/Finance Approver").
     PAYROLL_READ    = "payroll.read"
     PAYROLL_PROCESS = "payroll.process"
+    # ── Phase 1 FRD §12 ── the workflow names THREE authorities, not two: stage 8 is the
+    # "Payroll/HR Checker" who VERIFIES component values, attendance impact and exceptions,
+    # and stage 9 is the separate "Finance / Authorised Approver" who approves, rejects or
+    # returns. Before this they shared PAYROLL_APPROVE, so one person could both check and
+    # approve and §17's two rows could not be told apart. CHECK is its own capability for
+    # exactly the reason ADVANCE_APPROVE_EMERGENCY is separate from ADVANCE_APPROVE: a
+    # narrower tier is not a flag on a wider one.
+    PAYROLL_CHECK   = "payroll.check"
     PAYROLL_APPROVE = "payroll.approve"
+    # ── Phase 1 FRD §26-§30 — the configuration layer ──
+    # §30: "Configuration access is permission-controlled and SEPARATE from normal
+    # employee/manager access." So these are their own family rather than a widening of
+    # EMPLOYEE_WRITE or PAYROLL_PROCESS: changing the rule that computes everybody's LOP is
+    # a different act from running one payroll, and the people trusted with each differ.
+    #
+    # DRAFT writes a version; APPROVE moves it to Approved/Active (§27's approval stage);
+    # READ sees the register and the audit. The draft/approve split is the same
+    # maker-checker shape BR-021 draws for payroll, applied to configuration.
+    CONFIG_READ    = "config.read"
+    CONFIG_DRAFT   = "config.draft"
+    CONFIG_APPROVE = "config.approve"
+    # §29/§30's Configuration Audit Viewer. Separate from CONFIG_READ because the audit is
+    # a different question from the register: the register says what the rules ARE, the
+    # audit says who changed them, when, why, and from what -- which is what an auditor
+    # asks for and what a drafter has no particular need to read.
+    CONFIG_AUDIT_READ = "config.audit_read"
     SALARY_STRUCTURE_READ   = "salary_structure.read"
     SALARY_STRUCTURE_MANAGE = "salary_structure.manage"
     # REQUEST is the self-service act every role gets (the same reasoning LEAVE_APPLY /
@@ -2276,7 +2305,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_OFFER_READ,
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
         # Sparsh staff support and observe the hiring pipeline, but the approval chain is
@@ -2363,7 +2392,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_HANDOVER,
         Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
@@ -2448,9 +2477,12 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase PAY-1 ── same reasoning as every block above: the top of the ladder holds
         # every one of these, including both money gates, so a company with no separate
         # Finance user can still run payroll and variable pay to completion.
-        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_APPROVE,
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
         Cap.ADVANCE_READ, Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
+        # Configuration: the ceiling holds both tiers, so a company with nobody else
+        # appointed can still change a rule and approve the change.
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_APPROVE, Cap.CONFIG_AUDIT_READ,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
         Cap.VARIABLE_PAY_HOLD_MANAGE,
         Cap.PIP_READ, Cap.PIP_MANAGE, Cap.PIP_DECIDE, Cap.PIP_ACKNOWLEDGE,
@@ -2483,7 +2515,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_MANAGE,
         Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
-        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE, Cap.EMPLOYEE_EXPORT,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
         Cap.DESIGNATION_READ, Cap.DESIGNATION_WRITE,
@@ -2595,8 +2627,16 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         #   narrower tier than plain HR.
         #   VARIABLE_PAY_HOLD_MANAGE -- releasing/forfeiting held pay is a Finance-level
         #   call at FY-end, not a routine HR act.
-        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS,
+        # FRD §12 stage 8 names the checker "Payroll/HR Checker", so HR holds CHECK as well
+        # as PROCESS. Holding both is safe: check_run refuses the person who submitted, so
+        # one HR user cannot wave their own run through — the maker-checker split is
+        # enforced on the ACTOR, not merely on the role.
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+        # §29's administrative screens are HR's, but CONFIG_APPROVE is deliberately absent:
+        # §27 puts an approval stage between a drafted rule and a live one, and an approver
+        # who is also the only drafter is not an approval.
+        Cap.CONFIG_READ, Cap.CONFIG_DRAFT, Cap.CONFIG_AUDIT_READ,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
         # ── Phase PIP-1 ── HR is the process owner throughout ("HR monitors overdue
@@ -2882,8 +2922,11 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # mirrors EMPLOYEE_SALARY_READ just above: Finance sees what payroll is BUILT from
         # (to judge the numbers it approves) without holding SALARY_STRUCTURE_MANAGE, the
         # same "visibility without write" split that comment already draws.
-        Cap.PAYROLL_READ, Cap.PAYROLL_APPROVE,
+        Cap.PAYROLL_READ, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE,
         Cap.SALARY_STRUCTURE_READ,
+        # Finance approves the payroll these rules produce, so it reads the rules and is
+        # the §27 approver for a change to them.
+        Cap.CONFIG_READ, Cap.CONFIG_APPROVE, Cap.CONFIG_AUDIT_READ,
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },
@@ -3258,6 +3301,52 @@ class EmployeeProfileIn(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    # Phase 1 FRD §3 -- the rest of the Employee Master. See EmployeeMasterFields below.
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    marital_status: Optional[str] = None
+    nationality: Optional[str] = None
+    personal_mobile: Optional[str] = None
+    official_mobile: Optional[str] = None
+    personal_email: Optional[str] = None
+    official_email: Optional[str] = None
+    current_address: Optional[dict] = None
+    permanent_address: Optional[dict] = None
+    permanent_same_as_current: Optional[bool] = None
+    emergency_contact_alt_phone: Optional[str] = None
+    employee_category: Optional[str] = None
+    probation_start: Optional[str] = None
+    probation_end: Optional[str] = None
+    confirmation_date: Optional[str] = None
+    legal_entity: Optional[str] = None
+    business_unit: Optional[str] = None
+    work_location: Optional[str] = None
+    sub_department: Optional[str] = None
+    grade: Optional[str] = None
+    level: Optional[str] = None
+    job_title: Optional[str] = None
+    cost_centre: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    functional_manager_id: Optional[str] = None
+    shift_code: Optional[str] = None
+    attendance_policy_group: Optional[str] = None
+    weekly_off_pattern: Optional[list[str]] = None
+    holiday_calendar: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_holder: Optional[str] = None
+    bank_account_type: Optional[str] = None
+    bank_effective_from: Optional[str] = None
+    passport: Optional[str] = None
+    driving_license: Optional[str] = None
+    payroll_group: Optional[str] = None
+    salary_template: Optional[str] = None
+    custom_fields: Optional[dict] = None
+    # When an organisation / reporting / pay-linkage change takes effect, and why. Not
+    # stored on the profile: they go on the history row (FRD §4, last bullet).
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
 
 
 class EmployeeProfileUpdate(BaseModel):
@@ -3286,6 +3375,503 @@ class EmployeeProfileUpdate(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    marital_status: Optional[str] = None
+    nationality: Optional[str] = None
+    personal_mobile: Optional[str] = None
+    official_mobile: Optional[str] = None
+    personal_email: Optional[str] = None
+    official_email: Optional[str] = None
+    current_address: Optional[dict] = None
+    permanent_address: Optional[dict] = None
+    permanent_same_as_current: Optional[bool] = None
+    emergency_contact_alt_phone: Optional[str] = None
+    employee_category: Optional[str] = None
+    probation_start: Optional[str] = None
+    probation_end: Optional[str] = None
+    confirmation_date: Optional[str] = None
+    legal_entity: Optional[str] = None
+    business_unit: Optional[str] = None
+    work_location: Optional[str] = None
+    sub_department: Optional[str] = None
+    grade: Optional[str] = None
+    level: Optional[str] = None
+    job_title: Optional[str] = None
+    cost_centre: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    functional_manager_id: Optional[str] = None
+    shift_code: Optional[str] = None
+    attendance_policy_group: Optional[str] = None
+    weekly_off_pattern: Optional[list[str]] = None
+    holiday_calendar: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_holder: Optional[str] = None
+    bank_account_type: Optional[str] = None
+    bank_effective_from: Optional[str] = None
+    passport: Optional[str] = None
+    driving_license: Optional[str] = None
+    payroll_group: Optional[str] = None
+    salary_template: Optional[str] = None
+    custom_fields: Optional[dict] = None
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+# ── Phase 1 FRD §3/§4 -- Employee Master field groups ──
+# One place that says which profile fields are plain text, which are dates, which come from
+# a company-configured dropdown, and which are effective-dated. The service, the history
+# writer and the duplicate check all read these, so adding a field is a one-line change.
+COLL_EMPLOYEE_HISTORY  = "hrms_employee_history"
+COLL_FIELD_DEFINITIONS = "hrms_field_definitions"
+COLL_SHIFTS            = "hrms_shifts"
+
+# ── Phase 1 FRD §26/§28 — the versioned-policy spine ──
+#
+# NOT to be confused with COLL_POLICIES / COLL_POLICY_REVISIONS further up, which are the
+# HR POLICY DOCUMENT register (SOP §14: leave policy, POSH policy — prose an employee reads
+# and acknowledges). These three are the CONFIGURATION layer: the attendance and payroll
+# RULES the system calculates with, versioned by effective date and scoped to a population.
+# Same English word, two different things, so they stay in two different namespaces.
+#
+# Shape follows §28's ER extension:
+#   DEFINITION  - what the policy IS (code, module, category). One row per policy, ever.
+#   VERSION     - what it SAYS, from when (rule_json, effective dates, status, approval).
+#   ASSIGNMENT  - WHO it applies to (company/location/department/grade/category + priority).
+#
+# Three collections rather than versions nested on the definition, which is how the shift
+# master does it: a shift has a handful of versions and is always read whole, whereas a
+# policy version is independently approved, independently scoped and independently queried
+# ("which version was in force for this employee on this date"), and an assignment is
+# edited without touching the version it points at.
+COLL_POLICY_DEFINITIONS = "hrms_policy_definitions"
+COLL_POLICY_VERSIONS    = "hrms_policy_versions"
+COLL_POLICY_ASSIGNMENTS = "hrms_policy_assignments"
+
+# ── Phase 1 FRD §27 — the configuration change approval flow ──
+#
+# §27 puts seven stages between wanting a rule changed and the rule being live:
+#   Request -> Draft -> Impact Analysis -> Test/Simulation -> Approval -> Effective Dating
+#   -> Activation.
+#
+# The REQUEST is the governance wrapper; the DRAFT it points at is the real artefact (a
+# policy version today, a salary component or field definition later). Keeping them
+# separate is what lets the same flow govern several kinds of configuration without each
+# one growing its own approval columns -- and what lets a request record the business
+# REASON, which the artefact has no natural place for.
+#
+# Approvals are their own collection rather than an array on the request for the same
+# reason payroll's approval_trail is append-only: a decision is a fact about a moment, and
+# a later decision must not be able to rewrite an earlier one.
+COLL_CONFIG_CHANGE_REQUESTS = "hrms_config_change_requests"
+COLL_CONFIG_APPROVALS       = "hrms_config_approvals"
+
+# ── Phase 1 FRD §13/§19 — bank file layouts ──
+# §19 lists "bank-specific layout and mandatory fields" as an open decision; the previous
+# implementation answered it in code with one CSV. One row per named layout per company.
+COLL_BANK_FILE_FORMATS = "hrms_bank_file_formats"
+
+# ── Phase 1 FRD §25/§28 — CALCULATION_VARIABLE ──
+# A company-defined NAMED CONSTANT a formula may read: a PF wage ceiling, an ESI threshold,
+# a standard deduction. They belong here rather than inside each formula because the same
+# figure appears in several, and a statutory change should be ONE edit with one audit entry
+# rather than a hunt through every component that happens to mention 21000.
+COLL_CALCULATION_VARIABLES = "hrms_calculation_variables"
+
+MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
+BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+ADDRESS_KEYS = ("line1", "line2", "city", "district", "state", "pin_code", "country")
+
+EMPLOYEE_TEXT_FIELDS = (
+    "first_name", "middle_name", "last_name", "display_name", "nationality",
+    "emergency_contact_alt_phone", "job_title", "bank_branch", "bank_account_holder",
+    "passport", "driving_license",
+)
+EMPLOYEE_DATE_FIELDS = (
+    ("probation_start", "Probation start"), ("probation_end", "Probation end"),
+    ("confirmation_date", "Confirmation date"), ("bank_effective_from", "Bank effective from"),
+)
+EMAIL_FIELDS  = (("personal_email", "Personal email"), ("official_email", "Official email"))
+MOBILE_FIELDS = (("personal_mobile", "Personal mobile"), ("official_mobile", "Official mobile"),
+                 ("emergency_contact_alt_phone", "Alternate emergency number"))
+
+# Fields whose values come from a company-maintained list (Employee Master settings). An
+# empty list means "not configured yet", and then any text is accepted -- a company that has
+# not set up its locations must still be able to save an employee.
+MASTER_LIST_FIELDS = {
+    "legal_entity":            ("legal_entities", "Company / legal entity"),
+    "business_unit":           ("business_units", "Business unit / branch"),
+    "work_location":           ("locations", "Location"),
+    "sub_department":          ("sub_departments", "Sub-department"),
+    "grade":                   ("grades", "Grade"),
+    "level":                   ("levels", "Level"),
+    "cost_centre":             ("cost_centres", "Cost centre"),
+    "employee_category":       ("employee_categories", "Employee category"),
+    "payroll_group":           ("payroll_groups", "Payroll group"),
+    "salary_template":         ("salary_templates", "Salary structure template"),
+    "attendance_policy_group": ("attendance_policy_groups", "Attendance policy group"),
+    "holiday_calendar":        ("holiday_calendars", "Holiday calendar"),
+}
+MASTER_LIST_KEYS = tuple(sorted({v[0] for v in MASTER_LIST_FIELDS.values()}))
+
+# Changes to these are effective-dated and written to hrms_employee_history; a future
+# effective date SCHEDULES the change instead of applying it (FRD §4, §18).
+EMPLOYEE_TRACKED_FIELDS = (
+    "department_id", "designation_id", "sub_department", "grade", "level", "job_title",
+    "legal_entity", "business_unit", "work_location", "cost_centre", "employee_category",
+    "employment_type", "employment_status", "reporting_manager_id", "functional_manager_id",
+    "payroll_group", "salary_template", "shift_code", "attendance_policy_group",
+    "weekly_off_pattern", "holiday_calendar", "base_salary",
+    "bank_name", "bank_account", "bank_ifsc", "bank_branch", "bank_account_holder",
+    "bank_account_type",
+)
+# Never echoed in full to someone without sensitive-data access (FRD §18).
+EMPLOYEE_MASKED_FIELDS = ("bank_account", "pan", "aadhaar", "passport")
+# Values that identify one person; a second employee carrying one is a duplicate (FRD §4).
+EMPLOYEE_DUPLICATE_FIELDS = (
+    ("pan", "PAN"), ("aadhaar", "Aadhaar"), ("uan", "UAN"), ("passport", "Passport"),
+    ("personal_email", "Personal email"), ("official_email", "Official email"),
+    ("personal_mobile", "Personal mobile"), ("bank_account", "Bank account"),
+)
+HISTORY_APPLIED, HISTORY_SCHEDULED, HISTORY_CANCELLED = "Applied", "Scheduled", "Cancelled"
+AUDIT_EMPLOYEE_CHANGE_SCHEDULED = "employee change scheduled"
+AUDIT_EMPLOYEE_CHANGE_CANCELLED = "employee change cancelled"
+AUDIT_MASTER_LISTS_SAVED = "employee master lists saved"
+
+
+class EmployeeMasterListsIn(BaseModel):
+    """The dropdown sources for the Employee Master (FRD §3 Organisation / Work setup)."""
+    lists: dict[str, list[str]]
+
+
+# ── FRD §21-22 -- configurable fields ──
+class FieldDataType(str, Enum):
+    TEXT = "text"
+    LONG_TEXT = "long_text"
+    NUMBER = "number"
+    DECIMAL = "decimal"
+    CURRENCY = "currency"
+    DATE = "date"
+    DATETIME = "datetime"
+    BOOLEAN = "boolean"
+    SINGLE_SELECT = "single_select"
+    MULTI_SELECT = "multi_select"
+    EMPLOYEE_LOOKUP = "employee_lookup"
+    MASTER_LOOKUP = "master_lookup"
+    DOCUMENT = "document"
+
+
+class FieldStatus(str, Enum):
+    DRAFT = "Draft"
+    ACTIVE = "Active"
+    RETIRED = "Retired"
+
+
+FIELD_MODULES = ("employee", "attendance")
+AUDIT_FIELD_DEFINITION_SAVED = "configurable field saved"
+AUDIT_FIELD_DEFINITION_STATUS = "configurable field status changed"
+ENTITY_FIELD_DEFINITION = "field_definition"
+
+
+class FieldOptionIn(BaseModel):
+    value: str
+    label: Optional[str] = None
+    active: bool = True
+
+
+class FieldDefinitionIn(BaseModel):
+    module: str = "employee"
+    code: str
+    label: str
+    section: Optional[str] = None
+    help_text: Optional[str] = None
+    data_type: FieldDataType = FieldDataType.TEXT
+    options: list[FieldOptionIn] = []
+    master_list: Optional[str] = None          # MASTER_LOOKUP source (a MASTER_LIST_KEYS key)
+    mandatory: bool = False
+    read_only: bool = False
+    default_value: Optional[str] = None
+    unique: bool = False
+    searchable: bool = False
+    filterable: bool = False
+    exportable: bool = True
+    show_in_list: bool = False
+    sensitive: bool = False
+    visible_to_self: bool = True
+    visible_to_manager: bool = True
+    visible_to_payroll: bool = False
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    pattern: Optional[str] = None
+    pattern_message: Optional[str] = None
+    min_date: Optional[str] = None
+    max_date: Optional[str] = None
+    display_order: int = 100
+    applicability: dict = {}                   # {departments, locations, grades, ...: [values]}
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class FieldStatusIn(BaseModel):
+    status: FieldStatus
+    reason: Optional[str] = None
+
+
+class PolicyVersionStatus(str, Enum):
+    """§26/§27: a version's life. Draft is editable and invisible to runtime; Active is what
+    resolution finds; Superseded is what a later version displaced; Retired was withdrawn.
+    Nothing is ever deleted -- §21: "a policy version that has already been used ... must
+    not be physically deleted because historical payroll, audit and reporting must remain
+    reproducible."
+    """
+    DRAFT      = "Draft"
+    PENDING    = "Pending Approval"
+    APPROVED   = "Approved"        # approved, effective date still in the future
+    ACTIVE     = "Active"
+    SUPERSEDED = "Superseded"
+    RETIRED    = "Retired"
+
+
+# Versions a runtime resolution will consider. APPROVED is included because a version
+# approved today and effective next month is legitimately found by a resolution asking
+# about next month -- the effective-date comparison is what gates it, not the status.
+POLICY_RESOLVABLE_STATUSES = (PolicyVersionStatus.ACTIVE.value,
+                              PolicyVersionStatus.APPROVED.value,
+                              PolicyVersionStatus.SUPERSEDED.value)
+
+# §26: "Policy scope can be defined by company, location, department, grade/level,
+# employment category, shift or payroll group." Each maps to the employee-profile key it
+# is tested against -- the same mapping hrms_shift_service._PROFILE_KEY already draws for
+# shifts, widened to the full §26 list and kept in ONE place so a new scope dimension is a
+# one-line change rather than an edit in every service that resolves a policy.
+POLICY_SCOPE_KEYS = {
+    "locations":            "work_location",
+    "departments":          "department_id",
+    "grades":               "grade",
+    "levels":               "level",
+    "employment_categories": "employee_category",
+    "payroll_groups":       "payroll_group",
+    "shift_codes":          "shift_code",
+    "attendance_policy_groups": "attendance_policy_group",
+}
+
+# Which module owns a policy. Mirrors FIELD_MODULES, and for the same reason: it is what an
+# administrative screen filters by.
+POLICY_MODULES = ("attendance", "payroll")
+
+# ── FRD §23's rule categories, as policy codes ────────────────────────────────────────
+#
+# §23 tables TEN rule categories (Shift/Timing, Late Coming, Early Going, Half Day, Absent,
+# Weekly Off/Holiday, OD/Regularisation, LOP, Monthly Closure, Applicability). Those are
+# categories of PARAMETER, not ten records: Applicability is the assignment that every
+# policy already carries, Shift/Timing and Weekly Off/Holiday are the shift master's (which
+# is already versioned, and moving it would be churn for no gain), and the rest divide by
+# WHEN they are read.
+#
+# So three policies, by read pattern rather than by table row:
+#
+#   ATT_DAY            every rule that judges ONE DAY -- late, early, half day, absent,
+#                      LOP fraction. Resolved per employee per date, which is the hot path
+#                      (payroll resolves it for every employee for every day of a month),
+#                      so splitting it into five policies would mean five lookups per day
+#                      to answer one question.
+#   ATT_REGULARISATION the correction and OD workflow -- window, evidence, approval levels.
+#                      Resolved once per REQUEST.
+#   ATT_CLOSURE        month-end -- cut-off, pending handling, unlock authority. Resolved
+#                      once per CLOSURE.
+#
+# Rule keys deliberately match the §23 vocabulary so the mapping back to the document is
+# readable without this comment.
+POLICY_ATT_DAY            = "ATT_DAY"
+POLICY_ATT_REGULARISATION = "ATT_REGULARISATION"
+POLICY_ATT_CLOSURE        = "ATT_CLOSURE"
+
+ATTENDANCE_POLICY_CODES = (POLICY_ATT_DAY, POLICY_ATT_REGULARISATION, POLICY_ATT_CLOSURE)
+
+# §21 Payroll Policy, "with versioning". One policy whose rules are the DEFAULT_PAYROLL_
+# POLICY keys -- cut-off, variance threshold, rounding, the approval matrix. Versioned for
+# the same reason the attendance rules are: a run for February must read February's policy
+# even after HR changes the cut-off in March.
+POLICY_PAY_POLICY = "PAY_POLICY"
+
+# What each policy may carry, and what the system does when it carries nothing. Every
+# default here is TODAY'S BEHAVIOUR, which is what makes an unconfigured company identical
+# after this phase as before it.
+ATTENDANCE_POLICY_RULES = {
+    POLICY_ATT_DAY: {
+        # §23 Late Coming
+        "daily_grace_minutes": None,            # None = inherit the shift / company policy
+        "monthly_buffer_minutes": None,
+        # §23 Early Going
+        "early_going_grace_minutes": None,
+        # §23 Half Day
+        "half_day_threshold_minutes": None,
+        "half_day_late_minutes": None,          # the §23 "late/early combination" rule
+        "half_day_early_minutes": None,
+        # §23 Absent
+        "absent_threshold_minutes": None,
+        "absent_on_no_out_punch": False,
+        # §23 LOP
+        "half_day_fraction": 0.5,               # "fraction/full-day rule"
+        "unpaid_leave_is_lop": True,            # "approved leave interaction"
+        "sandwich_weekly_off": None,            # inherit the payroll policy when unset
+    },
+    POLICY_ATT_REGULARISATION: {
+        "window_days": None,
+        "evidence_required": None,
+        "max_requests_per_month": None,
+        "approval_levels": None,                # 1 = manager only, 2 = manager then HR
+        "request_types": None,                  # e.g. ["Missing punch", "Late approval"]
+    },
+    POLICY_ATT_CLOSURE: {
+        "closing_day": None,                    # the day of the month attendance closes
+        "enforce_cutoff": False,                # §19 leaves this unconfirmed -> default off
+        "block_pending_requests": False,        # refuse to lock with requests outstanding
+    },
+}
+
+AUDIT_POLICY_VERSION_SAVED    = "policy version saved"
+AUDIT_POLICY_VERSION_STATUS   = "policy version status changed"
+AUDIT_POLICY_ASSIGNMENT_SAVED = "policy scope assigned"
+ENTITY_POLICY_VERSION = "policy_version"
+
+
+class PolicyDefinitionIn(BaseModel):
+    """§28 POLICY_DEFINITION — what the policy is. Created once; its versions carry the
+    rules."""
+    code: str
+    name: str
+    module: str = "attendance"
+    category: Optional[str] = None
+    description: Optional[str] = None
+
+
+class PolicyVersionIn(BaseModel):
+    """§28 POLICY_VERSION — what it says, and from when."""
+    policy_code: str
+    effective_from: str                          # YYYY-MM-DD
+    effective_to: Optional[str] = None
+    rules: dict = {}                             # the RuleJson of §28
+    change_reason: Optional[str] = None
+
+
+class PolicyVersionStatusIn(BaseModel):
+    status: PolicyVersionStatus
+    reason: Optional[str] = None
+
+
+class PolicyAssignmentIn(BaseModel):
+    """§28 POLICY_ASSIGNMENT — who a version applies to.
+
+    An assignment with NO scope keys is the company-wide default, which is how a company
+    states one rule for everybody without naming every location.
+    """
+    policy_code: str
+    version_no: int
+    scope: dict = {}                             # POLICY_SCOPE_KEYS -> [values]
+    priority: int = 0
+    active: bool = True
+
+
+class ConfigChangeStatus(str, Enum):
+    """§27's stages, as states a request moves through.
+
+    IMPACT_ANALYSED and SIMULATED are separate states rather than booleans because §27
+    lists them as distinct stages with distinct outputs, and because "has anyone actually
+    looked at what this breaks" is a question an approver needs answered before deciding,
+    not a flag somebody may or may not have set.
+    """
+    DRAFT           = "Draft"
+    IMPACT_ANALYSED = "Impact Analysed"
+    SIMULATED       = "Simulated"
+    PENDING         = "Pending Approval"
+    APPROVED        = "Approved"
+    REJECTED        = "Rejected"
+    RETURNED        = "Returned"       # sent back to the drafter with a comment
+    ACTIVE          = "Active"         # the change has been applied
+    WITHDRAWN       = "Withdrawn"
+
+
+# Which kinds of configuration this flow governs. A registry rather than a hard-coded list
+# so a later phase adds a kind by naming it here and giving it a handler in
+# hrms_config_change_service.ENTITY_HANDLERS -- the §27 machinery itself does not change.
+CONFIG_ENTITY_POLICY_VERSION = "policy_version"
+# §25 Formula Versioning asks a formula to have "version, effective dates, status and
+# approval". The first three come from the component it lives on (ComponentLifecycle plus
+# effective_from/to, Step 6). The APPROVAL is this: a component change can be routed
+# through the §27 flow, so a formula revision is simulated, reviewed and approved before it
+# is active -- which is also §30's "Payroll can revise a formula through a new version,
+# simulate the impact and obtain approval before activation".
+CONFIG_ENTITY_SALARY_COMPONENT = "salary_component"
+# §27/§30 — a custom field IS configuration: it decides what is mandatory on an employee
+# record, what is masked, what validates and what leaves the company in an export. Its
+# definitions saved straight to live, so "make blood group mandatory" or "unmask the PAN"
+# took effect the moment one person clicked Save.
+CONFIG_ENTITY_FIELD_DEFINITION = "field_definition"
+CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT,
+                       CONFIG_ENTITY_FIELD_DEFINITION)
+
+# Which of those types a company actually puts through the §27 flow.
+#
+# POLICY VERSIONS and SALARY COMPONENTS are governed by default because they decide pay:
+# the LOP rule, the rounding, the formula behind a component. A company cannot opt out of
+# that, which is the point of the flow existing. PAY_POLICY needs no separate entry -- it
+# IS a policy version, and the payroll policy screen drafts one.
+#
+# FIELD DEFINITIONS are NOT governed by default, deliberately. A field change cannot move
+# money, companies add fields constantly during onboarding, and making every label edit
+# wait for an approver would turn the setup phase into a queue. A company that wants the
+# control turns it on; `governed_config_types` on hrms_settings is that switch.
+DEFAULT_GOVERNED_CONFIG_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
+
+AUDIT_CONFIG_REQUESTED = "configuration change requested"
+AUDIT_CONFIG_DECIDED   = "configuration change decided"
+AUDIT_CONFIG_ACTIVATED = "configuration change activated"
+ENTITY_CONFIG_CHANGE = "config_change_request"
+
+
+class ConfigChangeRequestIn(BaseModel):
+    """§28 CONFIG_CHANGE_REQUEST. `reason` is mandatory in the service, not here: §27's
+    Request stage is "records requested change and BUSINESS REASON", and a blank reason
+    makes the audit trail §30 asks for worthless."""
+    entity_type: str = CONFIG_ENTITY_POLICY_VERSION
+    entity_code: str                              # e.g. the policy code
+    version_no: Optional[int] = None
+    title: Optional[str] = None
+    reason: Optional[str] = None
+    effective_from: Optional[str] = None
+
+
+class GovernedConfigTypesIn(BaseModel):
+    """Which configuration types this company sends through the §27 flow.
+
+    The pay-deciding ones are added back by the service whatever is posted, so this cannot
+    be used to switch governance off for salary components or policy versions.
+    """
+    entity_types: list[str] = []
+
+
+class ConfigDecisionIn(BaseModel):
+    action: str                                   # approve / reject / return
+    comments: Optional[str] = None
+
+
+class PhotographIn(BaseModel):
+    """FRD §3 Basic Identity -- the employee photograph, as base64.
+
+    Same ingest shape as UploadIn, declared separately because the two have different
+    rules: UploadIn carries an optional `doc_type` for the joining-document catalogue, a
+    photograph never belongs to one.
+    """
+    name: Optional[str] = None
+    mime_type: str
+    data: str                                  # base64, optionally a data: URL
 
 
 # =============================================================
@@ -5054,6 +5640,17 @@ class PublicOnboardIn(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    # Declared so they reach the validator: without these Pydantic dropped them at the
+    # public route, and the statutory / permanent-address details never arrived.
+    permanent_address: Optional[str] = None
+    personal_email: Optional[str] = None
+    personal_phone: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_name: Optional[str] = None
+    uan: Optional[str] = None
+    esic_number: Optional[str] = None
+    pf_number: Optional[str] = None
+    previous_employer: Optional[str] = None
     references: List[dict] = Field(default_factory=list)   # [{name, relation, phone}]
     asset_requirements: Optional[str] = None
     documents: List[UploadIn] = Field(default_factory=list)
@@ -6290,6 +6887,10 @@ class HolidayIn(BaseModel):
     """One non-working day on this company's HRMS calendar (Phase INT-6)."""
     holiday_date: str                              # YYYY-MM-DD
     holiday_name: str
+    # Phase 1 FRD §5: applicability. Both empty = a holiday for everyone. `calendar` names a
+    # holiday calendar from the Employee Master lists; `locations` limits it to those places.
+    calendar: Optional[str] = None
+    locations: list[str] = []
 
 
 class HolidayImportIn(BaseModel):
@@ -7414,6 +8015,9 @@ JOB_POLICY_ACK    = "policy_acknowledgement_reminders"
 # The Last Working Day sweep: revokes access and opens the F&F on the day somebody
 # actually leaves, rather than leaving both to whenever a human next opens the case.
 JOB_LWD           = "last_working_day"
+# FRD §4/§20 — apply the organisation / reporting / pay-linkage changes whose
+# effective date has arrived.
+JOB_EFFECTIVE_DATED = "effective_dated_changes"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -7428,6 +8032,17 @@ SCHEDULED_JOBS = [
     # Runs early: everything else on somebody's last day (final attendance, payroll cut-off)
     # reads better once the access revocation and the F&F have been opened.
     (JOB_LWD,           "last working day sweep",          JOB_CADENCE_DAILY,  6),
+    # Runs FIRST, before every other job and before the working day starts: a scheduled
+    # transfer, promotion or pay revision must be in force for the attendance and payroll
+    # that read the profile later the same day.
+    #
+    # The service applies these lazily on an employee READ as well, which is what made the
+    # change visible to whoever opened the directory. That is not enough on its own — a run
+    # on the 1st would otherwise calculate against yesterday's department, grade or salary
+    # simply because nobody had happened to open the employee list first. §4's "future
+    # changes must be effective-dated; historical values are preserved" is a promise about
+    # the DATE, not about who browsed what.
+    (JOB_EFFECTIVE_DATED, "apply effective-dated employee changes", JOB_CADENCE_DAILY, 1),
 ]
 
 
@@ -8318,9 +8933,13 @@ class CorrectionStatus(str, Enum):
 
 
 class OdStatus(str, Enum):
-    PENDING  = "Pending"
-    APPROVED = "Approved"
-    REJECTED = "Rejected"
+    PENDING          = "Pending"
+    # §23 `approval_levels` = 2. An OD has always been a single decision, so this rung is
+    # only ever reached by a company that asked for two; one level (and unset) never
+    # produces it, and no existing row can hold it.
+    MANAGER_APPROVED = "Manager Approved"
+    APPROVED         = "Approved"
+    REJECTED         = "Rejected"
 
 
 class LockStatus(str, Enum):
@@ -8390,36 +9009,108 @@ DEFAULT_LEAVE_TYPES = [
 
 def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                           actual_in: Optional[str], actual_out: Optional[str],
-                          daily_grace_minutes: int, half_day_threshold_minutes: int) -> dict:
+                          daily_grace_minutes: int, half_day_threshold_minutes: int,
+                          early_going_grace_minutes: int = 0, break_minutes: int = 0,
+                          min_hours: Optional[float] = None,
+                          absent_threshold_minutes: Optional[int] = None,
+                          half_day_fraction: float = 0.5,
+                          half_day_late_minutes: Optional[int] = None,
+                          half_day_early_minutes: Optional[int] = None,
+                          absent_on_no_out_punch: bool = False) -> dict:
     """The §7.8 daily engine's arithmetic, pure — no DB, no clock, testable standalone
     (matches notice_days_for's discipline in Phase EXIT-1). All timing PARAMETERS come from
     the caller's policy lookup; nothing here is a hardcoded company number.
 
     Times are "HH:MM" 24-hour strings. Returns worked_minutes/late_minutes/status; never
     raises on missing punches — that is a legitimate day-state (Absent), not an error.
+
+    FRD §23 adds four parameters the engine previously decided for itself:
+
+      half_day_fraction        — §23 LOP "fraction/full-day rule". A Half Day cost half a
+                                 day's pay because the engine said so; some companies
+                                 deduct a quarter, some a whole day. 0.5 keeps today's
+                                 behaviour for anyone who does not configure it.
+      half_day_late_minutes    — §23 Half Day "late/early COMBINATIONS". Arriving very late
+                                 or leaving very early can make a day a half day even when
+                                 the hours worked would otherwise pass, which no amount of
+                                 worked-minutes thresholding expresses.
+      half_day_early_minutes     (Both are None by default, i.e. the rule is off.)
+      absent_on_no_out_punch   — §23 Absent "no-punch/minimum-hours conditions". Whether a
+                                 missing out-punch is Present-pending-correction (today's
+                                 behaviour, and the default) or Absent until someone fixes
+                                 it.
     """
     def _mins(hhmm: str) -> int:
         h, m = hhmm.split(":")
         return int(h) * 60 + int(m)
 
-    if not actual_in:
-        return {"status": AttendanceStatus.ABSENT.value, "worked_minutes": 0, "late_minutes": 0}
+    sched_in_m, sched_out_m = _mins(scheduled_in), _mins(scheduled_out)
+    scheduled_minutes = max(0, sched_out_m - sched_in_m - (break_minutes or 0))
 
-    sched_in_m = _mins(scheduled_in)
+    half_pay = min(1.0, max(0.0, float(half_day_fraction if half_day_fraction is not None
+                                       else 0.5)))
+
+    def _result(status, worked, late, early, grace_applied, missing_out=False,
+                half_day_reason=None):
+        payable_day = {AttendanceStatus.PRESENT.value: 1.0,
+                       AttendanceStatus.HALF_DAY.value: half_pay}.get(status, 0.0)
+        payable_minutes = max(0, min(worked - (break_minutes or 0), scheduled_minutes)) \
+            if worked else 0
+        return {"status": status, "worked_minutes": worked, "late_minutes": late,
+                "early_minutes": early, "grace_applied_minutes": grace_applied,
+                "payable_minutes": payable_minutes,
+                "payable_hours": round(payable_minutes / 60.0, 2),
+                "scheduled_minutes": scheduled_minutes,
+                "payable_day": payable_day, "lop_fraction": round(1 - payable_day, 2),
+                "missing_out_punch": missing_out,
+                # WHY a day was cut to half, when a combination rule did it. Without this
+                # the employee sees a half day they cannot account for: the hours worked
+                # look fine, because they were.
+                "half_day_reason": half_day_reason}
+
+    if not actual_in:
+        return _result(AttendanceStatus.ABSENT.value, 0, 0, 0, 0)
+
     in_m = _mins(actual_in)
-    late_minutes = max(0, in_m - sched_in_m - daily_grace_minutes)
+    arrived_after = max(0, in_m - sched_in_m)
+    grace_applied = min(arrived_after, daily_grace_minutes or 0)
+    late_minutes = max(0, arrived_after - (daily_grace_minutes or 0))
 
     if not actual_out:
         # Present with an open/missing out-punch — the daily status still resolves; the
-        # missing out-punch itself becomes a regularisation candidate (§7.8 step 61).
-        return {"status": AttendanceStatus.PRESENT.value, "worked_minutes": 0,
-                "late_minutes": late_minutes}
+        # missing out-punch itself becomes a regularisation candidate (§7.8 step 61) and is
+        # counted as an exception at month-end closure. §23 lets a company treat it as
+        # Absent instead; Present stays the default because it is what this engine has
+        # always done and because somebody who punched in was, in fact, at work.
+        return _result(
+            AttendanceStatus.ABSENT.value if absent_on_no_out_punch
+            else AttendanceStatus.PRESENT.value,
+            0, late_minutes, 0, grace_applied, missing_out=True)
 
     out_m = _mins(actual_out)
     worked_minutes = max(0, out_m - in_m)
-    status = (AttendanceStatus.HALF_DAY.value if worked_minutes < half_day_threshold_minutes
-              else AttendanceStatus.PRESENT.value)
-    return {"status": status, "worked_minutes": worked_minutes, "late_minutes": late_minutes}
+    early_minutes = max(0, sched_out_m - out_m - (early_going_grace_minutes or 0))
+    reason = None
+    if absent_threshold_minutes and worked_minutes < absent_threshold_minutes:
+        status = AttendanceStatus.ABSENT.value
+    elif worked_minutes < half_day_threshold_minutes:
+        status = AttendanceStatus.HALF_DAY.value
+        reason = "worked less than the half-day threshold"
+    elif min_hours and worked_minutes < float(min_hours) * 60:
+        status = AttendanceStatus.HALF_DAY.value
+        reason = "worked less than the minimum hours"
+    # §23 Half Day, "late/early combinations": checked AFTER the hours tests, so a day that
+    # already failed on hours keeps that reason — the more specific explanation wins.
+    elif half_day_late_minutes and late_minutes >= int(half_day_late_minutes):
+        status = AttendanceStatus.HALF_DAY.value
+        reason = f"arrived {late_minutes} min late (half day at {half_day_late_minutes})"
+    elif half_day_early_minutes and early_minutes >= int(half_day_early_minutes):
+        status = AttendanceStatus.HALF_DAY.value
+        reason = f"left {early_minutes} min early (half day at {half_day_early_minutes})"
+    else:
+        status = AttendanceStatus.PRESENT.value
+    return _result(status, worked_minutes, late_minutes, early_minutes, grace_applied,
+                   half_day_reason=reason)
 
 
 ENTITY_ATTENDANCE   = "attendance"
@@ -8461,6 +9152,10 @@ class AttendanceMarkIn(BaseModel):
     actual_out: Optional[str] = None
     override_status: Optional[AttendanceStatus] = None   # explicit Weekly Off / Holiday / Leave
     notes: Optional[str] = None
+    # FRD §5 Attendance Source / §6 Identity: where the punch came from, and its reference.
+    source: Optional[str] = None                 # Manual / Google / API / Biometric / Import
+    source_reference: Optional[str] = None
+    custom_fields: Optional[dict] = None         # configurable attendance fields (FRD §21)
 
 
 class RegularizationIn(BaseModel):
@@ -8493,6 +9188,26 @@ class OdActionIn(BaseModel):
 
 class AttendanceLockIn(BaseModel):
     period: str                                   # YYYY-MM
+
+
+class AttendanceLockOverrideIn(BaseModel):
+    """Locking with exceptions still open is the lock authority's call (FRD §5 Monthly
+    Cut-off), and it is recorded with a reason -- never silent."""
+    override_reason: Optional[str] = None
+
+
+ATTENDANCE_SOURCES = ("Manual", "Google", "API", "Biometric", "Import", "Self")
+# Extra attendance rules stored with the company shift policy (FRD §5, §23).
+DEFAULT_ATTENDANCE_RULES = {
+    "regularisation_window_days": 7,          # how far back a correction may be requested
+    "regularisation_evidence_required": False,
+    "attendance_closing_day": 26,              # month-end cut-off (informational)
+    "weekly_off_pattern": ["Sunday"],
+    "early_going_grace_minutes": 0,
+    "break_minutes": 0,
+    "min_hours": None,
+    "absent_threshold_minutes": None,
+}
 
 
 class AttendanceUnlockIn(BaseModel):
@@ -8823,14 +9538,127 @@ class NomineeDetailsIn(BaseModel):
 class ComponentType(str, Enum):
     EARNING   = "Earning"
     DEDUCTION = "Deduction"
+    # Phase 1 FRD §24 -- the rest of the component types.
+    EMPLOYER_CONTRIBUTION = "Employer Contribution"   # cost to company, never in net pay
+    REIMBURSEMENT = "Reimbursement"                   # paid, not prorated by default
+    RECOVERY      = "Recovery"                        # deducted, like a deduction
+    INFORMATIONAL = "Informational"                   # shown, never summed
+
+
+# How each type moves money. Earnings and reimbursements add to gross; deductions and
+# recoveries reduce net; employer contributions are reported beside net, never in it.
+EARNING_TYPES   = {ComponentType.EARNING.value, ComponentType.REIMBURSEMENT.value}
+DEDUCTING_TYPES = {ComponentType.DEDUCTION.value, ComponentType.RECOVERY.value}
+
+
+class CalculationMethod(str, Enum):
+    FIXED      = "Fixed"
+    PERCENTAGE = "Percentage"      # of a base: another component, GROSS or CTC
+    MANUAL     = "Manual Input"    # entered per payroll run
+    FORMULA    = "Formula"         # a controlled expression (hrms_formula_engine)
+    SLAB       = "Slab"            # a slab / table on a base value, e.g. Professional Tax
+    # ── §24's remaining two ──
+    # IMPORTED differs from MANUAL in WHERE the number comes from, not in the arithmetic:
+    # manual is typed per employee on the run, imported arrives as a file (an incentive
+    # sheet, a canteen deduction). Both are zero until supplied, so neither can be
+    # calculated from the structure alone.
+    IMPORTED          = "Imported Input"
+    # ATTENDANCE_LINKED is a rate x attendance quantity -- an overtime rate, a per-day
+    # site allowance. The quantity comes from the attendance basis the run already froze.
+    ATTENDANCE_LINKED = "Attendance Linked"
+
+
+class ProrationRule(str, Enum):
+    """§24 Proration: "Full month, payable-days based, working-days based, no proration".
+
+    PAYABLE_DAYS and NONE are the original two. The other two differ in the DENOMINATOR:
+
+      PAYABLE_DAYS  paid x (payable days / calendar days)   -- a weekly off is paid, so a
+                    full month pays in full.
+      WORKING_DAYS  paid x (payable working days / working days) -- weekly offs and
+                    holidays are excluded from BOTH sides. For a component that only
+                    accrues on days actually worked (a shift allowance, a conveyance),
+                    dividing by calendar days quietly underpays a short month.
+      FULL_MONTH    paid in full for anyone in service at all during the period, however
+                    few days they worked.
+      NONE          paid in full, always.
+
+    FULL_MONTH and NONE differ only for a joiner or a leaver: NONE pays a person who
+    joined on the 28th the whole amount, FULL_MONTH is the explicit statement that this is
+    intended rather than an unconsidered default.
+    """
+    PAYABLE_DAYS = "Payable Days"
+    WORKING_DAYS = "Working Days"
+    FULL_MONTH   = "Full Month"
+    NONE         = "None"
+
+
+class RoundingRule(str, Enum):
+    NONE    = "None"
+    NEAREST = "Nearest"
+    FLOOR   = "Floor"
+    CEILING = "Ceiling"
+
+
+class PayslipSection(str, Enum):
+    REGULAR_EARNINGS = "Regular Earnings"
+    OTHER_EARNINGS   = "Other Earnings"
+    DEDUCTIONS       = "Deductions"
+    EMPLOYER         = "Employer Contribution"
+    HIDDEN           = "Hidden"
+
+
+class ComponentLifecycle(str, Enum):
+    """§24 Lifecycle: "Draft, Approved, Active, Superseded, Retired".
+
+    Distinct from the `active` boolean that preceded it, which conflated "not yet ready"
+    with "no longer used" -- two states that must behave differently: a Draft has never
+    been paid and can still be freely edited, while a Retired component has been paid and
+    its definition must survive for the payslips that used it (§21).
+    """
+    DRAFT      = "Draft"
+    APPROVED   = "Approved"
+    ACTIVE     = "Active"
+    SUPERSEDED = "Superseded"
+    RETIRED    = "Retired"
+
+
+# Which lifecycle states a payroll run will actually pay. A Draft or Approved-but-not-yet-
+# active component is configuration somebody is still working on, and paying it would make
+# the approval stage meaningless.
+COMPONENT_PAYABLE_LIFECYCLE = (ComponentLifecycle.ACTIVE.value,)
+
+# §24 Frequency. A component not due in a period contributes nothing to it -- enforced in
+# calculate_payroll, which previously paid everything every month regardless.
+COMPONENT_FREQUENCIES = ("Monthly", "One-time", "Quarterly", "Annual", "Ad hoc")
+
+
+class StructureStatus(str, Enum):
+    PENDING  = "Pending Approval"
+    ACTIVE   = "Active"
+    REJECTED = "Rejected"
 
 
 class PayrollRunStatus(str, Enum):
     DRAFT      = "Draft"
     CALCULATED = "Calculated"
-    APPROVED   = "Approved"
+    SUBMITTED  = "Submitted"    # maker -> checker (FRD §12 stage 7)
+    # FRD §12 stage 8: the Payroll/HR Checker has VERIFIED component values, attendance
+    # impact and exceptions, and passed it on. Deliberately its own state rather than a flag
+    # on Submitted: stage 9's approver must be able to see that the check actually happened,
+    # and a run that is Checked but not yet Approved is a real place a payroll sits.
+    CHECKED    = "Checked"
+    APPROVED   = "Approved"     # Finance approved (stage 9); Payroll still to lock
     LOCKED     = "Locked"
     REJECTED   = "Rejected"     # sent back to the maker with a comment
+    RETURNED   = "Returned"     # returned for correction (FRD §12 stages 8-9)
+    PAID       = "Paid"         # every payable employee's payment confirmed
+    CLOSED     = "Closed"       # period closed after payment (FRD §12 stage 13)
+
+
+# The maker may change inputs only while the run is in their hands.
+PAYROLL_EDITABLE_STATUSES = {"Draft", "Calculated", "Returned", "Rejected"}
+PAYROLL_FINAL_STATUSES = {"Locked", "Paid", "Closed"}
 
 
 class AdvanceStatus(str, Enum):
@@ -8923,11 +9751,37 @@ class SalaryComponentIn(BaseModel):
     component_type: ComponentType
     statutory: bool = False
     active: bool = True
+    # Phase 1 FRD §24 -- component behaviour, configured rather than coded.
+    calculation_method: Optional[CalculationMethod] = None
+    calculation_base: Optional[str] = None         # a component code, GROSS or CTC
+    percentage: Optional[float] = None
+    proration: Optional[ProrationRule] = None
+    rounding: Optional[RoundingRule] = None
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+    sequence: Optional[int] = None
+    payslip_section: Optional[PayslipSection] = None
+    frequency: Optional[str] = None                # Monthly / One-time / Quarterly / Annual / Ad hoc
+    accounting_code: Optional[str] = None
+    description: Optional[str] = None
+    formula: Optional[str] = None                  # method Formula
+    slabs: Optional[list[dict]] = None             # method Slab: [{upto, amount | percent}]
+    change_reason: Optional[str] = None
+    # ── §24 Lifecycle and Applicability ──
+    lifecycle: Optional[ComponentLifecycle] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    # POLICY_SCOPE_KEYS -> [values], resolved by the same specificity rule policies use.
+    applicability: Optional[dict] = None
+    # method Attendance Linked: what the rate is multiplied by.
+    attendance_basis: Optional[str] = None         # payable_days / present_days / lop_days
+    rate: Optional[float] = None
 
 
 class SalaryStructureComponentIn(BaseModel):
     code: str
-    amount: float
+    amount: float = 0
+    percentage: Optional[float] = None             # overrides the component's own percentage
 
 
 class SalaryStructureIn(BaseModel):
@@ -8938,14 +9792,32 @@ class SalaryStructureIn(BaseModel):
     employee_code: str
     effective_from: str                            # YYYY-MM-DD
     components: list[SalaryStructureComponentIn]
+    # Phase 1 FRD §9
+    structure_name: Optional[str] = None           # template / structure name
+    revision_reason: Optional[str] = None
+    annual_ctc: Optional[float] = None
+    payroll_group: Optional[str] = None
+    comments: Optional[str] = None
+
+
+class StructureDecisionIn(BaseModel):
+    approved: bool
+    comments: Optional[str] = None
 
 
 class PayslipTemplateIn(BaseModel):
-    """SM-HR-064 — deliberately thin; see hrms_payslip_service.py's module docstring for
-    why full statutory/component theming waits on the payroll workshop §7.13 itself names."""
+    """SM-HR-064, extended for FRD §14: the layout options a company signs off on. Every
+    save is a new VERSION, and a locked payroll keeps the version it was released with."""
     company_name: Optional[str] = None
     header_note: Optional[str] = None
     footer_note: Optional[str] = None
+    company_address: Optional[str] = None
+    show_lop_days: Optional[bool] = None
+    show_identifiers: Optional[bool] = None
+    show_bank: Optional[bool] = None
+    show_employer_contributions: Optional[bool] = None
+    hide_zero_lines: Optional[bool] = None
+    show_net_in_words: Optional[bool] = None
 
 
 class PayrollRunCreateIn(BaseModel):
@@ -8963,6 +9835,7 @@ class PayrollRecordAdjustIn(BaseModel):
     arrears: Optional[float] = None
     reimbursements: Optional[float] = None
     other_earnings: Optional[float] = None
+    bonus: Optional[float] = None                  # FRD §10 "Bonus where applicable"
     other_deductions: Optional[float] = None
     notice_recovery: Optional[float] = None
     remarks: Optional[str] = None
@@ -8974,6 +9847,9 @@ class PayrollAdjustmentItemIn(BaseModel):
     buckets PayrollRecordAdjustIn still covers alongside this."""
     code: str
     amount: float
+    # FRD §10 Manual Adjustment: type comes from the component; these say why and from where.
+    reason: Optional[str] = None
+    reference: Optional[str] = None
 
 
 class PayrollAdjustmentsIn(BaseModel):
@@ -8984,8 +9860,133 @@ class PayrollAdjustmentsIn(BaseModel):
 
 
 class PayrollApprovalIn(BaseModel):
-    approved: bool
+    # FRD §12 stage 8: approve, reject or RETURN. `approved` is kept for older clients.
+    approved: Optional[bool] = None
+    action: Optional[str] = None                   # approve / reject / return
     remarks: Optional[str] = None
+
+
+class PayrollRemarksIn(BaseModel):
+    remarks: Optional[str] = None
+
+
+class PayrollPolicyIn(BaseModel):
+    """Payroll controls (FRD §19, §24 Payroll Policy). Adjustable, not frozen."""
+    require_attendance_lock: Optional[bool] = None
+    variance_threshold_percent: Optional[float] = None
+    structure_approval_required: Optional[bool] = None
+    payslip_release: Optional[str] = None          # on_lock / after_payment
+    input_cutoff_day: Optional[int] = None
+    net_rounding: Optional[RoundingRule] = None
+    # LOP "sandwich" rule (FRD §23 LOP): a weekly off / holiday between LOP days is LOP.
+    sandwich_weekly_off: Optional[bool] = None
+    # §21 "with versioning" / §27 Effective Dating. A payroll policy change is a GOVERNED
+    # change, so the screen has to collect the two things a governed change cannot be
+    # raised without: when it starts and why it is wanted. Neither is a policy rule, so
+    # neither reaches the version's `rules`.
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class PostLockAdjustmentIn(BaseModel):
+    """FRD §18: locked payroll is never edited in place -- a correction is an arrear,
+    recovery or reversal carried into a later period."""
+    employee_code: str
+    adjustment_type: str                           # Arrear / Recovery / Reversal
+    amount: float
+    reason: str
+    target_period: Optional[str] = None            # defaults to the next period
+
+
+DEFAULT_PAYROLL_POLICY = {
+    "require_attendance_lock": True,
+    "variance_threshold_percent": 10.0,
+    "structure_approval_required": False,
+    "payslip_release": "on_lock",
+    "input_cutoff_day": 25,
+    "net_rounding": "None",
+    "sandwich_weekly_off": True,
+    # ── FRD §12 / §19 "Payroll Approval Matrix" ──
+    # Who performs stages 8, 9 and 10, and whether the checker stage runs at all. §19 marks
+    # the exact approvers as UNCONFIRMED, which is precisely why this is policy rather than
+    # code: the client's answer changes a setting, not a deployment.
+    #
+    # `checker_required=False` collapses the chain to the pre-FRD two-stage shape
+    # (Submitted -> Approved), so a company that has not set this up is unaffected.
+    "checker_required": True,
+    "checker_cap": Cap.PAYROLL_CHECK.value,
+    "approver_cap": Cap.PAYROLL_APPROVE.value,
+    "lock_cap": Cap.PAYROLL_APPROVE.value,
+    # Stage 9 may not be performed by the stage-8 checker. Separate from the maker/checker
+    # rule, which is never optional.
+    "approver_distinct_from_checker": True,
+}
+# ── Which payroll policy keys are resolved ONCE, and which PER EMPLOYEE ─────────────
+# A PAY_POLICY version can be scoped (grade, location, category, payroll group), and a
+# scoped version is meaningless unless something resolves it against an EMPLOYEE. The split
+# is not cosmetic: it is the difference between a rule that can legitimately differ between
+# two people in the same run and one that cannot.
+#
+# RUN-LEVEL keys describe the RUN. There is one answer for the whole period by
+# construction, and resolving them per employee would mean asking which of two conflicting
+# answers governs a single indivisible decision -- whether this run needed a checker, when
+# its inputs closed, whether the month had to be locked before it could be calculated. A
+# scoped version MUST NOT move any of them: a grade-scoped policy that quietly dropped the
+# checker stage for one grade would be a separation-of-duties hole wearing a scope.
+#
+# EMPLOYEE-LEVEL keys change what an individual is paid or what their own records require,
+# so two people in one run differing is exactly the point: rounding, the sandwich rule that
+# decides whether their Sundays are LOP, whether their salary structure needs a second
+# approval. These are resolved inside the per-employee loop with that employee's profile.
+#
+# Every key of DEFAULT_PAYROLL_POLICY appears in exactly one of the two sets, and the
+# suite pins that -- a key in neither would silently lose its scoping, which is the defect
+# this split exists to close.
+PAYROLL_POLICY_RUN_LEVEL_KEYS = frozenset({
+    "require_attendance_lock", "payslip_release", "variance_threshold_percent",
+    "input_cutoff_day", "checker_required", "checker_cap", "approver_cap", "lock_cap",
+    "approver_distinct_from_checker",
+})
+PAYROLL_POLICY_EMPLOYEE_LEVEL_KEYS = frozenset({
+    "net_rounding", "sandwich_weekly_off", "structure_approval_required",
+})
+
+# The capability keys above, for validation — a policy may only name a payroll capability.
+PAYROLL_MATRIX_CAP_KEYS = ("checker_cap", "approver_cap", "lock_cap")
+PAYROLL_MATRIX_ALLOWED_CAPS = {
+    Cap.PAYROLL_PROCESS.value, Cap.PAYROLL_CHECK.value, Cap.PAYROLL_APPROVE.value,
+}
+COLL_PAYROLL_CARRY_FORWARD = "hrms_payroll_carry_forwards"
+COLL_PAYSLIP_TEMPLATE_VERSIONS = "hrms_payslip_template_versions"
+COLL_PAYMENT_BATCHES = "hrms_payment_batches"
+COLL_PAYMENTS = "hrms_payments"
+AUDIT_PAYROLL_SUBMITTED = "payroll submitted for approval"
+AUDIT_PAYROLL_CHECKED = "payroll checked"
+AUDIT_PAYROLL_LOCKED = "payroll locked"
+AUDIT_PAYROLL_CLOSED = "payroll period closed"
+AUDIT_PAYROLL_POLICY_SAVED = "payroll policy saved"
+AUDIT_POST_LOCK_ADJUSTMENT = "post-lock payroll adjustment recorded"
+AUDIT_STRUCTURE_DECIDED = "salary structure decided"
+AUDIT_PAYMENT_BATCH = "salary payment batch generated"
+AUDIT_PAYMENT_FILE = "bank payment file downloaded"
+AUDIT_PAYMENT_STATUS = "salary payment status recorded"
+ENTITY_PAYMENT_BATCH = "payment_batch"
+
+
+class PaymentBatchIn(BaseModel):
+    payment_mode: Optional[str] = None             # NEFT / RTGS / IMPS / Cheque / Cash / Manual advice
+    retry_of: Optional[str] = None                 # a batch whose FAILED payments are reprocessed
+
+
+class PaymentStatusIn(BaseModel):
+    status: str                                    # Pending / Processed / Failed / Rejected
+    utr: Optional[str] = None
+    payment_date: Optional[str] = None
+    failure_reason: Optional[str] = None
+
+
+class PaymentStatusImportIn(BaseModel):
+    rows: list[dict]                               # [{employee_code, status, utr, payment_date, failure_reason}]
 
 
 class AdvancePolicyIn(BaseModel):
@@ -9415,3 +10416,52 @@ class PulseSubmitIn(BaseModel):
 _seed_client_track_caps()
 _seed_client_decision_caps()
 _seed_client_owned_caps()
+
+
+# =============================================================
+# Phase 1 FRD (Configurable Employee, Attendance & Payroll) -- indexes and numbering
+# =============================================================
+HRMS_INDEXES.extend([
+    (COLL_EMPLOYEE_HISTORY, [("company_id", 1), ("employee_code", 1), ("changed_at", -1)],
+     {"name": "by_employee_changed"}),
+    (COLL_EMPLOYEE_HISTORY, [("company_id", 1), ("status", 1), ("effective_from", 1)],
+     {"name": "by_status_effective"}),
+    (COLL_FIELD_DEFINITIONS, [("company_id", 1), ("module", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_field_code"}),
+    (COLL_SHIFTS, [("company_id", 1), ("code", 1)], {"unique": True, "name": "uniq_shift_code"}),
+    # ── §26/§28 policy spine ──
+    (COLL_POLICY_DEFINITIONS, [("company_id", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_policy_code"}),
+    (COLL_POLICY_VERSIONS, [("company_id", 1), ("policy_code", 1), ("version_no", 1)],
+     {"unique": True, "name": "uniq_policy_version"}),
+    # The resolution query: a policy's candidate versions for a date, newest effective first.
+    (COLL_POLICY_VERSIONS, [("company_id", 1), ("policy_code", 1), ("status", 1),
+                            ("effective_from", -1)],
+     {"name": "by_policy_status_effective"}),
+    (COLL_POLICY_ASSIGNMENTS, [("company_id", 1), ("policy_code", 1), ("version_no", 1)],
+     {"name": "by_policy_version"}),
+    # ── §27 change approval flow ──
+    (COLL_CONFIG_CHANGE_REQUESTS, [("company_id", 1), ("request_no", 1)],
+     {"unique": True, "name": "uniq_config_request_no"}),
+    (COLL_CONFIG_CHANGE_REQUESTS, [("company_id", 1), ("status", 1), ("created_at", -1)],
+     {"name": "by_status_created"}),
+    (COLL_CONFIG_APPROVALS, [("company_id", 1), ("request_no", 1), ("decided_at", -1)],
+     {"name": "by_request_decided"}),
+    (COLL_BANK_FILE_FORMATS, [("company_id", 1), ("name", 1)],
+     {"unique": True, "name": "uniq_bank_format_name"}),
+    (COLL_CALCULATION_VARIABLES, [("company_id", 1), ("name", 1)],
+     {"unique": True, "name": "uniq_calc_variable"}),
+    (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
+     {"name": "by_target_status"}),
+    (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],
+     {"unique": True, "name": "uniq_template_version"}),
+    (COLL_PAYMENT_BATCHES, [("company_id", 1), ("batch_no", 1)],
+     {"unique": True, "name": "uniq_batch_no"}),
+    (COLL_PAYMENT_BATCHES, [("company_id", 1), ("period", 1)], {"name": "by_period"}),
+    (COLL_PAYMENTS, [("company_id", 1), ("batch_no", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_batch_employee"}),
+    (COLL_PAYMENTS, [("company_id", 1), ("period", 1), ("employee_code", 1)],
+     {"name": "by_period_employee"}),
+])
+ID_FORMATS["payment_batch"] = ("PAYB", True, 3)   # PAYB-2026-001
+ID_FORMATS["config_change"] = ("CFG", True, 3)    # CFG-2026-001
