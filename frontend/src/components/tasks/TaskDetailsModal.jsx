@@ -18,7 +18,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, REASON_REQUIRED_STATUSES } from './statusConfig';
 import { getInitials, formatFrequencyLabel, formatDate, formatDateTime } from './taskDisplayUtils';
 import TaskFormModal from './TaskFormModal';
-import { describeReminder } from '../calendar/ReminderModal';
+import { describeReminder } from '../calendar/reminderFormat';
 import MiniDatePicker from './MiniDatePicker';
 import StatusReasonModal from './StatusReasonModal';
 import AttachmentItem from './AttachmentItem';

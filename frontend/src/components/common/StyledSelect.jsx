@@ -17,7 +17,9 @@ import { Check, ChevronDown, Search } from 'lucide-react';
  * Lives in components/common (not a feature folder) because both modules consume it.
  */
 
-export const normaliseOptions = (options = []) =>
+// Not exported: used only by StyledSelect below, and a non-component export here
+// costs the whole file Fast Refresh (react-refresh/only-export-components).
+const normaliseOptions = (options = []) =>
   options.map((o) => (typeof o === 'object' && o !== null
     ? { value: String(o.id ?? o.value ?? ''), label: String(o.name ?? o.label ?? o.id ?? '') }
     : { value: String(o), label: String(o) }));
