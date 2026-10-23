@@ -1215,10 +1215,19 @@ async def link_user(actor: dict, company_id: str, employee_code: str, user_id: s
         raise HTTPException(
             status_code=409, detail="This employee is already linked to a user account.")
 
-    user, coll = await _find_user(user_id)
+    user, _coll = await _find_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
-    if coll != "learners" or str(user.get("company_id") or "") != str(company_id):
+    # Membership through tenant_identity_source, exactly as `create_profile` resolves it.
+    # This used to demand `learners` with a matching company_id, which is the rule for a
+    # CLIENT company and wrong for Sparsh Magic's own tenant: its people are `staff` and
+    # carry no company_id at all. So at the internal company every link was refused --
+    # the same defect create_profile's comment describes having fixed, left standing here
+    # because the two checks were written separately. An onboarding-created profile there
+    # could never be attached to its account, which is the one step that turns a new hire
+    # into somebody the directory, payroll and self-service all recognise.
+    from app.utils.hrms_access import tenant_member
+    if not await tenant_member(company_id, user_id, {"_id": 1}):
         raise HTTPException(
             status_code=422, detail="The account must belong to a user of this company.")
     if await profiles.find_one({"user_id": str(user_id)}):
