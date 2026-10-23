@@ -85,13 +85,22 @@ export const delegationId = (id) => String(id || '').slice(-8).toUpperCase();
 export const exportTasksToCsv = (tasks, userMap, filename = 'tasks.csv') => {
   // Delegation ID first, exactly as the task's details screen shows it (the last 8 characters
   // of the task id, in capitals), so a row in the sheet can be matched to the task on screen.
-  const headers = ['Delegation ID', 'Title', 'Category', 'Assigned By', 'Assigned To', 'Status', 'Frequency', 'Priority', 'Due Date'];
+  const headers = ['Delegation ID', 'Company', 'Title', 'Category', 'Assigned By', 'Assigned By Emp ID',
+    'Assigned To', 'Assigned To Emp ID', 'Status', 'Frequency', 'Priority', 'Due Date'];
+  // Names come from the task's own `people` map first: the viewer's directory (userMap) holds
+  // only their own side, so a client task's employees would otherwise export as raw ids.
+  const nameOf = (t, id) => t.people?.[id] || userMap[id] || id;
+  // HRMS employee code where the person has one, else their short user id (see tasks.py).
+  const codeOf = (t, id) => t.peopleCodes?.[id] || String(id).slice(-8).toUpperCase();
   const rows = tasks.map(t => [
     delegationId(t.id),
+    t.companyName || '',
     t.title || '',
     t.category || '',
-    userMap[t.assignedBy] || t.assignedBy || '',
-    (t.assignedTo || []).map(id => userMap[id] || id).join('; ') || 'Myself',
+    t.assignedBy ? nameOf(t, t.assignedBy) : '',
+    t.assignedBy ? codeOf(t, t.assignedBy) : '',
+    (t.assignedTo || []).map(id => nameOf(t, id)).join('; ') || 'Myself',
+    (t.assignedTo || []).map(id => codeOf(t, id)).join('; '),
     t.status || '',
     formatFrequencyLabel(t.frequency),
     t.priority || 'Normal',

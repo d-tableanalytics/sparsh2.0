@@ -517,6 +517,30 @@ async def _attach_people(rows: list, docs: list) -> None:
         # Still nothing: say so, rather than letting the UI fall back to "Someone"/"Unknown".
         row["people"] = {i: names.get(i, "Deleted user") for i in ids
                          if i in names or ObjectId.is_valid(i)}
+    # Employee ID per participant, for the list export: the HRMS employee code where the
+    # person has an HR profile (EMP-2026-001), otherwise their short user id -- the same
+    # "last 8 characters" convention the Delegation ID uses. One lookup for the whole page.
+    codes = {}
+    if all_ids:
+        async for prof in get_collection("hrms_employee_profiles").find(
+                {"user_id": {"$in": list(all_ids)}, "employee_code": {"$nin": [None, ""]}},
+                {"user_id": 1, "employee_code": 1}):
+            codes[str(prof["user_id"])] = prof["employee_code"]
+    for row, ids in zip(rows, per_doc):
+        row["peopleCodes"] = {i: codes.get(i) or str(i)[-8:].upper() for i in ids}
+    # The company each task belongs to, for the list export. A task with no company_id is
+    # Sparsh Magic's own (internal) work. One lookup for the whole page.
+    company_ids = {str(d.get("company_id")) for d in docs if d.get("company_id")}
+    company_names = {}
+    oids = [ObjectId(c) for c in company_ids if ObjectId.is_valid(c)]
+    if oids:
+        async for c in get_collection("companies").find({"_id": {"$in": oids}}, {"name": 1}):
+            company_names[str(c["_id"])] = c.get("name")
+    internal = await get_collection("companies").find_one({"is_internal": True}, {"name": 1})
+    internal_name = (internal or {}).get("name") or "Sparsh Magic"
+    for row, doc in zip(rows, docs):
+        cid = str(doc.get("company_id") or "")
+        row["companyName"] = company_names.get(cid) or ("Unknown company" if cid else internal_name)
 
 
 async def _logged_names(user_ids: list) -> dict:
