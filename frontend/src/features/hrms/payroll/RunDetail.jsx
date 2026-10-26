@@ -11,7 +11,8 @@ import {
   getPayrollRun, calculatePayroll, listPayrollRecords, listPayslips,
   submitPayrollRun, checkPayrollRun, decidePayrollRun, lockPayrollRun, closePayrollRun,
   downloadPayrollRegister,
-  adjustPayrollRecord, setPayrollAdjustments, listSalaryComponents,
+  adjustPayrollRecord, setPayrollAdjustments, listSalaryComponents, approvePayrollAdjustment,
+  importPayrollInputs,
 } from '../../../services/hrmsApi';
 import Payslip, { PayslipDocument } from './Payslip';
 import PostLockAdjustments from './PostLockAdjustments';
@@ -230,6 +231,24 @@ export const RunDetailModal = ({ period, scope, can, onClose, onDone, showSucces
                 Recalculating re-reads salaries and attendance and keeps everything you typed in with Adjust.
               </p>
             )}
+            {/* FRD §24 Imported Input: an incentive sheet or deduction file for this run. */}
+            {canProcess && editable && (
+              <label className="inline-flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
+                Imported inputs (Employee Code, Component, Amount):
+                <input type="file" accept=".csv,.xlsx" aria-label="Imported inputs file"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    run(async () => {
+                      const { data } = await importPayrollInputs(period, file, scope);
+                      if (data.errors?.length) {
+                        showError(`${data.errors.length} row(s) refused — first: row ${data.errors[0].row}, ${data.errors[0].reason}.`);
+                      }
+                    }, 'Inputs imported — recalculate to apply them.');
+                  }} />
+              </label>
+            )}
 
             <RunTotals totals={runInfo.totals} />
 
@@ -241,7 +260,11 @@ export const RunDetailModal = ({ period, scope, can, onClose, onDone, showSucces
             {shown === 'Employees' && (
               <RecordsSection records={records} runInfo={runInfo} flagged={flagged}
                 canAdjust={canProcess && editable}
-                onAdjust={setAdjusting} onPayslip={setViewingPayslip} />
+                onAdjust={setAdjusting} onPayslip={setViewingPayslip}
+                onApproveLine={editable && (can(CAP.PAYROLL_CHECK) || can(CAP.PAYROLL_APPROVE))
+                  ? (r, i) => run(() => approvePayrollAdjustment(period, r.employee_code, i, scope),
+                    'Line approved.')
+                  : null} />
             )}
             {shown === 'Approval trail' && <ApprovalTrail trail={runInfo.approval_trail} />}
             {shown === 'Corrections' && (
@@ -567,7 +590,7 @@ const RowLink = ({ children, ...rest }) => (
   </button>
 );
 
-const RecordsSection = ({ records, runInfo, flagged, canAdjust, onAdjust, onPayslip }) => {
+const RecordsSection = ({ records, runInfo, flagged, canAdjust, onAdjust, onPayslip, onApproveLine }) => {
   const [onlyExceptions, setOnlyExceptions] = useState(false);
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(null);
@@ -632,7 +655,7 @@ const RecordsSection = ({ records, runInfo, flagged, canAdjust, onAdjust, onPays
               <RowLink onClick={() => onPayslip(r)}>Payslip</RowLink>
               {canAdjust && <RowLink onClick={() => onAdjust(r)}>Adjust</RowLink>}
             </div>
-            {open === r.employee_code && <RecordDetail r={r} />}
+            {open === r.employee_code && <RecordDetail r={r} onApproveLine={onApproveLine} />}
           </div>
         ))}
       </div>
@@ -684,7 +707,7 @@ const RecordsSection = ({ records, runInfo, flagged, canAdjust, onAdjust, onPays
                 </tr>
                 {open === r.employee_code && (
                   <tr className="border-b border-[var(--border)]">
-                    <td colSpan={8} className="py-2"><RecordDetail r={r} /></td>
+                    <td colSpan={8} className="py-2"><RecordDetail r={r} onApproveLine={onApproveLine} /></td>
                   </tr>
                 )}
               </React.Fragment>
@@ -707,7 +730,7 @@ const AUTO_INPUTS = [
   ['advance_recovery', 'Salary advance recovery'], ['variable_pay_payout', 'Variable pay'],
 ];
 
-const RecordDetail = ({ r }) => {
+const RecordDetail = ({ r, onApproveLine }) => {
   const lines = r.lines || [];
   const inputs = [...FIXED_INPUTS, ...AUTO_INPUTS].filter(([k]) => Number(r[k]) > 0);
   const issues = exceptionsOf(r);
@@ -775,6 +798,20 @@ const RecordDetail = ({ r }) => {
                 {a.reason && <span className="text-[var(--text-muted)]"> — {a.reason}</span>}
                 {a.reference && <span className="text-[var(--text-muted)]"> · ref {a.reference}</span>}
                 {a.carry_forward_id && <span className="ml-1"><Chip tone="accent">Carried in</Chip></span>}
+                {a.approval_status === 'Approved' && (
+                  <span className="ml-1"><Chip tone="good">Approved{a.approved_by_name ? ` by ${a.approved_by_name}` : ''}</Chip></span>
+                )}
+                {a.approval_status === 'Pending' && (
+                  <span className="ml-1 inline-flex items-center gap-1.5">
+                    <Chip tone="warn">Needs approval</Chip>
+                    {onApproveLine && (
+                      <button type="button" onClick={() => onApproveLine(r, i)}
+                        className="text-[11.5px] font-bold text-[var(--accent-indigo)] hover:underline">
+                        Approve
+                      </button>
+                    )}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

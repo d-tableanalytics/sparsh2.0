@@ -48,7 +48,16 @@ ATTENDANCE_VARS = {"PAYABLE_DAYS", "LOP_DAYS", "PRESENT_DAYS", "WORKING_DAYS",
                    "CALENDAR_DAYS", "LOP_RATIO", "PAYABLE_RATIO"}
 EMPLOYEE_VARS   = {"EMP_GRADE", "EMP_LEVEL", "EMP_LOCATION", "EMP_CATEGORY",
                    "EMP_DEPARTMENT", "EMP_PAYROLL_GROUP", "EMP_SERVICE_MONTHS"}
-BUILT_INS = STRUCTURE_VARS | ATTENDANCE_VARS | EMPLOYEE_VARS
+# §25 "payroll inputs": the maker's monthly figures for THIS period (FRD §10) and the two
+# roll-ups the run adds itself, by the record field each one reads.
+INPUT_FIELDS = {"INPUT_ARREARS": "arrears", "INPUT_REIMBURSEMENTS": "reimbursements",
+                "INPUT_OTHER_EARNINGS": "other_earnings", "INPUT_BONUS": "bonus",
+                "INPUT_OTHER_DEDUCTIONS": "other_deductions",
+                "INPUT_NOTICE_RECOVERY": "notice_recovery",
+                "INPUT_ADVANCE_RECOVERY": "advance_recovery",
+                "INPUT_VARIABLE_PAY": "variable_pay_payout"}
+INPUT_VARS = set(INPUT_FIELDS)
+BUILT_INS = STRUCTURE_VARS | ATTENDANCE_VARS | EMPLOYEE_VARS | INPUT_VARS
 FUNCTIONS = {
     "IF": None,                                   # evaluated lazily, see _eval
     "MIN": lambda *a: min(a),
@@ -182,6 +191,13 @@ def attendance_variables(days: dict) -> dict:
         "LOP_RATIO": (float(days.get("lop_days") or 0) / calendar) if calendar else 0.0,
         "PAYABLE_RATIO": (payable / calendar) if calendar else 0.0,
     }
+
+
+def input_variables(inputs: dict) -> dict:
+    """The INPUT_* part (§25 "payroll inputs"): what this period's record carries, 0 where
+    nothing was entered."""
+    inputs = inputs or {}
+    return {var: float(inputs.get(field) or 0) for var, field in INPUT_FIELDS.items()}
 
 
 def evaluate(expr: str, variables: dict) -> float:

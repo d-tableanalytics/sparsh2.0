@@ -18,7 +18,7 @@ Unlike Phase EXIT-1's employee self-service caps (documented there as not yet sc
 EMPLOYEE-role caller's list/get/request calls in this module ARE filtered to their own
 employee_code — see `_scope_query` and `_assert_self_or_privileged`.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -215,15 +215,33 @@ def _validate_policy(payload: dict) -> dict:
 
 
 async def save_shift_policy(actor: dict, company_id: str, payload: dict) -> dict:
-    merged = {**await get_shift_policy(company_id), **_validate_policy(payload)}
+    payload = dict(payload or {})
+    reason = str(payload.pop("change_reason", "") or "").strip() or None
+    current = await get_shift_policy(company_id)
+    merged = {**current, **_validate_policy(payload)}
     if merged["shift_end"] <= merged["shift_start"]:
         raise HTTPException(status_code=422, detail="The end time must be after the start time.")
+    # §26 "Every material policy change creates a new version": each save that moves a
+    # value is numbered and kept with its old/new values, author, reason and the date it
+    # took effect. Days already judged keep the status they were given.
+    changed = {k: v for k, v in merged.items() if current.get(k) != v}
+    now = datetime.now(timezone.utc)
+    update = {"$set": {"shift_policy": merged, "updated_at": now},
+              "$setOnInsert": {"company_id": str(company_id)}}
+    if changed:
+        settings = await get_collection(COLL_SETTINGS).find_one(
+            {"company_id": str(company_id)}, {"shift_policy_version": 1}) or {}
+        version = int(settings.get("shift_policy_version") or 0) + 1
+        update["$set"]["shift_policy_version"] = version
+        update["$push"] = {"shift_policy_versions": {
+            "version": version,
+            "effective_from": (now + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d"),
+            "by": str(actor.get("_id") or ""),
+            "by_name": actor.get("full_name") or actor.get("email"),
+            "reason": reason, "at": now,
+            "old": {k: current.get(k) for k in changed}, "new": changed}}
     await get_collection(COLL_SETTINGS).update_one(
-        {"company_id": str(company_id)},
-        {"$set": {"shift_policy": merged, "updated_at": datetime.now(timezone.utc)},
-         "$setOnInsert": {"company_id": str(company_id)}},
-        upsert=True,
-    )
+        {"company_id": str(company_id)}, update, upsert=True)
     await audit(actor, "shift policy updated", ENTITY_ATTENDANCE, "policy",
                ", ".join(sorted(payload.keys())), company_id)
     return merged
@@ -359,12 +377,23 @@ def _status_only(status: str, half_day_fraction: Optional[float] = None) -> dict
 # ─────────────────────────────────────────────────────────────
 # §7.8 — daily capture
 # ─────────────────────────────────────────────────────────────
+def assert_attendance_active(profile: Optional[dict]) -> None:
+    """FRD §4 "activated for Attendance": HR can switch a person off (a consultant paid
+    elsewhere, say). Unset means active -- the behaviour before the switch existed."""
+    if (profile or {}).get("attendance_active") is False:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{(profile or {}).get('employee_code') or 'This employee'} is not activated "
+                   f"for attendance. HR switches it on in the employee's Work setup.")
+
+
 async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
     employee_code = str(payload.get("employee_code") or "").strip()
     work_date = str(payload.get("work_date") or "").strip()
     if not employee_code or not work_date:
         raise HTTPException(status_code=422, detail="employee_code and work_date are required.")
-    await _get_profile(company_id, employee_code)
+    profile = await _get_profile(company_id, employee_code)
+    assert_attendance_active(profile)
     await _assert_self_or_privileged(actor, company_id, employee_code)
 
     existing = await get_collection(COLL_ATTENDANCE).find_one(
@@ -547,7 +576,8 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
                 status_code=422,
                 detail=f"Regularisation can be requested up to {window} day(s) back "
                        f"(from {earliest}).")
-    if rules.get("evidence_required") and not (payload.get("evidence") or "").strip():
+    if rules.get("evidence_required") and not (payload.get("evidence") or "").strip() \
+            and not payload.get("evidence_file"):
         raise HTTPException(status_code=422,
                             detail="Attach supporting evidence (a link or reference) — company "
                                    "policy requires it for regularisation.")
@@ -577,6 +607,13 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
                 detail=f"{employee_code} has already used {used} of {cap} regularisation(s) "
                        f"allowed for {period}.")
 
+    # Stored only once every rule has passed, so a refused request leaves no orphan file.
+    evidence_file = None
+    if payload.get("evidence_file"):
+        from app.services.hrms_document_service import _store
+        evidence_file = await _store(payload["evidence_file"],
+                                     f"att_evidence_{company_id}_{employee_code}")
+
     year = datetime.now(timezone.utc).year
     req_no = await next_business_id("regularization", str(company_id), year)
     now = datetime.now(timezone.utc)
@@ -593,6 +630,7 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
         "proposed_out": payload.get("proposed_out"),
         "reason": payload.get("reason"),
         "evidence": payload.get("evidence"),
+        "evidence_file": evidence_file,
         "status": CorrectionStatus.PENDING.value,
         # §23 "Approval levels", frozen at REQUEST time. Resolving it again at decision
         # time would let a policy change move the goalposts under a request already sitting
@@ -648,6 +686,24 @@ async def list_regularizations(actor: dict, company_id: str, *, status: Optional
         {CorrectionStatus.PENDING.value, CorrectionStatus.MANAGER_APPROVED.value})
 
 
+async def regularisation_evidence_url(actor: dict, company_id: str, req_no: str) -> dict:
+    """A five-minute download link for a request's evidence file, for whoever may see the
+    request (its employee, their manager, HR) -- the same scoping the request list uses."""
+    query = await _scope_query(actor, company_id, {"company_id": str(company_id),
+                                                   "req_no": req_no})
+    doc = await get_collection(COLL_ATTENDANCE_CORRECTIONS).find_one(query)
+    key = ((doc or {}).get("evidence_file") or {}).get("s3_key")
+    if not key:
+        raise HTTPException(status_code=404, detail="No evidence file on that request.")
+    from app.services.s3_service import get_signed_url
+    try:
+        url = get_signed_url(key, expires_in=300)
+    except Exception as e:
+        print(f"[WARN] regularisation evidence URL failed ({req_no}): {e}")
+        raise HTTPException(status_code=503, detail="The file could not be retrieved right now.")
+    return {"url": url, "file_name": doc["evidence_file"].get("file_name"), "expires_in": 300}
+
+
 async def _assert_regularisation_unlocked(company_id: str, work_date: str) -> None:
     """A regularisation rewrites an attendance day, so a locked month refuses it -- on
     EVERY path that writes, not only the HR-final one (FRD §18)."""
@@ -671,7 +727,8 @@ async def _apply_regularization(company_id: str, doc: dict, req_no: str, actor: 
     """
     from app.services.hrms_attendance_rules_service import compute_day, derived_fields
     computed = await compute_day(company_id, doc["employee_code"], doc["work_date"],
-                                 doc.get("proposed_in"), doc.get("proposed_out"))
+                                 doc.get("proposed_in"), doc.get("proposed_out"),
+                                 approved_exception=doc.get("request_type") or "Regularisation")
     key = {"company_id": str(company_id), "employee_code": doc["employee_code"],
            "work_date": doc["work_date"]}
     before = await get_collection(COLL_ATTENDANCE).find_one(key) or {}
@@ -1073,6 +1130,18 @@ async def lock_period(actor: dict, company_id: str, period: str,
         raise HTTPException(status_code=409, detail=f"{period} is already locked.")
 
     snapshot = await closure_dashboard(actor, company_id, period)
+    # §23 Monthly Closure "pending-request handling": with block_pending_requests on, an
+    # undecided regularisation, OD or leave stops the lock outright -- a reason does not
+    # override it, because the requester is still waiting for an answer. Off (the default),
+    # the lock authority may lock with a reason, as before.
+    rules = await closure_rules(company_id, on_date=f"{period}-28")
+    waiting = sum(int(snapshot.get(k) or 0) for k in
+                  ("pending_regularizations", "pending_od", "pending_leaves"))
+    if rules.get("block_pending_requests") and waiting:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{period} has {waiting} request(s) still waiting for a decision. The "
+                   f"closure policy blocks locking until they are decided.")
     # FRD §8: HR resolves pending exceptions BEFORE locking. Locking with some still open is
     # the lock authority's explicit, reasoned decision -- enforced here, not just shown.
     reason = (override_reason or "").strip()
@@ -1176,12 +1245,16 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
     codes = {r["employee_code"] for r in rows}
     departments = {}
     names = {}
+    profiles = []
     if codes:
-        from app.models.hrms import COLL_DEPARTMENTS
+        from app.models.hrms import COLL_DEPARTMENTS, POLICY_SCOPE_KEYS
+        # The scope keys ride along so the escalation threshold below can be resolved per
+        # person without a second read of the same profiles.
         profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
             {"company_id": str(company_id), "employee_code": {"$in": list(codes)}},
             {"employee_code": 1, "department_id": 1, "user_id": 1, "display_name": 1,
-             "full_name": 1, "identity_snapshot": 1}).to_list(len(codes))
+             "full_name": 1, "identity_snapshot": 1,
+             **{k: 1 for k in POLICY_SCOPE_KEYS.values()}}).to_list(len(codes))
         dept_names = {
             str(d["_id"]): d.get("name")
             for d in await get_collection(COLL_DEPARTMENTS).find(
@@ -1200,12 +1273,15 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
               "late_minutes": r["late_minutes"],
               "department": departments.get(r["employee_code"])} for r in rows]
     # The monthly buffer: late minutes tolerated per person per month (shift policy).
-    from app.services.hrms_attendance_rules_service import monthly_buffer
+    from app.services.hrms_attendance_rules_service import (
+        late_escalation_thresholds, monthly_buffer)
     policy = await get_shift_policy(company_id)
+    escalation = await late_escalation_thresholds(
+        company_id, {p["employee_code"]: p for p in profiles}, dates)
     return {
         "total_late_days": len(rows),
         "dates": dates,
         "buffer_minutes": policy.get("monthly_buffer_minutes") or 0,
         "grace_minutes": policy.get("daily_grace_minutes") or 0,
-        "monthly": monthly_buffer(dates, policy.get("monthly_buffer_minutes") or 0),
+        "monthly": monthly_buffer(dates, policy.get("monthly_buffer_minutes") or 0, escalation),
     }

@@ -23,12 +23,14 @@ const TOGGLES = [
   ['show_employer_contributions', 'Show employer contributions (PF / ESI paid by the company)'],
   ['hide_zero_lines', 'Hide lines that are zero'],
   ['show_net_in_words', 'Show net pay in words'],
+  ['lop_as_deduction', 'Show LOP as a deduction line (earnings at full amount)'],
 ];
 
 const EMPTY = {
   company_name: '', company_address: '', header_note: '', footer_note: '',
   show_identifiers: true, show_bank: true, show_lop_days: true,
   show_employer_contributions: false, hide_zero_lines: true, show_net_in_words: true,
+  lop_as_deduction: false,
 };
 
 const PayslipTemplateTab = ({ scope, companyId, can, showSuccess, showError }) => {

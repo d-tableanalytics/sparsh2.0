@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Users2, Search, Plus, ChevronLeft, ChevronRight, ShieldAlert, Download,
+  Users2, Search, Plus, ChevronLeft, ChevronRight, ShieldAlert, Download, FileUp,
 } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
@@ -13,6 +13,7 @@ import {
   exportEmployeeMaster,
 } from '../../../services/hrmsApi';
 import AddEmployeeModal from './AddEmployeeModal';
+import ImportEmployeesModal from './ImportEmployeesModal';
 
 const STATUSES = ['Active', 'On Notice', 'Resigned', 'Terminated', 'On Long Leave'];
 const PAGE_SIZE = 50;
@@ -137,10 +138,13 @@ const EmployeeDirectory = () => {
   const [debounced, setDebounced] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [status, setStatus] = useState('');
+  // FRD §22 Filterable configurable fields: { code: value }, sent as cf_<code>.
+  const [customFilters, setCustomFilters] = useState({});
   const [page, setPage] = useState(0);
   const [departments, setDepartments] = useState([]);
   const [designations, setDesignations] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   // The employee whose login account is being attached (onboarding-created, no user yet).
   const [linking, setLinking] = useState(null);
 
@@ -188,6 +192,8 @@ const EmployeeDirectory = () => {
         status: status || undefined,
         limit: PAGE_SIZE,
         skip: page * PAGE_SIZE,
+        ...Object.fromEntries(Object.entries(customFilters)
+          .filter(([, v]) => v).map(([k, v]) => [`cf_${k}`, v])),
       });
       setData(res);
     } catch (err) {
@@ -196,7 +202,7 @@ const EmployeeDirectory = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, debounced, departmentId, status, page]);
+  }, [companyId, debounced, departmentId, status, page, customFilters]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -242,6 +248,14 @@ const EmployeeDirectory = () => {
             )}
             {canWrite && (
               <button
+                type="button" onClick={() => setShowImport(true)}
+                className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)] flex items-center gap-1.5"
+              >
+                <FileUp size={14} /> Import
+              </button>
+            )}
+            {canWrite && (
+              <button
                 type="button" onClick={() => setShowAdd(true)}
                 className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold flex items-center gap-1.5"
               >
@@ -275,6 +289,20 @@ const EmployeeDirectory = () => {
           <option value="">All statuses</option>
           {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
+        {(data.filterable_fields || []).map((f) => (
+          f.options?.length ? (
+            <select key={f.code} aria-label={f.label} value={customFilters[f.code] || ''}
+              onChange={(e) => { setCustomFilters((c) => ({ ...c, [f.code]: e.target.value })); setPage(0); }}
+              className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] font-semibold text-[var(--text-main)]">
+              <option value="">{`All · ${f.label}`}</option>
+              {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ) : (
+            <input key={f.code} aria-label={f.label} placeholder={f.label} value={customFilters[f.code] || ''}
+              onChange={(e) => { setCustomFilters((c) => ({ ...c, [f.code]: e.target.value })); setPage(0); }}
+              className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] text-[var(--text-main)]" />
+          )
+        ))}
       </div>
 
       {loading ? (
@@ -297,6 +325,9 @@ const EmployeeDirectory = () => {
                 <tr>
                   {['Employee', 'Code', 'Department', 'Designation', 'Location', 'Grade', 'Status'].map((h) => (
                     <th key={h} className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{h}</th>
+                  ))}
+                  {(data.list_columns || []).map((c) => (
+                    <th key={c.code} className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{c.label}</th>
                   ))}
                   {data.salary_visible && (
                     <th className="text-right px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">Base salary</th>
@@ -358,6 +389,15 @@ const EmployeeDirectory = () => {
                       {e.grade || <span className="text-[var(--text-muted)]">—</span>}
                     </td>
                     <td className="px-4 py-2.5"><StatusPill value={e.employment_status} /></td>
+                    {(data.list_columns || []).map((c) => {
+                      const v = e.list_fields?.[c.code];
+                      return (
+                        <td key={c.code} className="px-4 py-2.5 text-[var(--text-main)]">
+                          {v == null || v === '' ? <span className="text-[var(--text-muted)]">—</span>
+                            : Array.isArray(v) ? v.join(', ') : String(v)}
+                        </td>
+                      );
+                    })}
                     {data.salary_visible && (
                       <td className="px-4 py-2.5 text-right font-semibold text-[var(--text-main)]">
                         {inr(e.base_salary)}
@@ -411,6 +451,10 @@ const EmployeeDirectory = () => {
           onClose={() => setShowAdd(false)}
           onCreated={() => { setShowAdd(false); load(); }}
         />
+      )}
+
+      {showImport && (
+        <ImportEmployeesModal onClose={() => setShowImport(false)} onImported={load} />
       )}
 
       {linking && (

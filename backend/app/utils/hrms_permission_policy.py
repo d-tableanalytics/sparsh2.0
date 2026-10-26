@@ -107,6 +107,29 @@ def apply(user: dict, role, caps: Set[Cap]) -> Set[Cap]:
     return out
 
 
+# FRD §17 System Admin: "no automatic entitlement to payroll-sensitive values unless
+# explicitly granted". Stored with the company's permission rules under a key that is not
+# a capability (apply() skips it), so the synchronous access check can read it from cache.
+ADMIN_PAYROLL_RULE = "__admin_payroll__"
+PAYROLL_SENSITIVE_CAPS = frozenset({
+    Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE, Cap.SALARY_BAND_READ,
+    Cap.SALARY_BAND_WRITE, Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK,
+    Cap.PAYROLL_APPROVE, Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+    Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
+    Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
+    Cap.VARIABLE_PAY_HOLD_MANAGE,
+})
+
+
+def admin_payroll_withheld(user: dict) -> bool:
+    """Is this superadmin kept out of payroll values by the company's setting? Off unless
+    the company turned it on; a superadmin it names in `allow_users` is explicitly granted."""
+    rule = policies_for(policy_company(user)).get(ADMIN_PAYROLL_RULE) or {}
+    if not rule.get("restricted"):
+        return False
+    return str((user or {}).get("_id") or "") not in (rule.get("allow_users") or [])
+
+
 def _set_cache_for_tests(company_id: str, rules: Dict[str, dict]) -> None:
     """Test hook: install a company's rules without a database."""
     _policies[str(company_id)] = dict(rules)

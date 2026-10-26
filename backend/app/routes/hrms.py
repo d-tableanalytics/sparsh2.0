@@ -15,7 +15,7 @@ Phase 1 ships the foundation only. Later phases add their routers/endpoints here
 """
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.controllers.auth_controller import get_current_user
@@ -503,15 +503,21 @@ async def list_employees(
     include_inactive: bool = Query(False),
     limit: int = Query(200, ge=1, le=500),
     skip: int = Query(0, ge=0),
+    request: Request = None,
     current_user: dict = Depends(get_current_user),
 ):
     """The employee directory. Row-scoped: a MANAGER sees only their department and their
-    direct reports; salary is omitted entirely without `employee.salary.read`."""
+    direct reports; salary is omitted entirely without `employee.salary.read`.
+
+    `cf_<code>=<value>` filters on a configurable field flagged Filterable (FRD §22)."""
     _require(current_user, Cap.EMPLOYEE_READ)
+    custom_filters = {k[3:]: v for k, v in (request.query_params.items() if request else [])
+                      if k.startswith("cf_")}
     return await employees.list_employees(
         current_user, _company(current_user, company_id),
         search=search, department_id=department_id, designation_id=designation_id,
-        status=status, include_inactive=include_inactive, limit=limit, skip=skip)
+        status=status, include_inactive=include_inactive, limit=limit, skip=skip,
+        custom_filters=custom_filters)
 
 
 @router.get("/employees/linkable")
@@ -547,6 +553,34 @@ async def create_employee(
     _require(current_user, Cap.EMPLOYEE_WRITE)
     return await employees.create_profile(
         current_user, _company(current_user, company_id), body.model_dump(exclude_unset=True))
+
+
+@router.post("/employees/import")
+async def import_employees(
+    file: UploadFile = File(...),
+    commit: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §4 "HR creates or imports the employee record". commit=false previews the file
+    row by row and writes nothing; commit=true creates every row that passes."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The file is larger than 5 MB.")
+    return await employees.import_profiles(
+        current_user, _company(current_user, company_id), file.filename or "", raw,
+        commit=commit)
+
+
+@router.get("/employees/import/template")
+async def employee_import_template(current_user: dict = Depends(get_current_user)):
+    """The import file's header row, as a CSV to fill in."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    from fastapi.responses import Response
+    return Response(",".join(employees.IMPORT_TEMPLATE_COLUMNS) + "\n", media_type="text/csv",
+                    headers={"Content-Disposition":
+                             'attachment; filename="employee_import_template.csv"'})
 
 
 # Post-review Gap 6 (P1-124). Declared HERE, above `/employees/{user_id}`, rather than
@@ -4138,6 +4172,22 @@ async def save_shift_policy(
         current_user, _company(current_user, company_id), body)
 
 
+@router.get("/attendance/shift-policy/versions")
+async def list_shift_policy_versions(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §26 — every saved change to the company attendance rules, newest first."""
+    _require(current_user, Cap.ATTENDANCE_READ)
+    from app.db.mongodb import get_collection
+    from app.models.hrms import COLL_SETTINGS
+    doc = await get_collection(COLL_SETTINGS).find_one(
+        {"company_id": _company(current_user, company_id)},
+        {"shift_policy_versions": 1, "shift_policy_version": 1}) or {}
+    return {"version": doc.get("shift_policy_version") or 0,
+            "versions": list(reversed(doc.get("shift_policy_versions") or []))}
+
+
 @router.post("/attendance/mark", status_code=201)
 async def mark_attendance(
     body: AttendanceMarkIn,
@@ -4282,6 +4332,18 @@ async def late_coming_summary(
     return await attendance_mgmt.late_coming_summary(
         current_user, _company(current_user, company_id), employee_code=employee_code,
         start_date=start_date, end_date=end_date)
+
+
+@router.get("/attendance/regularizations/{req_no}/evidence")
+async def regularisation_evidence(
+    req_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived link to a regularisation's evidence file (FRD §5, §6)."""
+    _require(current_user, Cap.ATTENDANCE_READ)
+    return await attendance_mgmt.regularisation_evidence_url(
+        current_user, _company(current_user, company_id), req_no)
 
 
 @router.post("/attendance/regularizations", status_code=201)
@@ -4975,6 +5037,37 @@ async def set_payroll_adjustments(
         body.model_dump())
 
 
+@router.post("/payroll/runs/{period}/imported-inputs")
+async def import_payroll_component_inputs(
+    period: str,
+    file: UploadFile = File(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §24 Imported Input: employee code, component, amount for this run."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    raw = await file.read()
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The file is larger than 5 MB.")
+    return await payroll_mgmt.import_component_inputs(
+        current_user, _company(current_user, company_id), period, file.filename or "", raw)
+
+
+@router.post("/payroll/runs/{period}/records/{employee_code}/adjustments/{index}/approve")
+async def approve_payroll_adjustment(
+    period: str,
+    employee_code: str,
+    index: int,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §10 "approval where needed": a checker or approver signs off a one-off line above
+    the payroll policy's amount. Never the person who entered it."""
+    _require_any(current_user, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.approve_adjustment(
+        current_user, _company(current_user, company_id), period, employee_code, index)
+
+
 @router.post("/payroll/runs/{period}/check")
 async def check_payroll_run(
     period: str,
@@ -5452,6 +5545,30 @@ async def hrms_reset_permission(
     _require(current_user, Cap.PERMISSIONS_MANAGE)
     from app.services import hrms_permission_service as perms
     return await perms.reset_permission(current_user, _company(current_user, company_id), cap)
+
+
+@router.get("/access/admin-payroll")
+async def hrms_get_admin_payroll(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §17 System Admin: is the superadmin kept out of payroll values unless granted?"""
+    _require(current_user, Cap.PERMISSIONS_MANAGE)
+    from app.services import hrms_permission_service as perms
+    return await perms.get_admin_payroll_setting(_company(current_user, company_id))
+
+
+@router.put("/access/admin-payroll")
+async def hrms_save_admin_payroll(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """{"restricted": bool, "allow_users": [user ids explicitly granted]}."""
+    _require(current_user, Cap.PERMISSIONS_MANAGE)
+    from app.services import hrms_permission_service as perms
+    return await perms.save_admin_payroll_setting(
+        current_user, _company(current_user, company_id), body or {})
 
 
 @router.get("/access/role-matrix")
@@ -6579,6 +6696,29 @@ async def save_employee_master_lists(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
+@router.get("/employee-master/id-format")
+async def get_employee_id_format(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §4 "configured numbering" -- the company's employee ID format."""
+    _require(current_user, Cap.EMPLOYEE_READ)
+    fmt = await master_mgmt.get_employee_id_format(_company(current_user, company_id))
+    from datetime import datetime as _dt
+    return {**fmt, "example": master_mgmt.render_employee_code(fmt, 1, _dt.now().year)}
+
+
+@router.put("/employee-master/id-format")
+async def save_employee_id_format(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.save_employee_id_format(
+        current_user, _company(current_user, company_id), body)
+
+
 @router.post("/employee-master/duplicate-check")
 async def employee_duplicate_check(
     body: dict = Body(...),
@@ -7189,6 +7329,19 @@ async def record_config_change_simulation(
         current_user, _company(current_user, company_id), request_no, body or {})
 
 
+@router.post("/config/change-requests/{request_no}/run-simulation")
+async def run_config_change_simulation(
+    request_no: str,
+    period: Optional[str] = Query(None, description="YYYY-MM; this month if absent"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Test/Simulation, run from the request itself and recorded on it."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.run_simulation(
+        current_user, _company(current_user, company_id), request_no, period)
+
+
 @router.post("/config/change-requests/{request_no}/submit")
 async def submit_config_change_request(
     request_no: str,
@@ -7255,10 +7408,20 @@ async def simulate_attendance_policy(
     """
     _require(current_user, Cap.CONFIG_READ)
     codes = [c.strip() for c in (employee_codes or "").split(",") if c.strip()] or None
+    company = _company(current_user, company_id)
+    code = policy_code.upper()
+    # §26 "Draft changes should support preview" -- the policies not judged per day get a
+    # preview of what the draft would have decided about the period's real data.
+    if code == "ATT_REGULARISATION":
+        return await att_sim.preview_regularisation_policy(
+            company, period, version_no=version_no, employee_codes=codes)
+    if code == "ATT_CLOSURE":
+        return await att_sim.preview_closure_policy(current_user, company, period,
+                                                    version_no=version_no)
+    if code == "PAY_POLICY":
+        return await payroll_mgmt.preview_payroll_policy(company, period, version_no=version_no)
     return await att_sim.simulate_day_policy(
-        _company(current_user, company_id), period,
-        version_no=version_no, employee_codes=codes,
-        policy_code=policy_code.upper())
+        company, period, version_no=version_no, employee_codes=codes, policy_code=code)
 
 
 # ── Bank file formats (FRD §13, §19) ──
@@ -7524,6 +7687,7 @@ async def list_calculation_variables(
             "structure": sorted(FE.STRUCTURE_VARS),
             "attendance": sorted(FE.ATTENDANCE_VARS),
             "employee": sorted(FE.EMPLOYEE_VARS),
+            "inputs": sorted(FE.INPUT_VARS),
         },
         "functions": sorted(FE.FUNCTIONS),
     }

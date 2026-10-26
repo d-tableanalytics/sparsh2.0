@@ -75,6 +75,9 @@ export const getSelfPunchToday = (params) => api.get('/hrms/attendance/self-punc
 export const getFlexiRequests = (params) => api.get('/hrms/attendance/flexi', { params });
 export const requestFlexi = (body, params) => api.post('/hrms/attendance/flexi', body, { params });
 export const actOnFlexi = (no, body, params) => api.post(`/hrms/attendance/flexi/${no}/action`, body, { params });
+/** FRD §5/§6: a short-lived link to a regularisation's evidence file. */
+export const getRegularisationEvidence = (reqNo, params) =>
+  api.get(`/hrms/attendance/regularizations/${reqNo}/evidence`, { params });
 export const importBiometric = (file, params) => {
   const form = new FormData();
   form.append('file', file);
@@ -85,6 +88,10 @@ export const getOfficeLocations = (params) => api.get('/hrms/attendance/offices'
 export const saveOfficeLocations = (body, params) => api.put('/hrms/attendance/offices', body, { params });
 // ── Dynamic Roles & Permissions ──
 export const getHrmsPermissions = (params) => api.get('/hrms/access/permissions', { params });
+/** FRD §17 System Admin: keep the superadmin out of payroll values unless granted. */
+export const getAdminPayrollSetting = (params) => api.get('/hrms/access/admin-payroll', { params });
+export const saveAdminPayrollSetting = (body, params) =>
+  api.put('/hrms/access/admin-payroll', body, { params });
 export const saveHrmsPermission = (cap, body, params) =>
   api.put(`/hrms/access/permissions/${encodeURIComponent(cap)}`, body, { params });
 export const resetHrmsPermission = (cap, params) =>
@@ -93,6 +100,12 @@ export const getEmployee = (userId, params) =>
   api.get(`/hrms/employees/${userId}`, { params });
 export const createEmployee = (payload, params) =>
   api.post('/hrms/employees', payload, { params });
+/** FRD §4 import: commit=false previews the file and writes nothing. */
+export const importEmployees = (file, commit, params) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post('/hrms/employees/import', form, { params: { ...params, commit } });
+};
 export const updateEmployee = (userId, payload, params) =>
   api.patch(`/hrms/employees/${userId}`, payload, { params });
 export const getEmployeeHierarchy = (userId, params) =>
@@ -134,6 +147,9 @@ export const analyseConfigChangeImpact = (requestNo, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/impact`, null, { params });
 export const submitConfigChangeRequest = (requestNo, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/submit`, null, { params });
+/** FRD §27 Test/Simulation, run from the request and recorded on it. */
+export const runConfigChangeSimulation = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/run-simulation`, null, { params });
 export const decideConfigChangeRequest = (requestNo, payload, params) =>
   api.post(`/hrms/config/change-requests/${requestNo}/decision`, payload, { params });
 export const activateConfigChangeRequest = (requestNo, params) =>
@@ -475,6 +491,8 @@ const downloadExport = async (path, params, fallbackName) => {
 /** FRD §3 employee master (P1-124). Masked fields stay masked; needs employee.export. */
 export const exportEmployeeMaster = (params) =>
   downloadExport('/hrms/employees/export', params, 'hrms_employees.csv');
+export const downloadEmployeeImportTemplate = (params) =>
+  downloadExport('/hrms/employees/import/template', params, 'employee_import_template.csv');
 /** Attendance for a month, per day or per employee (P1-125). */
 export const exportAttendance = (params) =>
   downloadExport('/hrms/attendance/export', params, 'hrms_attendance.csv');
@@ -1030,6 +1048,16 @@ export const adjustPayrollRecord = (period, employeeCode, payload, params) =>
 export const setPayrollAdjustments = (period, employeeCode, adjustments, params) =>
   api.put(`/hrms/payroll/runs/${period}/records/${employeeCode}/adjustments`,
     { adjustments }, { params });
+/** FRD §24 Imported Input: a file of employee code, component and amount for a run. */
+export const importPayrollInputs = (period, file, params) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post(`/hrms/payroll/runs/${period}/imported-inputs`, form, { params });
+};
+/** FRD §10: a second person approves a one-off line above the policy's amount. */
+export const approvePayrollAdjustment = (period, employeeCode, index, params) =>
+  api.post(`/hrms/payroll/runs/${period}/records/${employeeCode}/adjustments/${index}/approve`,
+    {}, { params });
 export const decidePayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/decision`, payload, { params });
 
@@ -1269,6 +1297,10 @@ export const getClientHistory = (entity, recordNo, params) =>
 // Employee Master (FRD §3-4): company dropdown lists, duplicate check, effective-dated
 // change history (a future effective date SCHEDULES the change).
 export const getEmployeeMasterLists = (params) => api.get('/hrms/employee-master/lists', { params });
+/** FRD §4 "configured numbering". */
+export const getEmployeeIdFormat = (params) => api.get('/hrms/employee-master/id-format', { params });
+export const saveEmployeeIdFormat = (body, params) =>
+  api.put('/hrms/employee-master/id-format', body, { params });
 export const saveEmployeeMasterLists = (lists, params) =>
   api.put('/hrms/employee-master/lists', { lists }, { params });
 export const checkEmployeeDuplicates = (payload, params) =>

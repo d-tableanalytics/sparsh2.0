@@ -179,9 +179,16 @@ async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> di
     longer what this screen writes.
     """
     clean = {k: _plain(v) for k, v in payload.items() if v is not None}
-    # Neither of these is a policy rule: they describe the CHANGE, not the payroll.
+    # None of these is a policy rule: they describe the CHANGE / VERSION, not the payroll.
     effective_from = str(clean.pop("effective_from", "") or "").strip() or None
+    effective_to = str(clean.pop("effective_to", "") or "").strip() or None
+    scope = clean.pop("scope", None) or {}
     reason = str(clean.pop("change_reason", "") or "").strip()
+    if "adjustment_approval_above" in clean and float(clean["adjustment_approval_above"]) < 0:
+        raise HTTPException(status_code=422, detail="The approval amount cannot be negative.")
+    if "excluded_employee_categories" in clean:
+        clean["excluded_employee_categories"] = [
+            str(c).strip() for c in clean["excluded_employee_categories"] if str(c).strip()]
 
     if "payslip_release" in clean and clean["payslip_release"] not in ("on_lock", "after_payment"):
         raise HTTPException(status_code=422,
@@ -223,7 +230,13 @@ async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> di
     draft = await PV.save_draft(actor, company_id, {
         "policy_code": POLICY_PAY_POLICY,
         "effective_from": effective_from or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "rules": clean, "change_reason": reason})
+        "effective_to": effective_to, "rules": clean, "change_reason": reason})
+    if any(v for v in scope.values()):
+        # §26 scope: who this version applies to. Run-level keys stay company-wide however
+        # it is scoped (see PAYROLL_POLICY_RUN_LEVEL_KEYS).
+        await PV.assign_scope(actor, company_id, {
+            "policy_code": POLICY_PAY_POLICY, "version_no": draft["version_no"],
+            "scope": scope})
     request = await CC.create_request(actor, company_id, {
         "entity_type": CONFIG_ENTITY_POLICY_VERSION, "entity_code": POLICY_PAY_POLICY,
         "version_no": draft["version_no"], "reason": reason,
@@ -276,6 +289,57 @@ def component_defaults(component: dict) -> dict:
     c["sequence"] = c.get("sequence") if c.get("sequence") is not None else 100
     c.setdefault("active", True)
     return c
+
+
+# A component reaches these only through the §27 flow when components are governed.
+GOVERNED_COMPONENT_STATES = ("Approved", "Active", "Superseded")
+OPEN_REQUEST_STATUSES = ("Draft", "Impact Analysed", "Simulated", "Pending Approval",
+                         "Approved", "Returned")
+
+
+async def _stage_component_change(actor: dict, company_id: str, current: dict, changed: dict,
+                                  payload: dict, now) -> dict:
+    """Hold a governed revision of a live component and raise a §27 request for it.
+
+    The revision sits under `pending_definition`, which nothing that prices pay reads, so
+    payroll goes on using the live definition until the request is approved and activated
+    -- at which point the old definition is kept as a Superseded version (see
+    hrms_config_change_service._component_activate).
+    """
+    from app.models.hrms import CONFIG_ENTITY_SALARY_COMPONENT, COLL_CONFIG_CHANGE_REQUESTS
+    from app.services import hrms_config_change_service as CC
+    code = current["code"]
+    reason = str(payload.get("change_reason") or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{code} is live, so a change to it goes for approval — say why it is "
+                   f"changing; the approver needs the business reason (FRD §27).")
+    if current.get("pending_request_no"):
+        open_request = await get_collection(COLL_CONFIG_CHANGE_REQUESTS).find_one(
+            {"company_id": str(company_id), "request_no": current["pending_request_no"],
+             "status": {"$in": list(OPEN_REQUEST_STATUSES)}})
+        if open_request:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{code} already has a change waiting ({current['pending_request_no']}, "
+                       f"{open_request['status']}). Finish or withdraw it first.")
+    coll = get_collection(COLL_SALARY_COMPONENTS)
+    key = {"company_id": str(company_id), "code": code}
+    await coll.update_one(key, {"$set": {"pending_definition": changed, "pending_reason": reason,
+                                         "pending_by": _actor_id(actor), "pending_at": now}})
+    request = await CC.create_request(actor, company_id, {
+        "entity_type": CONFIG_ENTITY_SALARY_COMPONENT, "entity_code": code, "reason": reason,
+        "effective_from": payload.get("effective_from"),
+        "title": f"{code} — {', '.join(sorted(changed))}"[:160]})
+    await coll.update_one(key, {"$set": {"pending_request_no": request["request_no"]}})
+    await audit(actor, AUDIT_SALARY_COMPONENT_SAVED, ENTITY_SALARY_COMPONENT, code,
+                f"staged as {request['request_no']}", company_id,
+                changes=[{"field": k, "old": current.get(k), "new": v}
+                         for k, v in sorted(changed.items())])
+    out = _out(await coll.find_one(key))
+    out["pending_request"] = request
+    return out
 
 
 async def save_salary_component(actor: dict, company_id: str, payload: dict) -> dict:
@@ -406,6 +470,40 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
             ENTITY_COMPONENT, assert_retirable)
         await assert_retirable(company_id, ENTITY_COMPONENT, code)
 
+    # §27 / §30 "revise a formula as a new version, simulate it, and obtain approval before
+    # activation". Salary components are governed by default, and a governed revision of a
+    # LIVE component (Active, or a pre-§24 one with no lifecycle) is HELD rather than written
+    # over the definition payroll is using. Retiring is not the governed move, and a Draft
+    # is edited freely: it has never paid anyone.
+    if current:
+        from app.models.hrms import CONFIG_ENTITY_SALARY_COMPONENT
+        from app.services import hrms_config_change_service as CC
+        if await CC.is_governed(company_id, CONFIG_ENTITY_SALARY_COMPONENT):
+            target = clean.get("lifecycle")
+            if target in GOVERNED_COMPONENT_STATES and target != current.get("lifecycle"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{code} cannot be made {target} directly. Raise a configuration "
+                           f"change request for it and have somebody else approve it, then "
+                           f"activate it from Configuration Approvals (FRD §27).")
+            live = current.get("lifecycle") in (None, "Active") and \
+                current.get("active") is not False
+            if live and not retiring:
+                # Compared against the RESOLVED definition, and with "nothing" spelt any way
+                # counting as nothing: the editor posts every key, and a pre-§24 component
+                # stores few of them, so a raw comparison would send an untouched save for
+                # approval.
+                resolved = {**component_defaults(current),
+                            "frequency": current.get("frequency") or "Monthly"}
+                empty = (None, "", [], {})
+                changed = {k: v for k, v in clean.items()
+                           if resolved.get(k) != v
+                           and not (resolved.get(k) in empty and v in empty)}
+                if not changed:
+                    return _out(current)
+                return await _stage_component_change(actor, company_id, current, changed,
+                                                      payload, now)
+
     clean["updated_at"] = now
     change = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
               "reason": (payload.get("change_reason") or "").strip() or None,
@@ -435,7 +533,8 @@ async def list_salary_components(actor: dict, company_id: str) -> list:
 # ─────────────────────────────────────────────────────────────
 def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None,
                   days: Optional[dict] = None, profile: Optional[dict] = None,
-                  period_end: Optional[str] = None, constants: Optional[dict] = None) -> list:
+                  period_end: Optional[str] = None, constants: Optional[dict] = None,
+                  inputs: Optional[dict] = None) -> list:
     """Turn the entered lines into monthly amounts, in sequence order.
 
     A Percentage line is computed from its base: another component already resolved, GROSS
@@ -456,7 +555,7 @@ def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None
         if method in (CalculationMethod.FORMULA.value, CalculationMethod.SLAB.value):
             amount = _formula_or_slab(m, code, resolved, meta, lines, annual_ctc,
                                   days=days, profile=profile, period_end=period_end,
-                                  constants=constants)
+                                  constants=constants, inputs=inputs)
         elif method == CalculationMethod.PERCENTAGE.value and pct is not None:
             if base_code == "GROSS":
                 base_amount = sum(v for c, v in resolved.items()
@@ -506,7 +605,7 @@ def resolve_lines(lines: list, meta: dict, *, annual_ctc: Optional[float] = None
 
 def _formula_or_slab(m: dict, code: str, resolved: dict, meta: dict, lines: list,
                      annual_ctc, *, days=None, profile=None, period_end=None,
-                     constants=None) -> float:
+                     constants=None, inputs=None) -> float:
     """A Formula or Slab line, from what is already resolved. A variable that IS in this
     structure but comes later in the sequence is refused (that is how loops stay out);
     one that is not in the structure at all counts as 0."""
@@ -520,6 +619,7 @@ def _formula_or_slab(m: dict, code: str, resolved: dict, meta: dict, lines: list
            "MONTHLY_CTC": float(annual_ctc or 0) / 12.0,
            **FE.attendance_variables(days or {}),
            **FE.employee_variables(profile or {}, period_end),
+           **FE.input_variables(inputs or {}),
            **{str(k).upper(): float(v or 0) for k, v in (constants or {}).items()}}
     name = m.get("name") or code
     needed = FE.dependencies(m)
@@ -1056,16 +1156,82 @@ def _assert_editable(run: dict) -> None:
                     f"adjustment, never in place (FRD §18)."))
 
 
-async def _eligible_profiles(company_id: str, start: str, end: str) -> list:
+async def _assert_inputs_open(actor: dict, company_id: str, period: str) -> None:
+    """§19 Monthly Cut-off, where the payroll policy enforces it: a period's monthly inputs
+    close on `input_cutoff_day` of that month (clamped to its length). After that only
+    someone who can APPROVE payroll changes them -- a late input is a decision, not data
+    entry. Not enforced (the default), the day stays advisory, as before."""
+    year, month, days, _start, end = _period_bounds(period)
+    policy = await get_payroll_policy(company_id, on_date=end)
+    if not policy.get("enforce_input_cutoff"):
+        return
+    cutoff = f"{period}-{min(int(policy.get('input_cutoff_day') or days), days):02d}"
+    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    from app.models.hrms import Cap
+    from app.utils.hrms_access import can
+    if today > cutoff and not can(actor, Cap.PAYROLL_APPROVE):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Inputs for {period} closed on {cutoff} (the payroll policy cut-off). "
+                   f"Someone who approves payroll can still change them.")
+
+
+ADJ_PENDING, ADJ_APPROVED = "Pending", "Approved"
+
+
+def _adjustment_key(a: dict) -> tuple:
+    return (a.get("code"), round(float(a.get("amount") or 0), 2), a.get("reason"),
+            a.get("reference"))
+
+
+async def approve_adjustment(actor: dict, company_id: str, period: str, employee_code: str,
+                             index: int) -> dict:
+    """§10 Manual Adjustment "approval where needed": a second person approves a one-off
+    line above the policy's amount. Never the person who entered it."""
+    run = await _get_run(company_id, period)
+    _assert_editable(run)
+    coll = get_collection(COLL_PAYROLL_RECORDS)
+    record = await coll.find_one(
+        {"company_id": str(company_id), "period": period, "employee_code": employee_code})
+    if not record:
+        raise HTTPException(status_code=404, detail="No payroll record for that employee in this run.")
+    lines = list(record.get("adjustments") or [])
+    if not 0 <= index < len(lines) or lines[index].get("approval_status") != ADJ_PENDING:
+        raise HTTPException(status_code=409, detail="That line is not waiting for approval.")
+    if lines[index].get("entered_by") and lines[index]["entered_by"] == _actor_id(actor):
+        raise HTTPException(status_code=403,
+                            detail="You entered this line, so the approval is someone else's.")
+    lines[index] = {**lines[index], "approval_status": ADJ_APPROVED,
+                    "approved_by": _actor_id(actor), "approved_by_name": _actor_name(actor),
+                    "approved_at": datetime.now(timezone.utc)}
+    await coll.update_one({"_id": record["_id"]},
+                          {"$set": {"adjustments": lines,
+                                    "updated_at": datetime.now(timezone.utc)}})
+    await audit(actor, AUDIT_PAYROLL_ADJUSTMENTS_SET, ENTITY_PAYROLL_RUN,
+                f"{period}:{employee_code}", f"approved {lines[index].get('code')} "
+                f"{lines[index].get('amount')}", company_id)
+    return _out(await coll.find_one({"_id": record["_id"]}))
+
+
+async def _eligible_profiles(company_id: str, start: str, end: str,
+                             excluded_categories=None) -> list:
     """Payable employees, plus anyone who left during the period (their last month is still
-    paid up to the last working day), minus anyone joining after it ends."""
+    paid up to the last working day), minus anyone joining after it ends.
+
+    FRD §4 / §21: minus anyone HR has switched off for payroll (`payroll_active` False) and
+    any category the payroll policy leaves out. Both are unset by default."""
     from app.models.hrms import PAYABLE_STATUSES
     payable = [s.value for s in PAYABLE_STATUSES]
+    excluded = {str(c).strip().lower() for c in (excluded_categories or [])}
     rows = await get_collection(COLL_EMPLOYEE_PROFILES).find(
         {"company_id": str(company_id)}).to_list(5000)
     out = []
     for p in rows:
         if not p.get("employee_code"):
+            continue
+        if p.get("payroll_active") is False:
+            continue
+        if excluded and str(p.get("employee_category") or "").strip().lower() in excluded:
             continue
         if p.get("joined_on") and p["joined_on"] > end:
             continue
@@ -1177,12 +1343,24 @@ def _period_dependent(component: dict) -> bool:
         refs = FE.references(component.get("formula") or "0")
     except HTTPException:
         return False
-    return bool(refs & (FE.ATTENDANCE_VARS | FE.EMPLOYEE_VARS))
+    return bool(refs & (FE.ATTENDANCE_VARS | FE.EMPLOYEE_VARS | FE.INPUT_VARS))
+
+
+def _input_dependent(component: dict) -> bool:
+    """Does this component's formula read a payroll input (INPUT_*)?"""
+    from app.services import hrms_formula_engine as FE
+    if component.get("calculation_method") != CalculationMethod.FORMULA.value:
+        return False
+    try:
+        return bool(FE.references(component.get("formula") or "0") & FE.INPUT_VARS)
+    except HTTPException:
+        return False
 
 
 def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
                         profile: dict, period_end: str,
-                        constants: Optional[dict] = None) -> Optional[dict]:
+                        constants: Optional[dict] = None,
+                        inputs: Optional[dict] = None) -> Optional[dict]:
     """The structure with its period-dependent formulas evaluated for THIS period.
 
     Returns the structure untouched when nothing depends on the period, which is the
@@ -1196,7 +1374,7 @@ def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
              for c in components]
     resolved = resolve_lines(lines, meta, annual_ctc=(structure or {}).get("annual_ctc"),
                              days=days, profile=profile, period_end=period_end,
-                             constants=constants)
+                             constants=constants, inputs=inputs)
     fresh = {r["code"]: r["amount"] for r in resolved}
     return {**structure,
             "components": [
@@ -1208,7 +1386,8 @@ def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
 def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
                      days: Optional[dict] = None, profile: Optional[dict] = None,
                      period: Optional[str] = None,
-                     period_end: Optional[str] = None) -> list:
+                     period_end: Optional[str] = None,
+                     imported: Optional[dict] = None) -> list:
     """The record's component lines: full monthly amount and what is paid this month.
 
     The keyword arguments are all optional so every existing caller keeps working; without
@@ -1227,15 +1406,20 @@ def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
             continue
 
         full = float(c.get("amount") or 0)
+        # §24 Imported Input: this period's figure from the run's imported file, as given --
+        # an incentive sheet's number is already the month's amount, so it is not prorated.
+        is_imported = m.get("calculation_method") == CalculationMethod.IMPORTED.value
+        if is_imported:
+            full = float((imported or {}).get(c.get("code"), 0) or 0)
         # §24 Attendance Linked: a rate times a quantity off the frozen attendance basis.
         if m.get("calculation_method") == CalculationMethod.ATTENDANCE_LINKED.value:
             basis_key = str(m.get("attendance_basis") or "payable_days")
             quantity = float(days.get(basis_key) or 0)
             full = round(float(m.get("rate") or c.get("amount") or 0) * quantity, 2)
 
-        share = _proration_ratio(m["proration"], days, ratio)
-        prorate = share != 1.0 or m["proration"] in (ProrationRule.PAYABLE_DAYS.value,
-                                                     ProrationRule.WORKING_DAYS.value)
+        share = 1.0 if is_imported else _proration_ratio(m["proration"], days, ratio)
+        prorate = not is_imported and (share != 1.0 or m["proration"] in (
+            ProrationRule.PAYABLE_DAYS.value, ProrationRule.WORKING_DAYS.value))
         paid = _round(full * share, m["rounding"]) if prorate else full
         lines.append({"code": c.get("code"), "name": m.get("name") or c.get("code"),
                       "component_type": ctype, "section": m["payslip_section"],
@@ -1243,7 +1427,81 @@ def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
                       "prorated": prorate and round(paid, 2) != round(full, 2),
                       "proration": m["proration"], "frequency": m.get("frequency"),
                       "component_version": m.get("version")})
+    present = {l["code"] for l in lines}
+    for code, amount in (imported or {}).items():
+        m = component_defaults(meta.get(code) or {})
+        if code in present or m.get("calculation_method") != CalculationMethod.IMPORTED.value:
+            continue
+        if period_end and not _applies_to(m, profile or {}, period_end):
+            continue
+        lines.append({"code": code, "name": m.get("name") or code,
+                      "component_type": m.get("component_type") or ComponentType.EARNING.value,
+                      "section": m["payslip_section"], "full_amount": round(float(amount), 2),
+                      "amount": round(float(amount), 2), "prorated": False,
+                      "proration": m["proration"], "frequency": m.get("frequency"),
+                      "component_version": m.get("version"), "imported": True})
     return lines
+
+
+async def import_component_inputs(actor: dict, company_id: str, period: str, filename: str,
+                                  raw: bytes) -> dict:
+    """FRD §24 Imported Input: an incentive sheet, a canteen deduction file. Columns: employee
+    code, component code, amount. Only components whose method is Imported Input take a
+    value; each file replaces what an earlier file said for the same employee + component.
+    The run must be recalculated afterwards (submit_run refuses until it is)."""
+    from app.services.hrms_attendance_rules_service import _pick, read_rows
+    run = await _get_run(company_id, period)
+    _assert_editable(run)
+    await _assert_inputs_open(actor, company_id, period)
+    if not str(filename or "").lower().endswith((".csv", ".xlsx", ".xlsm")):
+        raise HTTPException(status_code=415, detail="Upload the inputs as CSV or Excel (.xlsx).")
+    rows = read_rows(filename, raw)
+    if len(rows) < 2:
+        raise HTTPException(status_code=422, detail="The file has no rows under its header.")
+    ci = _pick(rows[0], ("employee code", "employee_code", "emp code", "code"))
+    ki = _pick(rows[0], ("component", "component code", "component_code"))
+    ai = _pick(rows[0], ("amount", "value"))
+    if None in (ci, ki, ai):
+        raise HTTPException(status_code=422,
+                            detail="Name the columns Employee Code, Component and Amount.")
+    await _load_component_types(company_id)
+    meta = dict(_component_meta_cache)
+    by_upper = {str(k).upper(): k for k in meta}
+    known = {p["employee_code"] for p in await get_collection(COLL_EMPLOYEE_PROFILES).find(
+        {"company_id": str(company_id)}, {"employee_code": 1}).to_list(5000)
+        if p.get("employee_code")}
+    stored = dict(run.get("imported_inputs") or {})
+    accepted, errors = 0, []
+    for n, row in enumerate(rows[1:], start=2):
+        cell = lambda i: row[i] if i < len(row) else None  # noqa: E731
+        code = str(cell(ci) or "").strip()
+        comp = str(cell(ki) or "").strip()
+        comp = by_upper.get(comp.upper(), comp)
+        if not code and not comp:
+            continue
+        try:
+            amount = round(float(cell(ai)), 2)
+        except (TypeError, ValueError):
+            errors.append({"row": n, "reason": "amount is not a number"})
+            continue
+        if code not in known:
+            errors.append({"row": n, "reason": f"no employee {code}"})
+        elif (meta.get(comp) or {}).get("calculation_method") != CalculationMethod.IMPORTED.value:
+            errors.append({"row": n, "reason": f"{comp} is not an Imported Input component"})
+        elif amount < 0:
+            errors.append({"row": n, "reason": "amounts cannot be negative"})
+        else:
+            stored.setdefault(code, {})[comp] = amount
+            accepted += 1
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_PAYROLL_RUNS).update_one(
+        {"_id": run["_id"]}, {"$set": {"imported_inputs": stored, "imported_inputs_at": now,
+                                       "imported_inputs_file": filename, "updated_at": now}})
+    await audit(actor, AUDIT_PAYROLL_ADJUSTMENTS_SET, ENTITY_PAYROLL_RUN, period,
+                f"imported inputs {filename}: {accepted} accepted, {len(errors)} refused",
+                company_id)
+    return {"accepted": accepted, "errors": errors,
+            "recalculate": run.get("status") != PayrollRunStatus.DRAFT.value}
 
 
 async def _employee_policy(company_id: str, run_policy: dict, profile: dict,
@@ -1302,7 +1560,8 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     meta = dict(_component_meta_cache)
     # §25 constants, read once for the whole run rather than per employee.
     run_constants = await constants_for(company_id)
-    profiles = await _eligible_profiles(company_id, start, end)
+    profiles = await _eligible_profiles(company_id, start, end,
+                                        policy.get("excluded_employee_categories"))
 
     records_coll = get_collection(COLL_PAYROLL_RECORDS)
     previous_inputs = {r["employee_code"]: r for r in await records_coll.find(
@@ -1332,30 +1591,6 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         days = await _payable_days(company_id, employee_code, period, profile, calendar,
                                    sandwich=bool(emp_policy.get("sandwich_weekly_off")))
         ratio = (days["payable_days"] / days["days_in_period"]) if days["days_in_period"] else 0
-        structure = _reprice_for_period(structure, meta, days, profile, end,
-                                        constants=run_constants)
-        lines = _component_lines(structure, meta, ratio, days=days, profile=profile,
-                                 period=period, period_end=end)
-
-        gross_structured = round(sum(l["full_amount"] for l in lines
-                                     if l["component_type"] == ComponentType.EARNING.value), 2)
-        prorated_gross = round(sum(l["amount"] for l in lines
-                                   if l["component_type"] == ComponentType.EARNING.value), 2)
-        # Nothing earned, nothing deducted: with no paid days a fixed deduction (e.g. PT)
-        # would make net pay negative.
-        if prorated_gross <= 0:
-            for l in lines:
-                if l["component_type"] in DEDUCTING_TYPES | {
-                        ComponentType.REIMBURSEMENT.value,
-                        ComponentType.EMPLOYER_CONTRIBUTION.value}:
-                    l["amount"] = 0.0
-        structured_deductions = round(sum(l["amount"] for l in lines
-                                          if l["component_type"] in DEDUCTING_TYPES), 2)
-        structured_reimbursements = round(sum(
-            l["amount"] for l in lines
-            if l["component_type"] == ComponentType.REIMBURSEMENT.value), 2)
-        employer = round(sum(l["amount"] for l in lines
-                             if l["component_type"] == ComponentType.EMPLOYER_CONTRIBUTION.value), 2)
 
         # Auto roll-up: open salary-advance recovery for this employee (§7.13 step 93).
         advance = await get_collection(COLL_SALARY_ADVANCES).find_one({
@@ -1377,7 +1612,38 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         prior = previous_inputs.get(employee_code) or {}
         manual = {f: (prior.get(f) if prior.get(f) is not None else (None if f == "remarks" else 0))
                   for f in MANUAL_FIELDS}
-        adjustments = [a for a in (prior.get("adjustments") or []) if not a.get("carry_forward_id")]
+
+        # Worked out BEFORE the structure is priced so an INPUT_* formula (§25 "payroll
+        # inputs") reads this period's figures.
+        structure = _reprice_for_period(
+            structure, meta, days, profile, end, constants=run_constants,
+            inputs={**manual, "advance_recovery": advance_recovery,
+                    "variable_pay_payout": variable_pay_payout})
+        lines = _component_lines(structure, meta, ratio, days=days, profile=profile,
+                                 period=period, period_end=end,
+                                 imported=(run.get("imported_inputs") or {}).get(employee_code))
+
+        gross_structured = round(sum(l["full_amount"] for l in lines
+                                     if l["component_type"] == ComponentType.EARNING.value), 2)
+        prorated_gross = round(sum(l["amount"] for l in lines
+                                   if l["component_type"] == ComponentType.EARNING.value), 2)
+        # Nothing earned, nothing deducted: with no paid days a fixed deduction (e.g. PT)
+        # would make net pay negative.
+        if prorated_gross <= 0:
+            for l in lines:
+                if l["component_type"] in DEDUCTING_TYPES | {
+                        ComponentType.REIMBURSEMENT.value,
+                        ComponentType.EMPLOYER_CONTRIBUTION.value}:
+                    l["amount"] = 0.0
+        structured_deductions = round(sum(l["amount"] for l in lines
+                                          if l["component_type"] in DEDUCTING_TYPES), 2)
+        structured_reimbursements = round(sum(
+            l["amount"] for l in lines
+            if l["component_type"] == ComponentType.REIMBURSEMENT.value), 2)
+        employer = round(sum(l["amount"] for l in lines
+                             if l["component_type"] == ComponentType.EMPLOYER_CONTRIBUTION.value), 2)
+
+        adjustments =[a for a in (prior.get("adjustments") or []) if not a.get("carry_forward_id")]
         for c in carry_by_code.get(employee_code, []):
             adjustments.append({
                 "code": c["adjustment_type"].upper(), "name": f"{c['adjustment_type']} "
@@ -1595,6 +1861,7 @@ async def adjust_record(actor: dict, company_id: str, period: str, employee_code
     bonus, other earnings / recoveries -- entered here while the run is with the maker."""
     run = await _get_run(company_id, period)
     _assert_editable(run)
+    await _assert_inputs_open(actor, company_id, period)
     record = await get_collection(COLL_PAYROLL_RECORDS).find_one(
         {"company_id": str(company_id), "period": period, "employee_code": employee_code})
     if not record:
@@ -1613,6 +1880,15 @@ async def adjust_record(actor: dict, company_id: str, period: str, employee_code
     if "remarks" in payload and payload["remarks"] is not None:
         clean["remarks"] = payload["remarks"]
     merged = {**record, **clean}
+    # §25 payroll-input variables: a formula reading an input was priced with the value the
+    # input had when the run calculated. Changing it leaves that line behind until the run
+    # is recalculated, and submit_run refuses until it is.
+    from app.services import hrms_formula_engine as FE
+    if set(clean) & set(FE.INPUT_FIELDS.values()):
+        await _load_component_types(company_id)
+        if any(_input_dependent(_component_meta_cache.get(l.get("code")) or {})
+               for l in record.get("lines") or []):
+            merged["inputs_changed_after_calculation"] = True
     merged = await _refresh_record(merged, company_id)
     merged["updated_at"] = datetime.now(timezone.utc)
     merged["updated_by"] = _actor_id(actor)
@@ -1632,6 +1908,7 @@ async def set_adjustments(actor: dict, company_id: str, period: str, employee_co
     in from a post-lock adjustment are kept -- the maker cannot drop an approved arrear."""
     run = await _get_run(company_id, period)
     _assert_editable(run)
+    await _assert_inputs_open(actor, company_id, period)
     record = await get_collection(COLL_PAYROLL_RECORDS).find_one(
         {"company_id": str(company_id), "period": period, "employee_code": employee_code})
     if not record:
@@ -1658,6 +1935,20 @@ async def set_adjustments(actor: dict, company_id: str, period: str, employee_co
                          "reason": (item.get("reason") or "").strip() or None,
                          "reference": (item.get("reference") or "").strip() or None,
                          "entered_by": _actor_id(actor)})
+
+    # §10 "approval where needed": a line above the policy's amount waits for a second
+    # person. A line re-posted unchanged keeps the approval it already has.
+    limit = (await get_payroll_policy(company_id, on_date=_period_bounds(period)[4])).get(
+        "adjustment_approval_above")
+    approved = {_adjustment_key(a): a for a in record.get("adjustments") or []
+                if a.get("approval_status") == ADJ_APPROVED}
+    for a in resolved:
+        if a.get("carry_forward_id") or limit is None or a["amount"] <= float(limit):
+            continue
+        kept = approved.get(_adjustment_key(a))
+        a.update({k: kept.get(k) for k in ("approval_status", "approved_by",
+                                           "approved_by_name", "approved_at")}
+                 if kept else {"approval_status": ADJ_PENDING})
 
     merged = {**record, "adjustments": resolved}
     merged = await _refresh_record(merged, company_id)
@@ -1715,6 +2006,26 @@ async def submit_run(actor: dict, company_id: str, period: str, payload: dict) -
     if moved:
         raise HTTPException(status_code=409,
                             detail=f"{moved} Recalculate {period} before submitting it.")
+    if run.get("imported_inputs_at") and run.get("calculated_at") and \
+            run["imported_inputs_at"] > run["calculated_at"]:
+        raise HTTPException(status_code=409,
+                            detail=f"Imported inputs arrived after {period} was calculated. "
+                                   f"Recalculate it before submitting.")
+    behind = await get_collection(COLL_PAYROLL_RECORDS).count_documents(
+        {"company_id": str(company_id), "period": period,
+         "inputs_changed_after_calculation": True})
+    if behind:
+        raise HTTPException(status_code=409,
+                            detail=f"{behind} employee(s) had a payroll input changed that a "
+                                   f"formula uses. Recalculate {period} before submitting it.")
+    waiting = sum(
+        1 for r in await get_collection(COLL_PAYROLL_RECORDS).find(
+            {"company_id": str(company_id), "period": period}, {"adjustments": 1}).to_list(5000)
+        for a in r.get("adjustments") or [] if a.get("approval_status") == ADJ_PENDING)
+    if waiting:
+        raise HTTPException(status_code=409,
+                            detail=f"{waiting} one-off line(s) above the approval amount are "
+                                   f"waiting for a second person's approval.")
     if run["status"] not in (PayrollRunStatus.CALCULATED.value, PayrollRunStatus.RETURNED.value,
                              PayrollRunStatus.REJECTED.value):
         raise HTTPException(status_code=409,
@@ -2189,3 +2500,57 @@ async def delete_calculation_variable(actor: dict, company_id: str, name: str) -
     await get_collection(COLL_CALCULATION_VARIABLES).delete_one(
         {"company_id": str(company_id), "name": name})
     return {"removed": True}
+
+
+async def preview_payroll_policy(company_id: str, period: str, *, version_no: int) -> dict:
+    """FRD §26 draft preview for PAY_POLICY: what a DRAFT version would change about a run
+    already calculated -- net rounding, who the eligibility rule leaves out, and who the
+    variance threshold flags. Writes nothing. Previewed company-wide: a scoped version's
+    per-employee keys are shown as if they applied to everyone."""
+    from app.models.hrms import POLICY_PAY_POLICY
+    from app.services import hrms_policy_version_service as PV
+    draft = await PV._require_version(company_id, POLICY_PAY_POLICY, int(version_no))
+    end = _period_bounds(period)[4]
+    live = await get_payroll_policy(company_id, on_date=end)
+    proposed = {**live, **{k: v for k, v in (draft.get("rules") or {}).items() if v is not None}}
+    changed_rules = sorted(k for k in proposed if proposed.get(k) != live.get(k))
+    records = await get_collection(COLL_PAYROLL_RECORDS).find(
+        {"company_id": str(company_id), "period": period}).to_list(5000)
+    out = {"policy_code": POLICY_PAY_POLICY, "version_no": int(version_no), "period": period,
+           "changed_rules": changed_rules, "records_examined": len(records),
+           "simulated_at": datetime.now(timezone.utc)}
+    if not records:
+        return {**out, "changes": [],
+                "note": f"No calculated payroll for {period} to test against — calculate it first."}
+    categories = {p["employee_code"]: str(p.get("employee_category") or "").strip().lower()
+                  for p in await get_collection(COLL_EMPLOYEE_PROFILES).find(
+                      {"company_id": str(company_id)},
+                      {"employee_code": 1, "employee_category": 1}).to_list(5000)
+                  if p.get("employee_code")}
+
+    def judge(rules: dict, r: dict) -> dict:
+        excluded = {str(c).strip().lower() for c in rules.get("excluded_employee_categories") or []}
+        if excluded and categories.get(r["employee_code"]) in excluded:
+            return {"net": 0.0, "left_out": True, "flagged": False}
+        raw = float(r.get("net_pay") or 0) - float(r.get("net_rounding_adjustment") or 0)
+        pct = r.get("variance_percent")
+        limit = float(rules.get("variance_threshold_percent") or 0)
+        return {"net": _net_rounding({"net_pay": raw}, rules.get("net_rounding"))["net_pay"],
+                "left_out": False,
+                "flagged": pct is not None and limit > 0 and abs(float(pct)) > limit}
+
+    changes = []
+    net_was = net_now = 0.0
+    for r in records:
+        was, now = judge(live, r), judge(proposed, r)
+        net_was += was["net"]
+        net_now += now["net"]
+        if was != now:
+            changes.append({"employee_code": r["employee_code"],
+                            "employee_name": r.get("employee_name"), "was": was, "now": now})
+    return {**out, "net_was": round(net_was, 2), "net_now": round(net_now, 2),
+            "employees_changed": len(changes),
+            "left_out": sum(1 for c in changes if c["now"]["left_out"]),
+            "variance_flags_was": sum(1 for r in records if judge(live, r)["flagged"]),
+            "variance_flags_now": sum(1 for r in records if judge(proposed, r)["flagged"]),
+            "changes": changes}

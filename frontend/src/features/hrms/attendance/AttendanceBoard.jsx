@@ -14,7 +14,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getAttendance, markAttendance, getEmployees,
-  requestRegularization, getRegularizations, actOnRegularization,
+  requestRegularization, getRegularizations, actOnRegularization, getRegularisationEvidence,
   requestOd, getOdRequests, actOnOd,
   getClosureDashboard, lockPeriod, unlockPeriod,
   getLateComingSummary,
@@ -420,9 +420,18 @@ const LateComingTab = ({ scope, companyId }) => {
                       {(() => {
                         const m = (summary.monthly || []).find((x) => x.employee_code === code && x.month === period);
                         if (!m) return null;
-                        return m.beyond_buffer > 0
-                          ? <Chip tone="bad" title={`${m.within_buffer} min within the ${m.buffer_minutes}-min buffer`}>{m.beyond_buffer} min beyond buffer</Chip>
-                          : <Chip tone="good" title={`Buffer ${m.buffer_minutes} min`}>within buffer</Chip>;
+                        return (
+                          <>
+                            {m.escalated && (
+                              <Chip tone="bad" title={`Escalation threshold: ${m.escalation_days} late days in a month`}>
+                                Escalated · {m.late_days}/{m.escalation_days}
+                              </Chip>
+                            )}
+                            {m.beyond_buffer > 0
+                              ? <Chip tone="bad" title={`${m.within_buffer} min within the ${m.buffer_minutes}-min buffer`}>{m.beyond_buffer} min beyond buffer</Chip>
+                              : <Chip tone="good" title={`Buffer ${m.buffer_minutes} min`}>within buffer</Chip>}
+                          </>
+                        );
                       })()}
                       <Chip tone={count >= 5 ? 'bad' : count >= 2 ? 'warn' : 'neutral'}>{count} day(s)</Chip>
                     </span>
@@ -768,6 +777,8 @@ const RegularizeModal = ({ scope, onClose, onDone, showSuccess, showError }) => 
   const [proposedOut, setProposedOut] = useState('');
   const [reason, setReason] = useState('');
   const [evidence, setEvidence] = useState('');
+  const [evidenceFile, setEvidenceFile] = useState(null);   // {name, mime_type, data}
+  const [requestType, setRequestType] = useState('');
   // The company's request window and evidence rule, shown up front so the 422 is a
   // surprise to no one. The server still enforces both.
   const [rules, setRules] = useState(null);
@@ -787,8 +798,8 @@ const RegularizeModal = ({ scope, onClose, onDone, showSuccess, showError }) => 
       showError('Select the employee and describe the reason.');
       return;
     }
-    if (evidenceRequired && !evidence.trim()) {
-      showError('Evidence is required for a regularisation — add a link or reference.');
+    if (evidenceRequired && !evidence.trim() && !evidenceFile) {
+      showError('Evidence is required for a regularisation — attach a file or add a link or reference.');
       return;
     }
     run(() => requestRegularization({
@@ -796,6 +807,8 @@ const RegularizeModal = ({ scope, onClose, onDone, showSuccess, showError }) => 
       exception_type: exceptionType, proposed_in: proposedIn || undefined,
       proposed_out: proposedOut || undefined, reason: reason.trim(),
       evidence: evidence.trim() || undefined,
+      evidence_file: evidenceFile || undefined,
+      request_type: requestType.trim() || undefined,
     }, scope), 'Regularisation requested.');
   };
 
@@ -852,6 +865,27 @@ const RegularizeModal = ({ scope, onClose, onDone, showSuccess, showError }) => 
         <input id="reg-evidence" value={evidence} className={FIELD} maxLength={500}
           placeholder="Link or reference, e.g. a gate-pass number or a shared-drive link"
           onChange={(e) => setEvidence(e.target.value)} />
+        <input type="file" aria-label="Evidence file" className="mt-2 text-[12px]"
+          accept=".pdf,.png,.jpg,.jpeg"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (!file) { setEvidenceFile(null); return; }
+            const reader = new FileReader();
+            reader.onload = () => setEvidenceFile({
+              name: file.name, mime_type: file.type || 'application/octet-stream',
+              data: String(reader.result || ''),
+            });
+            reader.readAsDataURL(file);
+          }} />
+      </div>
+      <div>
+        <label className={LABEL} htmlFor="reg-rtype">Request type</label>
+        <input id="reg-rtype" value={requestType} className={FIELD} maxLength={80}
+          list="reg-rtype-options" placeholder="If your company uses request types"
+          onChange={(e) => setRequestType(e.target.value)} />
+        <datalist id="reg-rtype-options">
+          {(rules?.regularisation_request_types || []).map((t) => <option key={t} value={t} />)}
+        </datalist>
       </div>
       {rules && (
         <p className="text-[11.5px] text-[var(--text-muted)]">
@@ -999,6 +1033,19 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
         { label: 'Exception', value: row.exception_type },
         { label: 'Reason', value: row.reason },
         { label: 'Evidence', value: row.evidence },
+        ...(row.evidence_file ? [{ label: 'Evidence file', value: (
+          <button type="button" className="underline text-[var(--accent-indigo)]"
+            onClick={async () => {
+              try {
+                const { data } = await getRegularisationEvidence(row.req_no, scope);
+                window.open(data.url, '_blank', 'noopener');
+              } catch (err) {
+                showError(err?.response?.data?.detail || 'Could not open the file.');
+              }
+            }}>
+            {row.evidence_file.file_name || 'Open'}
+          </button>
+        ) }] : []),
         { label: 'Approval levels', value: oneLevel ? '1 — manager only' : '2 — manager, then HR' },
       ]} />
       <div>

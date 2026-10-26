@@ -24,7 +24,9 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
-from app.models.hrms import COLL_ATTENDANCE, COLL_PUNCH_SEGMENTS, COLL_SETTINGS, compute_daily_status
+from app.models.hrms import (
+    COLL_ATTENDANCE, COLL_EMPLOYEE_PROFILES, COLL_PUNCH_SEGMENTS, COLL_SETTINGS, compute_daily_status,
+)
 from app.services.hrms_audit_service import audit
 from app.services.hrms_ics import IST
 
@@ -160,6 +162,10 @@ async def punch(actor: dict, company_id: str, payload: dict) -> dict:
         accuracy = None
 
     code = await _own_code(actor, company_id)
+    from app.services.hrms_attendance_service import assert_attendance_active
+    assert_attendance_active(await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": code}, {"attendance_active": 1,
+                                                                 "employee_code": 1}))
     offices = await get_offices(company_id)
     if not offices:
         raise HTTPException(

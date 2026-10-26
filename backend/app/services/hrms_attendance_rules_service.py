@@ -126,7 +126,7 @@ async def effective_hours(company_id: str, employee_code: str, work_date: str,
 
 async def compute_day(company_id: str, employee_code: str, work_date: str,
                       actual_in: Optional[str], actual_out: Optional[str],
-                      policy: dict = None) -> dict:
+                      policy: dict = None, *, approved_exception: Optional[str] = None) -> dict:
     """compute_daily_status against the day's EFFECTIVE hours. Adds `flexi_no` when a
     flexible timing decided them, and the shift / rule version that judged the day."""
     hours = await effective_hours(company_id, employee_code, work_date, policy)
@@ -145,6 +145,13 @@ async def compute_day(company_id: str, employee_code: str, work_date: str,
         half_day_late_minutes=p.get("half_day_late_minutes"),
         half_day_early_minutes=p.get("half_day_early_minutes"),
         absent_on_no_out_punch=bool(p.get("absent_on_no_out_punch")))
+    # §23 Half Day "approved exception treatment": a late/early half day is waived when an
+    # approved request of a type the policy names covers the day. Off unless configured.
+    waived_types = p.get("half_day_exception_types") or []
+    if approved_exception and approved_exception in waived_types \
+            and out.get("half_day_basis") in ("late", "early"):
+        out.update({"status": "Present", "payable_day": 1.0, "lop_fraction": 0.0,
+                    "half_day_reason": f"waived: approved {approved_exception}"})
     out["flexi_no"] = hours["flexi_no"]
     out["scheduled_in"], out["scheduled_out"] = hours["start"], hours["end"]
     rules = hours.get("rules") or {}
@@ -411,9 +418,45 @@ def punches_from_rows(rows: list) -> tuple:
     return days, bad
 
 
+def mapped_values_from_rows(rows: list, mapping: dict) -> dict:
+    """{(code, date): {field_code: value}} for the columns attendance fields are mapped to
+    (FRD §21 "source mapping"). The last non-empty value of a day wins. Pure."""
+    if not rows or not mapping:
+        return {}
+    headers = rows[0]
+    ci, di = _pick(headers, _CODE_COLS), _pick(headers, _DATE_COLS)
+    dti = _pick(headers, _DATETIME_COLS)
+    columns = {field: _pick(headers, [column]) for field, column in mapping.items()}
+    columns = {f: i for f, i in columns.items() if i is not None}
+    out = {}
+    if ci is None or (di is None and dti is None) or not columns:
+        return out
+    for row in rows[1:MAX_IMPORT_ROWS + 1]:
+        cell = lambda i: row[i] if i is not None and i < len(row) else None  # noqa: E731
+        code = str(cell(ci) or "").strip()
+        if isinstance(cell(ci), float) and float(cell(ci)).is_integer():
+            code = str(int(cell(ci)))
+        d = _parse_datetime(cell(dti))[0] if dti is not None else _parse_date(cell(di))
+        if not code or not d:
+            continue
+        for field, i in columns.items():
+            value = cell(i)
+            if value not in (None, ""):
+                out.setdefault((code, d), {})[field] = value
+    return out
+
+
 async def import_biometric(actor: dict, company_id: str, filename: str, raw: bytes) -> dict:
     """Load a biometric export. First punch = in, last punch = out."""
-    days, bad = punches_from_rows(read_rows(filename, raw))
+    rows = read_rows(filename, raw)
+    days, bad = punches_from_rows(rows)
+    # §21 source mapping: attendance fields that name a column of this file.
+    from app.services.hrms_employee_master_service import (
+        list_field_definitions, validate_custom_values)
+    mapping = {d["code"]: d["source_column"]
+               for d in await list_field_definitions(company_id, "attendance")
+               if d.get("status") == "Active" and d.get("source_column")}
+    mapped = mapped_values_from_rows(rows, mapping)
     profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
         {"company_id": str(company_id)}, {"employee_code": 1, "biometric_id": 1}).to_list(5000)
     by_code = {}
@@ -427,7 +470,7 @@ async def import_biometric(actor: dict, company_id: str, filename: str, raw: byt
     policy = await get_shift_policy(company_id)
     now = datetime.now(timezone.utc)
     report = {"days_created": 0, "days_updated": 0, "skipped": [], "unreadable_rows": bad,
-              "unknown_codes": []}
+              "unknown_codes": [], "field_errors": []}
     unknown = set()
     for (raw_code, d), times in sorted(days.items()):
         code = by_code.get(raw_code.upper())
@@ -450,9 +493,18 @@ async def import_biometric(actor: dict, company_id: str, filename: str, raw: byt
             report["skipped"].append({"employee_code": code, "work_date": d, "reason": "locked"})
             continue
         c = await compute_day(company_id, code, d, actual_in, actual_out, policy)
+        custom = {}
+        if mapped.get((raw_code, d)):
+            try:
+                custom = {"custom_fields": await validate_custom_values(
+                    company_id, "attendance", mapped[(raw_code, d)],
+                    current=existing.get("custom_fields"), enforce_mandatory=False)}
+            except HTTPException as e:
+                report["field_errors"].append({"employee_code": code, "work_date": d,
+                                               "reason": str(e.detail)})
         await get_collection(COLL_ATTENDANCE).update_one(
             key,
-            {"$set": {**key, "actual_in": actual_in, "actual_out": actual_out,
+            {"$set": {**key, **custom, "actual_in": actual_in, "actual_out": actual_out,
                       "status": c["status"], "worked_minutes": c["worked_minutes"],
                       "late_minutes": c["late_minutes"], "flexi_no": c["flexi_no"],
                       **derived_fields(c),
@@ -484,9 +536,37 @@ async def _month_locked(company_id: str, work_date: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 # Monthly buffer
 # ─────────────────────────────────────────────────────────────
-def monthly_buffer(rows: list, buffer_minutes: int) -> list:
+async def late_escalation_thresholds(company_id: str, profiles: dict, rows: list) -> dict:
+    """FRD §23 Late Coming "escalation threshold": {(employee_code, 'YYYY-MM'): late days}.
+
+    An ATT_DAY rule, so it is resolved per person through the policy spine like every other
+    late-coming rule, as at the month's last day (or today, for the month in progress). A
+    company that has never set it pays one query and gets {} -- nothing is flagged.
+    """
+    from app.models.hrms import COLL_POLICY_VERSIONS, POLICY_ATT_DAY
+    configured = await get_collection(COLL_POLICY_VERSIONS).find_one(
+        {"company_id": str(company_id), "policy_code": POLICY_ATT_DAY,
+         "rules.late_escalation_days": {"$gt": 0}}, {"_id": 1})
+    if not configured:
+        return {}
+    import calendar
+    from app.services import hrms_policy_version_service as PV
+    today = date.today().isoformat()
+    out = {}
+    for code, month in {(r["employee_code"], str(r["work_date"])[:7]) for r in rows}:
+        year, mon = int(month[:4]), int(month[5:7])
+        on = min(f"{month}-{calendar.monthrange(year, mon)[1]:02d}", today)
+        version = await PV.resolve(company_id, POLICY_ATT_DAY, profiles.get(code) or {}, on)
+        days = ((version or {}).get("rules") or {}).get("late_escalation_days")
+        if days:
+            out[(code, month)] = int(days)
+    return out
+
+
+def monthly_buffer(rows: list, buffer_minutes: int, escalation: dict = None) -> list:
     """Per person per month: late days, late minutes, and how much is within / beyond the
-    monthly buffer. Pure."""
+    monthly buffer -- plus, where an escalation threshold applies (see
+    late_escalation_thresholds), whether the late days have reached it. Pure."""
     buckets = {}
     for r in rows:
         key = (r["employee_code"], str(r["work_date"])[:7])
@@ -499,5 +579,8 @@ def monthly_buffer(rows: list, buffer_minutes: int) -> list:
         b["buffer_minutes"] = int(buffer_minutes or 0)
         b["within_buffer"] = min(b["late_minutes"], b["buffer_minutes"])
         b["beyond_buffer"] = max(0, b["late_minutes"] - b["buffer_minutes"])
+        threshold = (escalation or {}).get((b["employee_code"], b["month"]))
+        b["escalation_days"] = threshold
+        b["escalated"] = bool(threshold) and b["late_days"] >= threshold
         out.append(b)
     return sorted(out, key=lambda x: (x["month"], -x["beyond_buffer"], x["employee_code"]), reverse=False)

@@ -91,6 +91,8 @@ async def list_document_types(company_id: str, *, include_inactive: bool = False
     coll = get_collection(COLL_DOCUMENT_TYPES)
     if not await coll.count_documents({"company_id": str(company_id)}):
         await _seed_types(company_id)
+    else:
+        await _offer_psc_type(company_id)
 
     query = {"company_id": str(company_id)}
     if not include_inactive:
@@ -99,6 +101,28 @@ async def list_document_types(company_id: str, *, include_inactive: bool = False
     if applies_to in ("candidate", "employee"):
         rows = [r for r in rows if (r.get("applies_to") or "both") in (applies_to, "both")]
     return [_type_out(r) for r in rows]
+
+
+async def _offer_psc_type(company_id: str) -> None:
+    """FRD §3 Documents names "PSC". A company seeded before PSC was a default gets the type
+    ONCE -- the settings flag stops it coming back if HR later removes it on purpose."""
+    from app.models.hrms import COLL_SETTINGS, DocumentCategory
+    settings = get_collection(COLL_SETTINGS)
+    if (await settings.find_one({"company_id": str(company_id)},
+                                {"psc_document_type_offered": 1}) or {}).get(
+            "psc_document_type_offered"):
+        return
+    coll = get_collection(COLL_DOCUMENT_TYPES)
+    if not await coll.count_documents({"company_id": str(company_id),
+                                       "category": DocumentCategory.PSC.value}):
+        await coll.insert_one({
+            "company_id": str(company_id), "name": "PSC", "code": None,
+            "category": DocumentCategory.PSC.value, "applies_to": "employee",
+            "mandatory": False, "expires": False, "statutory_required": False,
+            "active": True, "seeded": True, "created_at": datetime.now(timezone.utc)})
+    await settings.update_one({"company_id": str(company_id)},
+                              {"$set": {"psc_document_type_offered": True},
+                               "$setOnInsert": {"company_id": str(company_id)}}, upsert=True)
 
 
 async def _seed_types(company_id: str) -> None:

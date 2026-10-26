@@ -10,6 +10,7 @@ import {
   listPolicyDefinitions, savePolicyDefinition, listPolicyVersions, savePolicyVersion,
   setPolicyVersionStatus, assignPolicyScope, simulateAttendancePolicy,
   createConfigChangeRequest, analyseConfigChangeImpact, submitConfigChangeRequest,
+  runConfigChangeSimulation,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL } from '../internal/internalKit';
 import { Btn, Chip } from '../internal/internalKit.jsx';
@@ -45,10 +46,12 @@ const RULE_FIELDS = {
   ATT_DAY: [
     ['daily_grace_minutes', 'Daily grace (min)', 'Late Coming', 'number'],
     ['monthly_buffer_minutes', 'Monthly late buffer (min)', 'Late Coming', 'number'],
+    ['late_escalation_days', 'Escalate at late days / month', 'Late Coming', 'number'],
     ['early_going_grace_minutes', 'Early-going grace (min)', 'Early Going', 'number'],
     ['half_day_threshold_minutes', 'Half day below (worked min)', 'Half Day', 'number'],
     ['half_day_late_minutes', 'Half day if late by (min)', 'Half Day', 'number'],
     ['half_day_early_minutes', 'Half day if early by (min)', 'Half Day', 'number'],
+    ['half_day_exception_types', 'Approved request types that waive a late / early half day', 'Half Day', 'list'],
     ['absent_threshold_minutes', 'Absent below (worked min)', 'Absent', 'number'],
     ['half_day_fraction', 'A half day is paid', 'LOP', 'fraction'],
     ['absent_on_no_out_punch', 'No out-punch counts as Absent', 'Absent', 'bool'],
@@ -59,6 +62,7 @@ const RULE_FIELDS = {
     ['max_requests_per_month', 'Max requests per month', 'OD / Regularisation', 'number'],
     ['approval_levels', 'Approval levels (1 or 2)', 'OD / Regularisation', 'number'],
     ['evidence_required', 'Evidence required', 'OD / Regularisation', 'bool'],
+    ['request_types', 'Request types allowed', 'OD / Regularisation', 'list'],
   ],
   ATT_CLOSURE: [
     ['closing_day', 'Attendance closes on day', 'Monthly Closure', 'number'],
@@ -73,18 +77,25 @@ const POLICY_LABEL = {
   ATT_CLOSURE: 'Monthly closure and cut-off',
 };
 
+// Every §26 / §23 scope key the backend resolves (POLICY_SCOPE_KEYS).
 const SCOPE_FIELDS = [
   ['locations', 'Locations'],
   ['departments', 'Department IDs'],
   ['grades', 'Grades'],
+  ['levels', 'Levels'],
   ['employment_categories', 'Employee categories'],
+  ['shift_codes', 'Shift codes'],
+  ['attendance_policy_groups', 'Attendance policy groups'],
+  ['payroll_groups', 'Payroll groups'],
 ];
 
 const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
                         showSuccess, showError }) => {
   const [rules, setRules] = useState(version?.rules || {});
   const [effectiveFrom, setEffectiveFrom] = useState(version?.effective_from || TODAY());
+  const [effectiveTo, setEffectiveTo] = useState(version?.effective_to || '');
   const [reason, setReason] = useState('');
+  const [simCodes, setSimCodes] = useState('');
   const [scopeText, setScopeText] = useState(() => {
     const a = (version?.assignments || [])[0];
     return Object.fromEntries(SCOPE_FIELDS.map(([k]) => [k, (a?.scope?.[k] || []).join(', ')]));
@@ -99,6 +110,11 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
   const setRule = (key, raw, type) => setRules((r) => {
     const next = { ...r };
     if (type === 'bool') { next[key] = !!raw; return next; }
+    if (type === 'list') {
+      const items = String(raw || '').split(',').map((v) => v.trim()).filter(Boolean);
+      if (items.length) next[key] = items; else delete next[key];
+      return next;
+    }
     if (raw === '' || raw === null) { delete next[key]; return next; }
     next[key] = Number(raw);
     return next;
@@ -112,8 +128,12 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
   };
 
   const save = () => run(async () => {
+    if (effectiveTo && effectiveTo < effectiveFrom) {
+      throw { response: { data: { detail: 'Effective to is before effective from.' } } };
+    }
     const { data } = await savePolicyVersion(code, {
-      policy_code: code, effective_from: effectiveFrom, rules, change_reason: reason,
+      policy_code: code, effective_from: effectiveFrom, effective_to: effectiveTo || null,
+      rules, change_reason: reason,
     }, { ...scope, ...(version ? { version_no: version.version_no } : {}) });
     const vno = data?.version_no ?? version?.version_no;
     const cleaned = Object.fromEntries(SCOPE_FIELDS
@@ -129,7 +149,7 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
     setBusy(true);
     try {
       const { data } = await simulateAttendancePolicy(code, version.version_no,
-        { ...scope, period: simPeriod });
+        { ...scope, period: simPeriod, ...(simCodes.trim() ? { employee_codes: simCodes.trim() } : {}) });
       setSim(data);
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not simulate that.');
@@ -161,6 +181,8 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
       title: `${code} v${version.version_no}`,
     }, scope);
     await analyseConfigChangeImpact(data.request_no, scope);
+    // §27 Test / Simulation, recorded on the request so the approver sees what it showed.
+    await runConfigChangeSimulation(data.request_no, { ...scope, period: simPeriod });
     await submitConfigChangeRequest(data.request_no, scope);
     if (version.status === 'Draft') {
       await setPolicyVersionStatus(code, version.version_no,
@@ -182,6 +204,11 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
           <label className={LABEL} htmlFor={`eff-${code}`}>Effective from</label>
           <input id={`eff-${code}`} type="date" value={effectiveFrom} className={FIELD}
             disabled={!editable || !canDraft} onChange={(e) => setEffectiveFrom(e.target.value)} />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor={`eto-${code}`}>Effective to (optional)</label>
+          <input id={`eto-${code}`} type="date" value={effectiveTo} className={FIELD}
+            disabled={!editable || !canDraft} onChange={(e) => setEffectiveTo(e.target.value)} />
         </div>
         <div>
           <label className={LABEL} htmlFor={`rsn-${code}`}>Why (change reason)</label>
@@ -207,6 +234,11 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
                     {rules[key] ? 'Yes' : 'No'}
                   </span>
                 </label>
+              ) : type === 'list' ? (
+                <input id={`${code}-${key}`} defaultValue={(rules[key] || []).join(', ')}
+                  className={FIELD} placeholder="comma separated — blank: inherit"
+                  disabled={!editable || !canDraft}
+                  onBlur={(e) => setRule(key, e.target.value, 'list')} />
               ) : type === 'fraction' ? (
                 <select id={`${code}-${key}`} value={rules[key] ?? ''} className={FIELD}
                   disabled={!editable || !canDraft}
@@ -243,7 +275,7 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
       </div>
 
       {/* §23: "create a new policy version, TEST IT and activate it from a future date". */}
-      {version && code === 'ATT_DAY' && (
+      {version && (
         <div className="rounded-lg bg-[var(--bg-subtle)] px-3 py-2.5 space-y-2">
           <div className="flex flex-wrap items-end gap-2">
             <div>
@@ -251,11 +283,40 @@ const VersionEditor = ({ code, version, canDraft, canApprove, scope, onDone,
               <input id={`sim-${code}`} type="month" value={simPeriod} className={FIELD}
                 onChange={(e) => setSimPeriod(e.target.value)} />
             </div>
+            {code !== 'ATT_CLOSURE' && (
+              <div>
+                <label className={LABEL} htmlFor={`simc-${code}`}>Employees (optional)</label>
+                <input id={`simc-${code}`} value={simCodes} className={FIELD}
+                  placeholder="EMP codes, comma separated" onChange={(e) => setSimCodes(e.target.value)} />
+              </div>
+            )}
             <Btn onClick={simulate} disabled={busy}>
               <FlaskConical size={14} /> {busy ? 'Working…' : 'Simulate'}
             </Btn>
           </div>
-          {sim && (
+          {sim && code === 'ATT_REGULARISATION' && (
+            <div className="text-[12px] text-[var(--text-main)] space-y-1">
+              <p>
+                Of {sim.requests_examined} request(s) in {sim.period}, the draft would refuse{' '}
+                <b>{sim.would_refuse}</b> more and allow <b>{sim.would_allow}</b> more than today.
+              </p>
+              {(sim.changes || []).slice(0, 15).map((c) => (
+                <p key={`${c.request_no}-${c.work_date}`} className="text-[11.5px] text-[var(--text-muted)]">
+                  {c.employee_code} · {c.work_date}: {c.would_be_refused.length
+                    ? `refused (${c.would_be_refused.join('; ')})` : 'allowed'}
+                </p>
+              ))}
+              {sim.note && <p className="text-[var(--text-muted)]">{sim.note}</p>}
+            </div>
+          )}
+          {sim && code === 'ATT_CLOSURE' && (
+            <div className="text-[12px] text-[var(--text-main)] space-y-1">
+              <p>{sim.pending_requests} request(s) are still open for {sim.period}.</p>
+              <p>Today: cut-off {sim.was?.cutoff_date || 'not enforced'}, locking {sim.was?.locking_blocked ? 'blocked' : 'allowed'}.</p>
+              <p>Draft: cut-off {sim.now?.cutoff_date || 'not enforced'}, locking {sim.now?.locking_blocked ? 'blocked' : 'allowed'}.</p>
+            </div>
+          )}
+          {sim && code === 'ATT_DAY' && (
             <div className="text-[12px] text-[var(--text-main)] space-y-1">
               <p>
                 <span className="font-bold">{sim.days_changed}</span> of {sim.days_examined} recorded

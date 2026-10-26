@@ -94,7 +94,7 @@ const TRACKED_FIELDS = new Set([
   'payroll_group', 'salary_template', 'shift_code', 'attendance_policy_group',
   'weekly_off_pattern', 'holiday_calendar', 'base_salary',
   'bank_name', 'bank_account', 'bank_ifsc', 'bank_branch', 'bank_account_holder',
-  'bank_account_type',
+  'bank_account_type', 'attendance_active', 'payroll_active',
 ]);
 
 // Values that identify one person (EMPLOYEE_DUPLICATE_FIELDS) — checked on blur.
@@ -170,6 +170,9 @@ const toForm = (data) => {
   f.current_address = blankAddress(data.current_address);
   f.permanent_address = blankAddress(data.permanent_address);
   f.permanent_same_as_current = !!data.permanent_same_as_current;
+  // FRD §4 activation: unset reads as active, which is what it has always meant.
+  f.attendance_active = data.attendance_active !== false;
+  f.payroll_active = data.payroll_active !== false;
   f.weekly_off_pattern = Array.isArray(data.weekly_off_pattern) ? data.weekly_off_pattern : [];
   f.custom_fields = { ...(data.custom_fields || {}) };
   return f;
@@ -993,6 +996,17 @@ const EmployeeProfile = () => {
             <ListField id="p-attpol" label="Attendance policy group" {...bindList('attendance_policy_group')} />
             <ListField id="p-holcal" label="Holiday calendar" {...bindList('holiday_calendar')} />
           </Row>
+          {/* FRD §4 "Employee is activated for Attendance and Payroll". */}
+          <div className="flex flex-wrap gap-x-6 gap-y-2">
+            {[['attendance_active', 'Active for attendance'], ['payroll_active', 'Active for payroll']]
+              .map(([key, label]) => (
+                <label key={key} className="flex items-center gap-2 text-[12.5px] text-[var(--text-main)]">
+                  <input type="checkbox" checked={!!form[key]} disabled={!canWrite}
+                    onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.checked }))} />
+                  {label}
+                </label>
+              ))}
+          </div>
           <p className="text-[11px] text-[var(--text-muted)] -mt-3">
             Shifts are managed under Attendance ▸ Shifts.
           </p>
@@ -1156,7 +1170,9 @@ const EmployeeProfile = () => {
                     </span>
                     <span className="text-[13px] font-bold text-[var(--text-main)] truncate">{h.label}</span>
                   </div>
-                  <span className="text-[11.5px] text-[var(--text-muted)]">effective {h.effective_from}</span>
+                  <span className="text-[11.5px] text-[var(--text-muted)]">
+                    effective {h.effective_from}{h.effective_to ? ` to ${h.effective_to}` : ''}
+                  </span>
                 </div>
                 <p className="mt-1.5 text-[12.5px] text-[var(--text-main)] break-words">
                   <span className="text-[var(--text-muted)]">{describe(h.field, h.old_value)}</span>

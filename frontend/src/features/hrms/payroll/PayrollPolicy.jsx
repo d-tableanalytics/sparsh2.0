@@ -33,6 +33,9 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
   const [error, setError] = useState(null);
   const [versions, setVersions] = useState([]);
   const [effectiveFrom, setEffectiveFrom] = useState(TODAY());
+  const [effectiveTo, setEffectiveTo] = useState('');
+  // §26 scope of the drafted version; blank = company-wide.
+  const [scopeText, setScopeText] = useState({ locations: '', grades: '', employment_categories: '', payroll_groups: '' });
   const [reason, setReason] = useState('');
   const { busy, run } = useSubmit(showSuccess, showError, onDone);
 
@@ -70,9 +73,20 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       showError('Say why the payroll policy is changing — the approver needs the reason.');
       return;
     }
+    if (effectiveTo && effectiveTo < effectiveFrom) {
+      showError('Effective to is before effective from.');
+      return;
+    }
+    const list = (text) => String(text || '').split(',').map((v) => v.trim()).filter(Boolean);
+    const approvalAbove = String(form.adjustment_approval_above ?? '').trim();
     run(() => savePayrollPolicy({
       effective_from: effectiveFrom,
+      effective_to: effectiveTo || null,
+      scope: Object.fromEntries(Object.entries(scopeText).map(([k, v]) => [k, list(v)])),
       change_reason: reason.trim(),
+      excluded_employee_categories: list(form.excluded_text ?? (form.excluded_employee_categories || []).join(', ')),
+      enforce_input_cutoff: !!form.enforce_input_cutoff,
+      adjustment_approval_above: approvalAbove === '' ? null : Number(approvalAbove),
       require_attendance_lock: !!form.require_attendance_lock,
       variance_threshold_percent: variance,
       structure_approval_required: !!form.structure_approval_required,
@@ -84,7 +98,7 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       checker_required: !!form.checker_required,
       approver_distinct_from_checker: !!form.approver_distinct_from_checker,
       lock_cap: form.lock_cap || 'payroll.approve',
-    }, scope), 'Drafted for approval — activate it in Configuration Approvals.');
+    }, scope), 'Drafted as a change request — open it in Configuration Approvals (Draft) and send it for approval.');
   };
 
   const check = (key, label, hint) => (
@@ -155,6 +169,22 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
             The cut-off day is the last day of the month inputs (PF, tax, one-off lines) are
             expected. A net-pay change beyond the threshold shows as a warning on that employee.
           </p>
+          {check('enforce_input_cutoff', 'Enforce the input cut-off',
+            'After the cut-off day of the payroll month, only a payroll approver can change monthly inputs and one-off lines.')}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className={LABEL} htmlFor="pp-adj-limit">One-off lines above this amount need approval</label>
+              <input id="pp-adj-limit" type="number" min="0" step="1" value={form.adjustment_approval_above ?? ''}
+                className={FIELD} disabled={!canEdit} placeholder="Blank = no approval needed"
+                onChange={set('adjustment_approval_above')} />
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="pp-excluded">Categories left out of payroll</label>
+              <input id="pp-excluded" className={FIELD} disabled={!canEdit} placeholder="e.g. Consultant, Intern"
+                value={form.excluded_text ?? (form.excluded_employee_categories || []).join(', ')}
+                onChange={set('excluded_text')} />
+            </div>
+          </div>
 
           {/* FRD §12 stages 7-10 / §19 "Payroll Approval Matrix". Who performs each stage is
               a setting because the FRD leaves the exact approvers unconfirmed. */}
@@ -201,10 +231,33 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
                     onChange={(e) => setEffectiveFrom(e.target.value)} />
                 </div>
                 <div>
+                  <label className={LABEL} htmlFor="pp-eff-to">Effective to (optional)</label>
+                  <input id="pp-eff-to" type="date" value={effectiveTo} className={FIELD}
+                    onChange={(e) => setEffectiveTo(e.target.value)} />
+                </div>
+                <div className="sm:col-span-2">
                   <label className={LABEL} htmlFor="pp-reason">Why (business reason)</label>
                   <input id="pp-reason" value={reason} className={FIELD}
                     placeholder="Required — the approver reads this"
                     onChange={(e) => setReason(e.target.value)} />
+                </div>
+              </div>
+              <div>
+                <p className={LABEL}>Applies to (blank = everyone)</p>
+                <p className="text-[11px] text-[var(--text-muted)] mb-2">
+                  Comma-separated values. Rounding, the sandwich rule and salary approval follow
+                  the scope; run-wide settings (cut-off, approvals) stay company-wide.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {[['locations', 'Locations'], ['grades', 'Grades'],
+                    ['employment_categories', 'Employee categories'], ['payroll_groups', 'Payroll groups']]
+                    .map(([k, l]) => (
+                      <div key={k}>
+                        <label className={LABEL} htmlFor={`pp-scope-${k}`}>{l}</label>
+                        <input id={`pp-scope-${k}`} className={FIELD} value={scopeText[k]}
+                          onChange={(e) => setScopeText((s) => ({ ...s, [k]: e.target.value }))} />
+                      </div>
+                    ))}
                 </div>
               </div>
             </div>

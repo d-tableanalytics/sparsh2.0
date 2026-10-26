@@ -348,6 +348,32 @@ async def save_permission(actor: dict, company_id: str, cap_value: str, payload:
     return await list_permissions(company_id)
 
 
+async def get_admin_payroll_setting(company_id: str) -> dict:
+    doc = await get_collection(COLL_PERMISSION_POLICIES).find_one(
+        {"company_id": str(company_id), "cap": policy.ADMIN_PAYROLL_RULE}) or {}
+    return {"restricted": bool(doc.get("restricted")),
+            "allow_users": await _names(company_id, doc.get("allow_users"))}
+
+
+async def save_admin_payroll_setting(actor: dict, company_id: str, payload: dict) -> dict:
+    """FRD §17 System Admin: turn on "no automatic entitlement to payroll-sensitive values"
+    for the superadmin, naming anyone explicitly granted."""
+    allow = [str(u) for u in (payload.get("allow_users") or []) if str(u).strip()]
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_PERMISSION_POLICIES).update_one(
+        {"company_id": str(company_id), "cap": policy.ADMIN_PAYROLL_RULE},
+        {"$set": {"restricted": bool(payload.get("restricted")), "allow_users": allow,
+                  "updated_by": str(actor.get("_id") or ""),
+                  "updated_by_name": actor.get("full_name") or actor.get("email"),
+                  "updated_at": now}},
+        upsert=True)
+    await audit(actor, AUDIT_PERMISSION_CHANGED, ENTITY_PERMISSION, policy.ADMIN_PAYROLL_RULE,
+                f"restricted: {bool(payload.get('restricted'))}; granted: {len(allow)}",
+                company_id)
+    await policy.refresh(str(company_id), force=True)
+    return await get_admin_payroll_setting(company_id)
+
+
 async def reset_permission(actor: dict, company_id: str, cap_value: str) -> dict:
     """Back to the default for one action (the company's rule is deleted)."""
     cap = _cap(cap_value)

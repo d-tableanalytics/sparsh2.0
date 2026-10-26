@@ -3315,6 +3315,10 @@ class EmployeeProfileIn(BaseModel):
     current_address: Optional[dict] = None
     permanent_address: Optional[dict] = None
     permanent_same_as_current: Optional[bool] = None
+    # FRD §4 "Employee is activated for Attendance and Payroll". Unset = active, which
+    # is how every employee behaved before the switch existed.
+    attendance_active: Optional[bool] = None
+    payroll_active: Optional[bool] = None
     emergency_contact_alt_phone: Optional[str] = None
     employee_category: Optional[str] = None
     probation_start: Optional[str] = None
@@ -3388,6 +3392,10 @@ class EmployeeProfileUpdate(BaseModel):
     current_address: Optional[dict] = None
     permanent_address: Optional[dict] = None
     permanent_same_as_current: Optional[bool] = None
+    # FRD §4 "Employee is activated for Attendance and Payroll". Unset = active, which
+    # is how every employee behaved before the switch existed.
+    attendance_active: Optional[bool] = None
+    payroll_active: Optional[bool] = None
     emergency_contact_alt_phone: Optional[str] = None
     employee_category: Optional[str] = None
     probation_start: Optional[str] = None
@@ -3526,7 +3534,7 @@ EMPLOYEE_TRACKED_FIELDS = (
     "payroll_group", "salary_template", "shift_code", "attendance_policy_group",
     "weekly_off_pattern", "holiday_calendar", "base_salary",
     "bank_name", "bank_account", "bank_ifsc", "bank_branch", "bank_account_holder",
-    "bank_account_type",
+    "bank_account_type", "attendance_active", "payroll_active",
 )
 # Never echoed in full to someone without sensitive-data access (FRD §18).
 EMPLOYEE_MASKED_FIELDS = ("bank_account", "pan", "aadhaar", "passport")
@@ -3566,6 +3574,8 @@ class FieldDataType(str, Enum):
 
 class FieldStatus(str, Enum):
     DRAFT = "Draft"
+    APPROVED = "Approved"   # §22 lifecycle: signed off by someone other than its author,
+                            # not yet live -- takes no values until it is Active
     ACTIVE = "Active"
     RETIRED = "Retired"
 
@@ -3611,6 +3621,13 @@ class FieldDefinitionIn(BaseModel):
     pattern_message: Optional[str] = None
     min_date: Optional[str] = None
     max_date: Optional[str] = None
+    # §22 "dependent validation": {"field": <code>, "equals": [values], "rule": "required" |
+    # "only"} -- required when / allowed only when another field (custom or profile) holds
+    # one of those values. None = no dependency.
+    depends_on: Optional[dict] = None
+    # §21 Attendance Fields "source mapping": the column of the attendance import file that
+    # fills this field (attendance module only). None = entered by hand.
+    source_column: Optional[str] = None
     display_order: int = 100
     applicability: dict = {}                   # {departments, locations, grades, ...: [values]}
     effective_from: Optional[str] = None
@@ -3708,12 +3725,18 @@ ATTENDANCE_POLICY_RULES = {
         # §23 Late Coming
         "daily_grace_minutes": None,            # None = inherit the shift / company policy
         "monthly_buffer_minutes": None,
+        "late_escalation_days": None,           # "escalation threshold": late days a month
+                                                # that flag the person (None = off). Reported,
+                                                # never a status or payroll change.
         # §23 Early Going
         "early_going_grace_minutes": None,
         # §23 Half Day
         "half_day_threshold_minutes": None,
         "half_day_late_minutes": None,          # the §23 "late/early combination" rule
         "half_day_early_minutes": None,
+        "half_day_exception_types": None,       # "approved exception treatment": approved
+                                                # request types that waive a late/early
+                                                # half day (None = never waived)
         # §23 Absent
         "absent_threshold_minutes": None,
         "absent_on_no_out_punch": False,
@@ -6068,6 +6091,8 @@ DEFAULT_DOCUMENT_TYPES = [
     ("Bank Proof",            DocumentCategory.STATUTORY,      "employee",  True,  False, False),
     ("Offer Letter Signed",   DocumentCategory.COMPANY_ISSUED, "candidate", False, False, False),
     ("Appointment Letter",    DocumentCategory.COMPANY_ISSUED, "candidate", False, False, False),
+    # FRD §3 Documents lists PSC by name. Not mandatory: the FRD does not say it is.
+    ("PSC",                   DocumentCategory.PSC,            "employee",  False, False, False),
 ]
 
 AUDIT_DOCUMENT_UPLOADED  = "document uploaded"
@@ -9051,7 +9076,7 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                                        else 0.5)))
 
     def _result(status, worked, late, early, grace_applied, missing_out=False,
-                half_day_reason=None):
+                half_day_reason=None, half_day_basis=None):
         payable_day = {AttendanceStatus.PRESENT.value: 1.0,
                        AttendanceStatus.HALF_DAY.value: half_pay}.get(status, 0.0)
         payable_minutes = max(0, min(worked - (break_minutes or 0), scheduled_minutes)) \
@@ -9063,6 +9088,9 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                 "scheduled_minutes": scheduled_minutes,
                 "payable_day": payable_day, "lop_fraction": round(1 - payable_day, 2),
                 "missing_out_punch": missing_out,
+                # WHICH rule cut it to half (hours, min_hours, late, early), so an approved
+                # exception can waive the late/early ones and nothing else.
+                "half_day_basis": half_day_basis,
                 # WHY a day was cut to half, when a combination rule did it. Without this
                 # the employee sees a half day they cannot account for: the hours worked
                 # look fine, because they were.
@@ -9090,27 +9118,29 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
     out_m = _mins(actual_out)
     worked_minutes = max(0, out_m - in_m)
     early_minutes = max(0, sched_out_m - out_m - (early_going_grace_minutes or 0))
-    reason = None
+    reason = basis = None
     if absent_threshold_minutes and worked_minutes < absent_threshold_minutes:
         status = AttendanceStatus.ABSENT.value
     elif worked_minutes < half_day_threshold_minutes:
         status = AttendanceStatus.HALF_DAY.value
-        reason = "worked less than the half-day threshold"
+        reason, basis = "worked less than the half-day threshold", "hours"
     elif min_hours and worked_minutes < float(min_hours) * 60:
         status = AttendanceStatus.HALF_DAY.value
-        reason = "worked less than the minimum hours"
+        reason, basis = "worked less than the minimum hours", "min_hours"
     # §23 Half Day, "late/early combinations": checked AFTER the hours tests, so a day that
     # already failed on hours keeps that reason — the more specific explanation wins.
     elif half_day_late_minutes and late_minutes >= int(half_day_late_minutes):
         status = AttendanceStatus.HALF_DAY.value
         reason = f"arrived {late_minutes} min late (half day at {half_day_late_minutes})"
+        basis = "late"
     elif half_day_early_minutes and early_minutes >= int(half_day_early_minutes):
         status = AttendanceStatus.HALF_DAY.value
         reason = f"left {early_minutes} min early (half day at {half_day_early_minutes})"
+        basis = "early"
     else:
         status = AttendanceStatus.PRESENT.value
     return _result(status, worked_minutes, late_minutes, early_minutes, grace_applied,
-                   half_day_reason=reason)
+                   half_day_reason=reason, half_day_basis=basis)
 
 
 ENTITY_ATTENDANCE   = "attendance"
@@ -9166,7 +9196,13 @@ class RegularizationIn(BaseModel):
     proposed_in: Optional[str] = None
     proposed_out: Optional[str] = None
     reason: str
-    evidence: Optional[str] = None               # a link; base64 uploads use the document register
+    evidence: Optional[str] = None               # a link or reference
+    # §5 / §6 "supporting evidence" / "attachment": a file, stored by key (never a URL).
+    evidence_file: Optional[dict] = None         # {name, mime_type, data (base64)}
+    # §23 request types. The service has validated this since the types became
+    # configurable, but the model dropped it -- so a company that configured types had
+    # every request refused.
+    request_type: Optional[str] = None
 
 
 class RegularizationActionIn(BaseModel):
@@ -9880,6 +9916,21 @@ class PayrollPolicyIn(BaseModel):
     net_rounding: Optional[RoundingRule] = None
     # LOP "sandwich" rule (FRD §23 LOP): a weekly off / holiday between LOP days is LOP.
     sandwich_weekly_off: Optional[bool] = None
+    # FRD §12 / §19 approval matrix. The screen always sent these; without them here the
+    # route dropped them silently and the matrix could only be set through the API.
+    checker_required: Optional[bool] = None
+    checker_cap: Optional[str] = None
+    approver_cap: Optional[str] = None
+    lock_cap: Optional[str] = None
+    approver_distinct_from_checker: Optional[bool] = None
+    # §21 "eligibility"; §19 cut-off; §10 "approval where needed". All off by default.
+    excluded_employee_categories: Optional[list[str]] = None
+    enforce_input_cutoff: Optional[bool] = None
+    adjustment_approval_above: Optional[float] = None
+    # §26 Effective To and Scope for the drafted version. Like the two below, they describe
+    # the VERSION, not a rule, so neither reaches `rules`.
+    effective_to: Optional[str] = None
+    scope: Optional[dict] = None
     # §21 "with versioning" / §27 Effective Dating. A payroll policy change is a GOVERNED
     # change, so the screen has to collect the two things a governed change cannot be
     # raised without: when it starts and why it is wanted. Neither is a policy rule, so
@@ -9920,6 +9971,14 @@ DEFAULT_PAYROLL_POLICY = {
     # Stage 9 may not be performed by the stage-8 checker. Separate from the maker/checker
     # rule, which is never optional.
     "approver_distinct_from_checker": True,
+    # §21 eligibility: employee categories left out of the run (e.g. paid elsewhere).
+    "excluded_employee_categories": [],
+    # §19 "Monthly Cut-off": refuse monthly input edits after `input_cutoff_day` of the
+    # payroll month unless the actor can approve payroll. Off = the day is advisory.
+    "enforce_input_cutoff": False,
+    # §10 Manual Adjustment "approval where needed": one-off lines above this amount wait
+    # for a second person's approval before the run can be submitted. None = never.
+    "adjustment_approval_above": None,
 }
 # ── Which payroll policy keys are resolved ONCE, and which PER EMPLOYEE ─────────────
 # A PAY_POLICY version can be scoped (grade, location, category, payroll group), and a
@@ -9945,7 +10004,8 @@ DEFAULT_PAYROLL_POLICY = {
 PAYROLL_POLICY_RUN_LEVEL_KEYS = frozenset({
     "require_attendance_lock", "payslip_release", "variance_threshold_percent",
     "input_cutoff_day", "checker_required", "checker_cap", "approver_cap", "lock_cap",
-    "approver_distinct_from_checker",
+    "approver_distinct_from_checker", "excluded_employee_categories", "enforce_input_cutoff",
+    "adjustment_approval_above",
 })
 PAYROLL_POLICY_EMPLOYEE_LEVEL_KEYS = frozenset({
     "net_rounding", "sandwich_weekly_off", "structure_approval_required",

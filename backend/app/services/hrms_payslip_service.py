@@ -237,10 +237,23 @@ def _compose_from_lines(record: dict, *, period: str, run_status: Optional[str],
             out["full_amount"] = round(float(full), 2)
         return out
 
+    # FRD §14 Deductions "LOP": with the template's lop_as_deduction on, earnings show at
+    # their full amount and the days lost appear as ONE deduction line instead of inside
+    # each earning. Net pay is the same either way -- only where the LOP is shown moves.
+    lop_line = bool(template.get("lop_as_deduction")) and float(record.get("lop_days") or 0) > 0
+    lop_amount = 0.0
     earnings, other_earnings, deductions, employer = [], [], [], []
     for line in record.get("lines") or []:
         section = line.get("section") or PayslipSection.REGULAR_EARNINGS.value
-        r = row(line.get("name") or line.get("code"), line.get("amount"), line.get("full_amount"))
+        amount = line.get("amount")
+        earning = section not in (PayslipSection.EMPLOYER.value, PayslipSection.DEDUCTIONS.value,
+                                  PayslipSection.HIDDEN.value) \
+            and line.get("component_type") not in DEDUCTING_TYPES
+        if lop_line and earning and line.get("full_amount") is not None:
+            lop_amount += float(line["full_amount"]) - float(amount or 0)
+            amount = line["full_amount"]
+        r = row(line.get("name") or line.get("code"), amount,
+                None if lop_line and earning else line.get("full_amount"))
         if not r or section == PayslipSection.HIDDEN.value:
             continue
         if section == PayslipSection.EMPLOYER.value:
@@ -280,8 +293,12 @@ def _compose_from_lines(record: dict, *, period: str, run_status: Optional[str],
         elif ctype != ComponentType.INFORMATIONAL.value:
             other_earnings.append(r)
 
+    lop_amount = round(lop_amount, 2)
+    if lop_line and lop_amount > 0:
+        deductions.insert(0, {"label": f'Loss of Pay ({record["lop_days"]} day(s))',
+                              "amount": lop_amount})
     proration_note = None
-    if record.get("lop_days"):
+    if record.get("lop_days") and not (lop_line and lop_amount > 0):
         proration_note = (f'Prorated for {record["payable_days"]} of '
                           f'{record["days_in_period"]} payable days '
                           f'({record["lop_days"]} LOP).')
@@ -300,8 +317,11 @@ def _compose_from_lines(record: dict, *, period: str, run_status: Optional[str],
         "other_earnings": other_earnings,
         "deductions": deductions,
         "employer_contributions": employer if template.get("show_employer_contributions") else [],
-        "gross_earnings": record["gross_earnings"],
-        "total_deductions": record["total_deductions"],
+        "gross_earnings": round(float(record["gross_earnings"]) + lop_amount, 2)
+        if lop_line else record["gross_earnings"],
+        "total_deductions": round(float(record["total_deductions"]) + lop_amount, 2)
+        if lop_line else record["total_deductions"],
+        "lop_amount": lop_amount if lop_line else None,
         "total_employer_contributions": record.get("total_employer_contributions"),
         "net_pay": record["net_pay"],
         "net_pay_words": _in_words(record["net_pay"]) if template.get(
@@ -486,6 +506,7 @@ TEMPLATE_DEFAULTS = {
     "company_name": None, "header_note": None, "footer_note": None, "company_address": None,
     "show_lop_days": True, "show_identifiers": True, "show_bank": True,
     "show_employer_contributions": False, "hide_zero_lines": True, "show_net_in_words": True,
+    "lop_as_deduction": False,
     "version": 0,
 }
 
@@ -517,7 +538,8 @@ async def save_payslip_template(actor: dict, company_id: str, payload: dict) -> 
         "company_address": (payload.get("company_address") or "").strip() or None,
     }
     for flag in ("show_lop_days", "show_identifiers", "show_bank",
-                 "show_employer_contributions", "hide_zero_lines", "show_net_in_words"):
+                 "show_employer_contributions", "hide_zero_lines", "show_net_in_words",
+                 "lop_as_deduction"):
         value = payload.get(flag)
         clean[flag] = bool(value) if value is not None else current.get(flag)
     clean.update({"version": int(current.get("version") or 0) + 1,

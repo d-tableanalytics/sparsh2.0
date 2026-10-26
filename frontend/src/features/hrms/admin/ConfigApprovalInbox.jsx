@@ -9,6 +9,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   listConfigChangeRequests, getConfigChangeRequest, decideConfigChangeRequest,
   activateConfigChangeRequest, getGovernedConfigTypes, setGovernedConfigTypes,
+  analyseConfigChangeImpact, runConfigChangeSimulation, submitConfigChangeRequest,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL } from '../internal/internalKit';
 import { Btn, Chip, RecordList } from '../internal/internalKit.jsx';
@@ -121,8 +122,15 @@ const GovernedTypes = ({ scope, canApprove, showSuccess, showError }) => {
   );
 };
 
-const RequestDetail = ({ request, canApprove, busy, onDecide, onActivate }) => {
+// A request is still its drafter's in these states (DRAFTER_STATUSES in the service).
+const DRAFTER_STATUSES = ['Draft', 'Impact Analysed', 'Simulated', 'Returned'];
+
+const RequestDetail = ({ request, canApprove, canDraft, busy, onDecide, onActivate,
+                        onSimulate, onSend }) => {
   const [comments, setComments] = useState('');
+  const [simPeriod, setSimPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const drafting = DRAFTER_STATUSES.includes(request.status);
+  const simulable = request.entity_type !== 'field_definition';
   const impact = request.impact || {};
   const change = request.definition_change || {};
   const pending = request.status === 'Pending Approval';
@@ -149,6 +157,12 @@ const RequestDetail = ({ request, canApprove, busy, onDecide, onActivate }) => {
             {impact.total_employees ?? '—'} employees
             {impact.effective_from ? ` · effective ${impact.effective_from}` : ''}
           </p>
+          {impact.periods && (
+            <p className="text-[12px] text-[var(--text-main)]">
+              Periods from {impact.periods.from}: open {impact.periods.open?.join(', ') || 'none'}
+              {' '}· closed {impact.periods.closed?.join(', ') || 'none'}
+            </p>
+          )}
           {(impact.warnings || []).map((w) => (
             <p key={w} className="text-[12px] text-[var(--accent-red)] flex items-start gap-1.5">
               <AlertTriangle size={14} className="shrink-0 mt-0.5" /> {w}
@@ -204,6 +218,28 @@ const RequestDetail = ({ request, canApprove, busy, onDecide, onActivate }) => {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* §27: the drafter moves their own request on -- impact, simulation, submit. */}
+      {canDraft && drafting && (
+        <div className="flex flex-wrap items-end gap-2 pt-1">
+          {simulable && (
+            <>
+              <div>
+                <label className={LABEL} htmlFor={`simp-${request.request_no}`}>Simulate against</label>
+                <input id={`simp-${request.request_no}`} type="month" value={simPeriod} className={FIELD}
+                  onChange={(e) => setSimPeriod(e.target.value)} />
+              </div>
+              <Btn disabled={busy} onClick={() => onSimulate(request.request_no, simPeriod)}>
+                Run simulation
+              </Btn>
+            </>
+          )}
+          <Btn tone="primary" disabled={busy}
+            onClick={() => onSend(request.request_no, simulable ? simPeriod : null)}>
+            Send for approval
+          </Btn>
         </div>
       )}
 
@@ -265,6 +301,7 @@ const ConfigApprovalInbox = () => {
   const [error, setError] = useState(null);
 
   const canApprove = can(CAP.CONFIG_APPROVE);
+  const canDraft = can(CAP.CONFIG_DRAFT);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -318,6 +355,18 @@ const ConfigApprovalInbox = () => {
       `Change ${action === 'approve' ? 'approved' : `${action}ed`}.`, requestNo);
   };
 
+  const onSimulate = (requestNo, period) =>
+    act(() => runConfigChangeSimulation(requestNo, { ...scope, period }),
+      'Simulation recorded on the request.', requestNo);
+
+  // Request -> Impact -> (Simulation) -> Pending Approval, in one step for the drafter.
+  const onSend = (requestNo, period) =>
+    act(async () => {
+      await analyseConfigChangeImpact(requestNo, scope);
+      if (period) await runConfigChangeSimulation(requestNo, { ...scope, period });
+      await submitConfigChangeRequest(requestNo, scope);
+    }, 'Sent for approval — someone else approves it here.', requestNo);
+
   const onActivate = (requestNo) =>
     act(() => activateConfigChangeRequest(requestNo, scope),
       'Change activated — it is now live configuration.', requestNo);
@@ -364,6 +413,7 @@ const ConfigApprovalInbox = () => {
         <select id="cfg-status" value={status} className={FIELD}
           onChange={(e) => setStatus(e.target.value)}>
           <option value="Pending Approval">Pending approval</option>
+          <option value="Draft">Draft — not yet sent</option>
           <option value="Approved">Approved, not yet active</option>
           <option value="Returned">Returned</option>
           <option value="Active">Active</option>
@@ -388,8 +438,9 @@ const ConfigApprovalInbox = () => {
           {openNo && (
             <div className="rounded-lg border border-[var(--border)] px-3.5 py-3">
               {detail
-                ? <RequestDetail request={detail} canApprove={canApprove} busy={busy}
-                    onDecide={onDecide} onActivate={onActivate} />
+                ? <RequestDetail request={detail} canApprove={canApprove} canDraft={canDraft}
+                    busy={busy} onDecide={onDecide} onActivate={onActivate}
+                    onSimulate={onSimulate} onSend={onSend} />
                 : <HrmsLoading label="Opening…" />}
             </div>
           )}

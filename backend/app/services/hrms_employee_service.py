@@ -29,6 +29,7 @@ Reads are broad but scoped, writes are narrow:
   EMPLOYEE          themselves only (via the self route; not a capability, so it cannot
                     be revoked by a permission edit)
 """
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -266,6 +267,9 @@ def _validate_master_fields(payload: dict, out: dict) -> None:
             out[field] = _clean_address(payload[field], label)
     if "permanent_same_as_current" in payload:
         out["permanent_same_as_current"] = bool(payload["permanent_same_as_current"])
+    for field in ("attendance_active", "payroll_active"):
+        if payload.get(field) is not None:
+            out[field] = bool(payload[field])
     if out.get("permanent_same_as_current") and out.get("current_address"):
         out["permanent_address"] = dict(out["current_address"])
 
@@ -392,7 +396,7 @@ def _compose(user: Optional[dict], profile: Optional[dict], *, departments: dict
                   + tuple(f for f, _ in EMAIL_FIELDS) + tuple(f for f, _ in MOBILE_FIELDS)
                   + ("marital_status", "bank_account_type", "current_address",
                      "permanent_address", "permanent_same_as_current", "shift_code",
-                     "weekly_off_pattern", "unit")):
+                     "weekly_off_pattern", "unit", "attendance_active", "payroll_active")):
         view.setdefault(field, profile.get(field))
     for field in ("first_name", "last_name"):
         if not view.get(field):
@@ -506,8 +510,14 @@ async def _manager_scope(actor: dict, company_id: str) -> dict:
 async def list_employees(actor: dict, company_id: str, *, search: str = None,
                          department_id: str = None, designation_id: str = None,
                          status: str = None, include_inactive: bool = False,
-                         limit: int = 200, skip: int = 0) -> dict:
-    """The employee directory, scoped to what `actor` may see."""
+                         limit: int = 200, skip: int = 0,
+                         custom_filters: Optional[dict] = None) -> dict:
+    """The employee directory, scoped to what `actor` may see.
+
+    FRD §22 Behaviour / Display: a configurable field flagged Searchable is matched by the
+    search box, one flagged Filterable can be filtered on (`custom_filters`), and one
+    flagged Show-in-list comes back as a directory column. Sensitive fields never do.
+    """
     if not company_id:
         raise HTTPException(
             status_code=400,
@@ -521,15 +531,37 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
     if not include_inactive:
         query["is_active"] = {"$ne": False}
 
+    from app.models.hrms import COLL_FIELD_DEFINITIONS
+    live_defs = await get_collection(COLL_FIELD_DEFINITIONS).find(
+        {"company_id": str(company_id), "module": "employee", "status": "Active"},
+        {"_id": 0, "code": 1, "label": 1, "searchable": 1, "filterable": 1, "show_in_list": 1,
+         "sensitive": 1, "options": 1, "display_order": 1}).to_list(500)
+    live_defs.sort(key=lambda d: (d.get("display_order") or 100, d.get("code") or ""))
+
     if search:
         safe = _escape_regex(search.strip())
-        query["$and"] = [{"$or": [
+        alternatives = [
             {"full_name": {"$regex": safe, "$options": "i"}},
             {"first_name": {"$regex": safe, "$options": "i"}},
             {"last_name": {"$regex": safe, "$options": "i"}},
             {"email": {"$regex": safe, "$options": "i"}},
             {"mobile": {"$regex": safe, "$options": "i"}},
-        ]}]
+        ]
+        searchable = [d["code"] for d in live_defs if d.get("searchable") and not d.get("sensitive")]
+        if searchable:
+            hits = await get_collection(COLL_EMPLOYEE_PROFILES).find(
+                {"company_id": str(company_id), "$or": [
+                    {f"custom_fields.{c}": {"$regex": safe, "$options": "i"}} for c in searchable]},
+                {"user_id": 1}).to_list(5000)
+            hit_ids = []
+            for h in hits:
+                try:
+                    hit_ids.append(ObjectId(h["user_id"]))
+                except (InvalidId, TypeError, KeyError):
+                    continue
+            if hit_ids:
+                alternatives.append({"_id": {"$in": hit_ids}})
+        query["$and"] = [{"$or": alternatives}]
 
     if hrms_role(actor) == HrmsRole.MANAGER:
         scope = await _manager_scope(actor, company_id)
@@ -544,6 +576,13 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
         profile_filter["designation_id"] = designation_id
     if status:
         profile_filter["employment_status"] = status
+    filterable = {d["code"] for d in live_defs if d.get("filterable")}
+    for code, value in (custom_filters or {}).items():
+        if code not in filterable:
+            raise HTTPException(status_code=422,
+                                detail=f"'{code}' is not a filterable field.")
+        if str(value).strip():
+            profile_filter[f"custom_fields.{code}"] = str(value).strip()
     if len(profile_filter) > 1:
         matched = await get_collection(COLL_EMPLOYEE_PROFILES).find(
             profile_filter, {"user_id": 1}).to_list(5000)
@@ -617,8 +656,25 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
 
     rows.sort(key=lambda r: (r.get("name") or "").lower())
 
+    # §22 Display "grid / list visibility": the Show-in-list fields as directory columns.
+    columns = [{"code": d["code"], "label": d["label"]} for d in live_defs
+               if d.get("show_in_list") and not d.get("sensitive")]
+    if columns:
+        by_user = {**{str(k): v for k, v in profiles.items()}}
+        extra = {p.get("employee_code"): p for p in list(unlinked) + list(orphaned)}
+        for row in rows:
+            source_profile = by_user.get(str(row.get("user_id") or row.get("id") or "")) \
+                or extra.get(row.get("employee_code")) or {}
+            values = source_profile.get("custom_fields") or {}
+            row["list_fields"] = {c["code"]: values.get(c["code"]) for c in columns}
+
     return {
         "employees": rows,
+        "list_columns": columns,
+        "filterable_fields": [
+            {"code": d["code"], "label": d["label"],
+             "options": [o["value"] for o in d.get("options") or [] if o.get("active", True)]}
+            for d in live_defs if d.get("filterable")],
         "total": total + len(unlinked) + len(orphaned),
         "limit": limit,
         "skip": skip,
@@ -845,8 +901,15 @@ async def get_employee_by_code(actor: dict, company_id: str,
                               include_salary=include_salary)
 
 
-async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
-    """Create the HR profile for an existing user."""
+async def create_profile(actor: dict, company_id: str, payload: dict, *,
+                         dry_run: bool = False) -> dict:
+    """Create the HR profile for an existing user.
+
+    `dry_run` runs every check below and returns what WOULD be created without writing
+    anything -- not even an employee number, which is why an auto-numbered row previews
+    with no code. The import preview is built on it, so a file is judged by exactly the
+    rules a hand-entered employee is.
+    """
     user_id = str(payload.get("user_id") or "")
     if not user_id:
         raise HTTPException(status_code=422, detail="A user must be selected.")
@@ -891,8 +954,13 @@ async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
     if code:
         if await profiles.find_one({"company_id": str(company_id), "employee_code": code}):
             raise HTTPException(status_code=409, detail=f"Employee code '{code}' is already in use.")
+    elif dry_run:
+        code = None
     else:
-        code = await next_business_id("employee", str(company_id), datetime.now(timezone.utc).year)
+        from app.services.hrms_employee_master_service import next_employee_code
+        code = await next_employee_code(str(company_id), datetime.now(timezone.utc).year)
+    if dry_run:
+        return {"user_id": user_id, "name": _display_name(user), "employee_code": code}
 
     doc = {
         "user_id": user_id,
@@ -1110,6 +1178,184 @@ async def get_hierarchy(actor: dict, user_id: str, company_id: str) -> dict:
         ],
         "report_count": len(reports),
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# FRD §4 — "HR creates or IMPORTS the employee record"
+# ─────────────────────────────────────────────────────────────
+MAX_IMPORT_ROWS = 500
+IMPORT_EMAIL_COLUMNS = ("email", "user_email", "login_email")
+# Columns HR can fill with what they know -- a name or an email -- instead of an internal id.
+IMPORT_LOOKUP_COLUMNS = ("department", "designation", "reporting_manager_email",
+                         "functional_manager_email")
+# Read as dd/mm/yyyy, dd-Mon-yyyy etc. as well as ISO -- a spreadsheet rarely says ISO.
+IMPORT_DATE_FIELDS = {f for f, _label in EMPLOYEE_DATE_FIELDS} | {
+    "date_of_birth", "joined_on", "resigned_on", "effective_from"}
+IMPORT_TEMPLATE_COLUMNS = (
+    "email", "employee_code", "first_name", "middle_name", "last_name", "display_name",
+    "gender", "date_of_birth", "marital_status", "blood_group", "nationality",
+    "personal_mobile", "official_mobile", "personal_email", "official_email",
+    "current_address.line1", "current_address.line2", "current_address.city",
+    "current_address.district", "current_address.state", "current_address.pin_code",
+    "current_address.country", "permanent_same_as_current",
+    "emergency_contact_name", "emergency_contact_relation", "emergency_contact_phone",
+    "joined_on", "employee_category", "employment_status", "employment_type",
+    "probation_start", "probation_end", "confirmation_date",
+    "legal_entity", "business_unit", "work_location", "department", "sub_department",
+    "designation", "grade", "level", "job_title", "cost_centre",
+    "reporting_manager_email", "functional_manager_email",
+    "shift_code", "attendance_policy_group", "weekly_off_pattern", "holiday_calendar",
+    "bank_name", "bank_branch", "bank_account_holder", "bank_account", "bank_ifsc",
+    "bank_account_type", "pan", "aadhaar", "uan", "pf_number", "esi_number",
+    "passport", "driving_license", "payroll_group", "salary_template",
+)
+
+
+def _import_header(h) -> str:
+    return re.sub(r"[^a-z0-9_.]+", "_", str(h or "").strip().lower()).strip("_")
+
+
+def _import_text(value) -> str:
+    """A cell as text: Excel hands numbers back as floats (an account number would read
+    1234567890.0) and dates as datetimes."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+async def _import_lookups(company_id: str) -> dict:
+    by_name = lambda docs: {str(d.get("name") or "").strip().lower(): str(d["_id"])
+                            for d in docs if d.get("name")}
+    return {
+        "department": by_name(await get_collection(COLL_DEPARTMENTS).find(
+            {"company_id": str(company_id)}, {"name": 1}).to_list(2000)),
+        "designation": by_name(await get_collection(COLL_DESIGNATIONS).find(
+            {"company_id": str(company_id)}, {"name": 1}).to_list(2000)),
+    }
+
+
+async def _user_by_email(company_id: str, email: str) -> Optional[dict]:
+    source, query = await _identity_source(company_id)
+    return await get_collection(source).find_one(
+        {**query, "email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}}, {"_id": 1})
+
+
+async def _import_payload(company_id: str, values: dict, known: dict, lookups: dict) -> dict:
+    """One row's cells as an EmployeeProfileIn payload. Dotted headers fill an address
+    (`current_address.city`), `custom.<code>` fills a configurable field, and the lookup
+    columns are resolved to the ids the profile stores."""
+    from app.services.hrms_attendance_rules_service import _parse_date
+    payload, custom = {}, {}
+    for header, raw in values.items():
+        text = _import_text(raw)
+        if header.startswith("custom."):
+            custom[header[7:]] = text
+        elif header in ("department", "designation"):
+            found = lookups[header].get(text.lower())
+            if not found:
+                raise HTTPException(status_code=422,
+                                    detail=f"No {header} called '{text}' in this company.")
+            payload[f"{header}_id"] = found
+        elif header in ("reporting_manager_email", "functional_manager_email"):
+            manager = await _user_by_email(company_id, text)
+            if not manager:
+                raise HTTPException(status_code=422,
+                                    detail=f"No user account with email {text} for the "
+                                           f"{header.split('_')[0]} manager.")
+            payload[header.replace("_email", "_id")] = str(manager["_id"])
+        elif "." in header and header.split(".", 1)[0] in known:
+            parent, child = header.split(".", 1)
+            payload.setdefault(parent, {})[child] = text
+        elif header in known:
+            if header in IMPORT_DATE_FIELDS:
+                text = _parse_date(raw) or text
+            elif "list" in str(known[header].annotation):
+                text = [p.strip() for p in re.split(r"[;,]", text) if p.strip()]
+            payload[header] = text
+    if custom:
+        payload["custom_fields"] = custom
+    return payload
+
+
+async def import_profiles(actor: dict, company_id: str, filename: str, raw: bytes, *,
+                          commit: bool) -> dict:
+    """Read an employee file and preview it (commit=False) or create its rows (commit=True).
+
+    Each row names an EXISTING user account by email -- the same rule Add Employee follows,
+    because identity lives on the user and is never duplicated onto the profile -- and goes
+    through `create_profile` itself, so duplicate, master-list, custom-field and numbering
+    checks are the ones a hand-entered employee meets. Rows stand alone: one bad row is
+    reported, the rest still load.
+    """
+    from pydantic import ValidationError
+    from app.models.hrms import EmployeeProfileIn
+    from app.services.hrms_attendance_rules_service import read_rows
+    if not str(filename or "").lower().endswith((".csv", ".xlsx", ".xlsm")):
+        raise HTTPException(status_code=415, detail="Upload the employee file as CSV or Excel (.xlsx).")
+    rows = [r for r in read_rows(filename, raw) if any(str(c or "").strip() for c in r)]
+    if len(rows) < 2:
+        raise HTTPException(status_code=422, detail="The file has no employee rows under its header.")
+    if len(rows) - 1 > MAX_IMPORT_ROWS:
+        raise HTTPException(status_code=422,
+                            detail=f"Import at most {MAX_IMPORT_ROWS} employees per file.")
+    headers = [_import_header(h) for h in rows[0]]
+    if not set(headers) & set(IMPORT_EMAIL_COLUMNS):
+        raise HTTPException(status_code=422,
+                            detail="Add an 'email' column: it names the user account each "
+                                   "row is for.")
+    known = {k: f for k, f in EmployeeProfileIn.model_fields.items() if k != "user_id"}
+    usable = set(IMPORT_EMAIL_COLUMNS) | set(IMPORT_LOOKUP_COLUMNS) | set(known)
+    ignored = sorted({h for h in headers if h and h.split(".", 1)[0] not in usable
+                      and not h.startswith("custom.")})
+    lookups = await _import_lookups(company_id)
+
+    seen, results = {}, []
+    for number, row in enumerate(rows[1:], start=2):
+        values = {h: row[i] for i, h in enumerate(headers)
+                  if h and h not in ignored and i < len(row) and str(row[i] or "").strip()}
+        email = next((_import_text(values.pop(h)) for h in IMPORT_EMAIL_COLUMNS
+                      if h in values), "")
+        for h in IMPORT_EMAIL_COLUMNS:
+            values.pop(h, None)
+        result = {"row": number, "email": email}
+        try:
+            if not email:
+                raise HTTPException(status_code=422, detail="No email on this row.")
+            user = await _user_by_email(company_id, email)
+            if not user:
+                raise HTTPException(status_code=404,
+                                    detail=f"No user account with email {email} in this company.")
+            payload = await _import_payload(company_id, values, known, lookups)
+            payload["user_id"] = str(user["_id"])
+            payload = EmployeeProfileIn(**payload).model_dump(exclude_unset=True)
+            # Two rows of one file never meet create_profile's database checks in a preview,
+            # so the file is checked against itself too.
+            for field, label in [("user_id", "user account"), ("employee_code", "employee code")] \
+                    + list(EMPLOYEE_DUPLICATE_FIELDS):
+                value = payload.get(field)
+                if value in (None, ""):
+                    continue
+                key = (field, str(value).strip().lower())
+                if key in seen:
+                    raise HTTPException(status_code=409,
+                                        detail=f"Same {label} as row {seen[key]}.")
+                seen[key] = number
+            made = await create_profile(actor, company_id, payload, dry_run=not commit)
+            result.update(status="Created" if commit else "Ready",
+                          name=made.get("name") or made.get("display_name"),
+                          employee_code=made.get("employee_code"))
+        except HTTPException as e:
+            result.update(status="Error", error=str(e.detail))
+        except ValidationError as e:
+            result.update(status="Error", error="; ".join(
+                f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+                for err in e.errors()[:3]))
+        results.append(result)
+
+    counts = {s: sum(1 for r in results if r["status"] == s) for s in ("Ready", "Created", "Error")}
+    return {"commit": commit, "rows": results, "ignored_columns": ignored, **counts}
 
 
 async def list_linkable_users(actor: dict, company_id: str) -> list:
