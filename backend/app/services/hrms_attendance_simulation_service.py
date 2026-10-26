@@ -161,3 +161,96 @@ async def simulate_day_policy(company_id: str, period: str, *, version_no: int,
         "employees": employees, "changes": changes,
         "simulated_at": datetime.now(timezone.utc),
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# FRD §26 "Draft changes should support preview" -- the two attendance policies that are
+# not judged per day. Neither re-judges anything; each says what the draft would have
+# decided differently about the period's real requests. Writes nothing.
+# ─────────────────────────────────────────────────────────────
+def _regularisation_refusals(request: dict, rules: dict, used_before: int) -> list:
+    reasons = []
+    created = request.get("created_at")
+    window = rules.get("window_days")
+    if window and isinstance(created, datetime) and request.get("work_date"):
+        from datetime import date as _date
+        back = (created.date() - _date.fromisoformat(request["work_date"])).days
+        if back > int(window):
+            reasons.append(f"asked {back} day(s) back; the window is {window}")
+    if rules.get("evidence_required") and not str(request.get("evidence") or "").strip() \
+            and not request.get("evidence_file"):
+        reasons.append("no evidence attached")
+    types = rules.get("request_types")
+    if types and (request.get("request_type") or "") not in types:
+        reasons.append(f"type '{request.get('request_type') or 'none'}' is not allowed")
+    cap = rules.get("max_requests_per_month")
+    if cap and used_before >= int(cap):
+        reasons.append(f"over the monthly cap of {cap}")
+    return reasons
+
+
+async def preview_regularisation_policy(company_id: str, period: str, *, version_no: int,
+                                        employee_codes: Optional[list] = None) -> dict:
+    from app.models.hrms import (COLL_ATTENDANCE_CORRECTIONS, POLICY_ATT_REGULARISATION)
+    from app.services import hrms_policy_version_service as PV
+    from app.services.hrms_attendance_service import regularisation_rules
+    draft = await PV._require_version(company_id, POLICY_ATT_REGULARISATION, int(version_no))
+    start, end = _period_bounds(period)
+    live = await regularisation_rules(company_id, on_date=end)
+    proposed = {**live, **{k: v for k, v in (draft.get("rules") or {}).items() if v is not None}}
+    query = {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end}}
+    if employee_codes:
+        query["employee_code"] = {"$in": list(employee_codes)[:MAX_SAMPLE_EMPLOYEES]}
+    requests = await get_collection(COLL_ATTENDANCE_CORRECTIONS).find(query).to_list(5000)
+    requests.sort(key=lambda r: (r.get("employee_code") or "", str(r.get("created_at") or "")))
+    used, changes = {}, []
+    for r in requests:
+        code = r.get("employee_code")
+        before = used.get(code, 0)
+        was = _regularisation_refusals(r, live, before)
+        now = _regularisation_refusals(r, proposed, before)
+        used[code] = before + 1
+        if bool(was) != bool(now) or was != now:
+            changes.append({"employee_code": code, "work_date": r.get("work_date"),
+                            "request_no": r.get("req_no"), "was_refused": was,
+                            "would_be_refused": now})
+    return {"policy_code": POLICY_ATT_REGULARISATION, "version_no": int(version_no),
+            "period": period, "requests_examined": len(requests),
+            "would_refuse": sum(1 for c in changes if c["would_be_refused"]),
+            "would_allow": sum(1 for c in changes if not c["would_be_refused"]),
+            "changes": changes,
+            "note": "Requests already decided are not reopened; this shows what the draft "
+                    "would have refused at the time they were raised.",
+            "simulated_at": datetime.now(timezone.utc)}
+
+
+async def preview_closure_policy(actor: dict, company_id: str, period: str, *,
+                                 version_no: int) -> dict:
+    from datetime import date as _date
+    from app.models.hrms import POLICY_ATT_CLOSURE
+    from app.services import hrms_policy_version_service as PV
+    from app.services.hrms_attendance_service import closure_rules, closure_dashboard
+    draft = await PV._require_version(company_id, POLICY_ATT_CLOSURE, int(version_no))
+    start, end = _period_bounds(period)
+    live = await closure_rules(company_id, on_date=end)
+    proposed = {**live, **{k: v for k, v in (draft.get("rules") or {}).items() if v is not None}}
+
+    def cutoff(rules):
+        day = int(rules.get("closing_day") or 0)
+        if not rules.get("enforce_cutoff") or not 1 <= day <= 31:
+            return None
+        y, m = int(period[:4]), int(period[5:7])
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        try:
+            return _date(ny, nm, day).isoformat()
+        except ValueError:
+            return _date(ny, nm, 28).isoformat()
+
+    snapshot = await closure_dashboard(actor, company_id, period)
+    pending = sum(int(snapshot.get(k) or 0) for k in
+                  ("pending_regularizations", "pending_od", "pending_leaves"))
+    side = lambda rules: {"cutoff_date": cutoff(rules),  # noqa: E731
+                          "locking_blocked": bool(rules.get("block_pending_requests")) and pending > 0}
+    return {"policy_code": POLICY_ATT_CLOSURE, "version_no": int(version_no), "period": period,
+            "pending_requests": pending, "was": side(live), "now": side(proposed),
+            "simulated_at": datetime.now(timezone.utc)}

@@ -225,21 +225,71 @@ async def _component_impact(company_id: str, request: dict) -> dict:
     }
 
 
+COMPONENT_CALC_KEYS = ("calculation_method", "calculation_base", "percentage", "formula",
+                       "slabs", "proration", "rounding", "frequency", "min_amount",
+                       "max_amount", "rate", "attendance_basis", "applicability",
+                       "effective_from", "effective_to")
+
+
 async def _component_activate(actor: dict, company_id: str, request: dict) -> dict:
-    """Make the drafted component live. The lifecycle is the switch, the same way a policy
-    version's status is: activation here means Active, nothing else moves."""
+    """Make the component live.
+
+    A Draft simply becomes Active. A revision of a LIVE component (staged by
+    hrms_payroll_service._stage_component_change) is applied here and only here: the
+    definition it replaces is kept as a Superseded version (§24 Lifecycle, §25 "Formula has
+    version, effective dates, status and approval"), and the approver recorded is the one
+    who decided the request, not whoever pressed Activate."""
     component = await _component_load(company_id, request)
     now = datetime.now(timezone.utc)
+    pending = dict(component.get("pending_definition") or {})
+    pending.pop("lifecycle", None)
+    updates = {"lifecycle": "Active", "activated_at": now, "updated_at": now,
+               "approved_by": request.get("decided_by"),
+               "approved_by_name": request.get("decided_by_name")}
+    push = {}
+    if pending:
+        version = int(component.get("version") or 1)
+        updates.update({**pending, "version": version + 1, "pending_definition": None,
+                        "pending_reason": None, "pending_request_no": None})
+        push = {
+            "versions": {"version": version, "status": "Superseded",
+                         "definition": {k: component.get(k) for k in COMPONENT_CALC_KEYS},
+                         "superseded_at": now, "superseded_by_request": request.get("request_no")},
+            "history": {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
+                        "reason": request.get("reason"), "via": request.get("request_no"),
+                        "old": {k: component.get(k) for k in pending}, "new": pending},
+        }
     await get_collection(COLL_SALARY_COMPONENTS).update_one(
-        {"_id": component["_id"]},
-        {"$set": {"lifecycle": "Active", "activated_at": now, "updated_at": now}})
+        {"company_id": str(company_id), "code": component["code"]},
+        {"$set": updates, **({"$push": push} if push else {})})
     return await _component_load(company_id, request)
+
+
+async def _component_approve(actor: dict, company_id: str, request: dict) -> None:
+    """§24 lifecycle: a Draft component whose request is approved reads Approved until it
+    is activated. A live one with a staged revision stays Active."""
+    component = await _component_load(company_id, request)
+    if component.get("lifecycle") != "Draft":
+        return
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_SALARY_COMPONENTS).update_one(
+        {"company_id": str(company_id), "code": component["code"], "lifecycle": "Draft"},
+        {"$set": {"lifecycle": "Approved", "approved_by": _actor_id(actor),
+                  "approved_by_name": _actor_name(actor), "approved_at": now,
+                  "updated_at": now}})
 
 
 async def _component_describe(company_id: str, request: dict) -> dict:
     """The old/new definition §30 requires — for a component that means the CALCULATION,
     which is what a reader of the audit actually wants to compare."""
     component = await _component_load(company_id, request)
+    pending = component.get("pending_definition") or {}
+    if pending:
+        keys = sorted(pending)
+        return {"old": {k: component.get(k) for k in keys},
+                "new": {k: pending.get(k) for k in keys},
+                "old_version": component.get("version"),
+                "new_version": int(component.get("version") or 1) + 1}
     keys = ("calculation_method", "calculation_base", "percentage", "formula", "slabs",
             "proration", "rounding", "frequency", "min_amount", "max_amount")
     history = component.get("history") or []
@@ -348,6 +398,21 @@ async def _field_activate(actor: dict, company_id: str, request: dict) -> dict:
     return await _field_load(company_id, request)
 
 
+async def _field_approve(actor: dict, company_id: str, request: dict) -> None:
+    """§22 lifecycle: a Draft field whose request is approved reads Approved until it is
+    activated. A live field with a staged edit stays Active -- its live definition has not
+    changed yet."""
+    definition = await _field_load(company_id, request)
+    if definition.get("status") != FieldStatus.DRAFT.value:
+        return
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_FIELD_DEFINITIONS).update_one(
+        {"_id": definition["_id"], "status": FieldStatus.DRAFT.value},
+        {"$set": {"status": FieldStatus.APPROVED.value, "approved_by": _actor_id(actor),
+                  "approved_by_name": _actor_name(actor), "approved_at": now,
+                  "updated_at": now}})
+
+
 async def _field_describe(company_id: str, request: dict) -> dict:
     """§30's old/new definition -- the staged change against what is live now."""
     definition = await _field_load(company_id, request)
@@ -374,12 +439,14 @@ ENTITY_HANDLERS = {
         "impact": _component_impact,
         "activate": _component_activate,
         "describe": _component_describe,
+        "approve": _component_approve,
     },
     CONFIG_ENTITY_FIELD_DEFINITION: {
         "load": _field_load,
         "impact": _field_impact,
         "activate": _field_activate,
         "describe": _field_describe,
+        "approve": _field_approve,
     },
 }
 
@@ -504,6 +571,35 @@ async def create_request(actor: dict, company_id: str, payload: dict) -> dict:
     return _out(await _require_request(company_id, request_no))
 
 
+async def _periods_reached(company_id: str, request: dict, impact: dict) -> dict:
+    """§27 Impact Analysis "open/closed periods": every month from the change's effective
+    date to this one, split by whether attendance or payroll has already closed it.
+
+    Closed = attendance locked, or payroll at Locked or beyond. Those months keep the
+    figures they were closed with; the approver should know a back-dated change will not
+    reach them.
+    """
+    from app.models.hrms import COLL_ATTENDANCE_LOCKS, COLL_PAYROLL_RUNS, PAYROLL_FINAL_STATUSES
+    today = datetime.now(timezone.utc).strftime("%Y-%m")
+    start = str(request.get("effective_from") or impact.get("effective_from") or "")[:7] or today
+    months, cursor = [], start
+    while cursor <= today and len(months) < 24:
+        months.append(cursor)
+        y, m = int(cursor[:4]), int(cursor[5:7])
+        cursor = f"{y + 1}-01" if m == 12 else f"{y}-{m + 1:02d}"
+    if not months:
+        return {"from": start, "open": [], "closed": []}
+    locked = {d["period"] for d in await get_collection(COLL_ATTENDANCE_LOCKS).find(
+        {"company_id": str(company_id), "period": {"$in": months}, "status": "Locked"},
+        {"period": 1}).to_list(100)}
+    paid = {d["period"] for d in await get_collection(COLL_PAYROLL_RUNS).find(
+        {"company_id": str(company_id), "period": {"$in": months},
+         "status": {"$in": list(PAYROLL_FINAL_STATUSES)}}, {"period": 1}).to_list(100)}
+    closed = [m for m in months if m in locked or m in paid]
+    return {"from": start, "open": [m for m in months if m not in closed], "closed": closed,
+            "attendance_locked": sorted(locked), "payroll_closed": sorted(paid)}
+
+
 async def analyse_impact(actor: dict, company_id: str, request_no: str) -> dict:
     """§27 Impact Analysis — "identifies dependent fields, calculations, employee groups
     and open/closed periods". Stored on the request so an approver reads the same analysis
@@ -514,6 +610,12 @@ async def analyse_impact(actor: dict, company_id: str, request_no: str) -> dict:
                             detail=f"{request_no} is {request['status']} and is no longer "
                                    f"the drafter's to analyse.")
     impact = await _handler(request["entity_type"])["impact"](company_id, request)
+    impact["periods"] = await _periods_reached(company_id, request, impact)
+    if impact["periods"]["closed"]:
+        impact.setdefault("warnings", []).append(
+            f"Reaches {len(impact['periods']['closed'])} closed period(s) "
+            f"({', '.join(impact['periods']['closed'])}) — they are NOT recalculated; a "
+            f"correction there is a post-lock adjustment.")
     now = datetime.now(timezone.utc)
     await get_collection(COLL_CONFIG_CHANGE_REQUESTS).update_one(
         {"_id": request["_id"]},
@@ -539,6 +641,56 @@ async def record_simulation(actor: dict, company_id: str, request_no: str,
         {"$set": {"simulation": result or {}, "simulated_at": now, "updated_at": now,
                   "status": ConfigChangeStatus.SIMULATED.value}})
     return _out(await _require_request(company_id, request_no))
+
+
+async def run_simulation(actor: dict, company_id: str, request_no: str,
+                         period: Optional[str] = None) -> dict:
+    """§27 Test/Simulation, run FROM the request and recorded on it.
+
+    Picks the simulation that understands the entity -- the day re-judge for ATT_DAY, the
+    request / closure / payroll previews for the other policies, the component simulation
+    against a component's staged revision -- so the approver sees what the drafter saw
+    without the drafter having to carry a result across screens. Field definitions have no
+    calculation to simulate; impact analysis is their test.
+    """
+    from app.models.hrms import (POLICY_ATT_CLOSURE, POLICY_ATT_DAY,
+                                 POLICY_ATT_REGULARISATION, POLICY_PAY_POLICY)
+    from app.services import hrms_attendance_simulation_service as SIM
+    from app.services import hrms_payroll_service as PS
+    request = await _require_request(company_id, request_no)
+    period = period or datetime.now(timezone.utc).strftime("%Y-%m")
+    kind, code = request["entity_type"], request["entity_code"]
+    if kind == CONFIG_ENTITY_POLICY_VERSION:
+        version = int(request.get("version_no") or 0)
+        if code == POLICY_ATT_DAY:
+            result = await SIM.simulate_day_policy(company_id, period, version_no=version)
+        elif code == POLICY_ATT_REGULARISATION:
+            result = await SIM.preview_regularisation_policy(company_id, period,
+                                                             version_no=version)
+        elif code == POLICY_ATT_CLOSURE:
+            result = await SIM.preview_closure_policy(actor, company_id, period,
+                                                      version_no=version)
+        elif code == POLICY_PAY_POLICY:
+            result = await PS.preview_payroll_policy(company_id, period, version_no=version)
+        else:
+            raise HTTPException(status_code=422, detail=f"{code} has no simulation.")
+    elif kind == CONFIG_ENTITY_SALARY_COMPONENT:
+        component = await _component_load(company_id, request)
+        proposed = {k: v for k, v in component.items()
+                    if k not in ("_id", "history", "versions", "pending_definition")}
+        proposed.update(component.get("pending_definition") or {})
+        result = await PS.simulate_component(actor, company_id, component["code"], proposed)
+    else:
+        raise HTTPException(status_code=422,
+                            detail="A field change has no calculation to simulate — its "
+                                   "impact analysis is the test.")
+    result = dict(result or {})
+    for key in ("changes", "employees", "rows"):
+        if isinstance(result.get(key), list) and len(result[key]) > 50:
+            result[f"{key}_total"] = len(result[key])
+            result[key] = result[key][:50]
+    result["period"] = result.get("period") or period
+    return await record_simulation(actor, company_id, request_no, result)
 
 
 async def submit(actor: dict, company_id: str, request_no: str) -> dict:
@@ -607,6 +759,9 @@ async def decide(actor: dict, company_id: str, request_no: str, payload: dict) -
                   "decision_comments": comments or None, "updated_at": now}})
     await audit(actor, AUDIT_CONFIG_DECIDED, ENTITY_CONFIG_CHANGE, request_no,
                 statuses[action], company_id)
+    on_approve = (ENTITY_HANDLERS.get(request.get("entity_type")) or {}).get("approve")
+    if action == "approve" and on_approve:
+        await on_approve(actor, company_id, request)
     return _out(await _require_request(company_id, request_no))
 
 

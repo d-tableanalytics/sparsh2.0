@@ -225,8 +225,11 @@ async def main() -> int:
                  CC.decide(HR, CO, comp["request_no"], {"action": "approve"}),
                  403, "someone else")
     await CC.decide(APPROVER, CO, comp["request_no"], {"action": "approve"})
-    check("approved, and the component is still Draft until activation",
-          store[M.COLL_SALARY_COMPONENTS].docs[0]["lifecycle"] == "Draft")
+    # §24 lifecycle: approval moves a Draft to Approved, which is still not paid
+    # (COMPONENT_PAYABLE_LIFECYCLE is Active only) until activation.
+    check("approved -- the component reads Approved, and is not paid until activation",
+          store[M.COLL_SALARY_COMPONENTS].docs[0]["lifecycle"] == "Approved"
+          and "Approved" not in M.COMPONENT_PAYABLE_LIFECYCLE)
 
     done = await CC.activate(APPROVER, CO, comp["request_no"])
     check("activation makes it Active -- 30's approval-before-activation",

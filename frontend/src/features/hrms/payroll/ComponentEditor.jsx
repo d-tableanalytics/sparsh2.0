@@ -37,6 +37,7 @@ const VariablePicker = ({ bases, vars, onPick }) => {
     ['Structure', vars?.built_in?.structure || []],
     ['Attendance', vars?.built_in?.attendance || []],
     ['Employee', vars?.built_in?.employee || []],
+    ['Payroll inputs', vars?.built_in?.inputs || []],
     ['Company constants', (vars?.variables || []).map((v) => v.name)],
   ].filter(([, names]) => names.length);
 
@@ -205,8 +206,15 @@ export const ComponentEditorModal = ({
     }
     // The route overrides `code` from the URL anyway, but SalaryComponentIn still requires
     // it in the body — the same shape LeaveTypeConfigIn/saveLeaveType already use.
-    run(() => saveSalaryComponent(code, componentPayload({ ...form, code, name: form.name.trim() }), scope),
-      editing ? `${code} updated.` : `${code} added.`);
+    // A LIVE component is revised through approval (FRD §27): the save comes back with the
+    // change request, and payroll keeps the current definition until it is activated.
+    run(async () => {
+      const { data } = await saveSalaryComponent(
+        code, componentPayload({ ...form, code, name: form.name.trim() }), scope);
+      showSuccess(data?.pending_request
+        ? `${code}: change raised as ${data.pending_request.request_no}. Send it for approval in Configuration Approvals; payroll keeps the current definition until it is approved and activated.`
+        : (editing ? `${code} updated.` : `${code} added.`));
+    });
   };
 
   // FRD §25 Simulation: old result vs the proposed rule, before anything is saved.
@@ -495,8 +503,21 @@ export const ComponentEditorModal = ({
         <div>
           <label className={LABEL} htmlFor="comp-reason">Reason for this change</label>
           <input id="comp-reason" value={form.change_reason} className={FIELD} onChange={set('change_reason')}
-            placeholder="Kept in the component's history" />
+            placeholder={['', 'Active'].includes(component?.lifecycle || '')
+              ? 'Required — a live component’s change goes for approval'
+              : "Kept in the component's history"} />
         </div>
+      )}
+      {component?.pending_request_no && (
+        <p className="text-[11.5px] text-[var(--accent-orange)]">
+          A change to this component is waiting for approval ({component.pending_request_no}).
+          Payroll uses the current definition until it is activated.
+        </p>
+      )}
+      {(component?.versions || []).length > 0 && (
+        <p className="text-[11px] text-[var(--text-muted)]">
+          Earlier versions kept as Superseded: {component.versions.map((v) => `v${v.version}`).join(', ')}.
+        </p>
       )}
       <div>
         <label className={LABEL} htmlFor="comp-desc">Description</label>

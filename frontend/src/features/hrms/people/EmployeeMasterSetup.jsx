@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ListTree, Plus, Pencil, Trash2, X, Save, History, ShieldAlert, CheckCircle2, Archive, RotateCcw,
+  ListTree, Plus, Pencil, Trash2, X, Save, History, ShieldAlert, ShieldCheck, CheckCircle2, Archive,
+  RotateCcw,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -12,6 +13,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getEmployeeMasterLists, saveEmployeeMasterLists, listFieldDefinitions, saveFieldDefinition,
   setFieldDefinitionStatus, deleteFieldDefinition, getFieldDefinitionUsage,
+  getEmployeeIdFormat, saveEmployeeIdFormat, getDepartments,
 } from '../../../services/hrmsApi';
 
 /**
@@ -59,6 +61,7 @@ const CODE_RE = /^[a-z][a-z0-9_]{1,39}$/;
 
 const STATUS_TONE = {
   Draft: 'bg-[var(--accent-orange-bg)] text-[var(--accent-orange)]',
+  Approved: 'bg-[var(--accent-indigo)]/10 text-[var(--accent-indigo)]',
   Active: 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]',
   Retired: 'bg-[var(--input-bg)] text-[var(--text-muted)]',
 };
@@ -75,7 +78,25 @@ const BLANK_FIELD = {
   min_length: '', max_length: '', min_value: '', max_value: '', pattern: '', pattern_message: '',
   min_date: '', max_date: '', display_order: 100, applicability: {}, effective_from: '',
   effective_to: '', change_reason: '',
+  // FRD §22 dependent validation, flattened for the form (saved as `depends_on`).
+  depends_field: '', depends_equals: '', depends_rule: 'required',
+  source_column: '',
 };
+
+// §22 Applicability: the profile key each restriction is tested against (the server's
+// `_applies` compares the record's value with the listed ones). Company is implicit --
+// every definition already belongs to one company.
+const APPLICABILITY_KEYS = [
+  ['work_location', 'Locations'], ['grade', 'Grades'], ['level', 'Levels'],
+  ['employee_category', 'Employee categories'], ['payroll_group', 'Payroll groups'],
+];
+
+// Profile keys a dependent rule may test besides the module's own custom fields.
+const PROFILE_DEPENDENCY_KEYS = [
+  ['marital_status', 'Marital status'], ['gender', 'Gender'], ['nationality', 'Nationality'],
+  ['employee_category', 'Employee category'], ['employment_status', 'Employment status'],
+  ['work_location', 'Work location'],
+];
 
 const errText = (err, fallback) => err?.response?.data?.detail || fallback;
 
@@ -285,10 +306,13 @@ const toFieldForm = (def) => {
   });
   f.options = (def.options || []).map((o) => ({ value: o.value, label: o.label || '', active: o.active !== false }));
   f.change_reason = '';
+  f.depends_field = def.depends_on?.field || '';
+  f.depends_equals = (def.depends_on?.equals || []).join(', ');
+  f.depends_rule = def.depends_on?.rule || 'required';
   return f;
 };
 
-const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) => {
+const FieldDefinitionModal = ({ module, initial, sections, siblings = [], onClose, onSaved }) => {
   const { scope } = useHrms();
   const { showSuccess, showError } = useNotification();
   const isNew = !initial;
@@ -296,6 +320,16 @@ const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) =
   const [form, setForm] = useState(() => (initial ? toFieldForm(initial) : { ...BLANK_FIELD }));
   const [codeTouched, setCodeTouched] = useState(!isNew);
   const [saving, setSaving] = useState(false);
+  const [departments, setDepartments] = useState([]);
+  useEffect(() => {
+    getDepartments(scope).then(({ data }) => setDepartments(data?.departments || [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const setApplicability = (key, values) => setForm((f) => {
+    const next = { ...(f.applicability || {}) };
+    if (values.length) next[key] = values; else delete next[key];
+    return { ...f, applicability: next };
+  });
 
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
   const bind = (key) => ({ value: form[key] ?? '', onChange: (e) => set(key, e.target.value) });
@@ -340,8 +374,15 @@ const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) =
       min_value: num(form.min_value), max_value: num(form.max_value),
       pattern: str(form.pattern), pattern_message: str(form.pattern_message),
       min_date: str(form.min_date), max_date: str(form.max_date),
+      source_column: module === 'attendance' ? str(form.source_column) : null,
+      depends_on: form.depends_field
+        ? {
+          field: form.depends_field,
+          equals: String(form.depends_equals).split(',').map((v) => v.trim()).filter(Boolean),
+          rule: form.depends_rule,
+        }
+        : null,
       display_order: int(form.display_order) ?? 100,
-      // No editor here yet; kept as-is so an edit never silently drops a rule.
       applicability: form.applicability || {},
       effective_from: str(form.effective_from), effective_to: str(form.effective_to),
       change_reason: str(form.change_reason),
@@ -545,6 +586,45 @@ const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) =
             </Group>
           )}
 
+          {module === 'attendance' && (
+            <Group title="Source mapping">
+              <div>
+                <label className={LABEL} htmlFor="fd-source">Import file column (optional)</label>
+                <input id="fd-source" {...bind('source_column')} className={FIELD}
+                  placeholder="e.g. Device ID — filled from the attendance import file" />
+              </div>
+            </Group>
+          )}
+
+          <Group title="Dependent validation">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className={LABEL} htmlFor="fd-dep-rule">This field is</label>
+                <select id="fd-dep-rule" {...bind('depends_rule')} className={FIELD}>
+                  <option value="required">Required when</option>
+                  <option value="only">Allowed only when</option>
+                </select>
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="fd-dep-field">Field</label>
+                <select id="fd-dep-field" {...bind('depends_field')} className={FIELD}>
+                  <option value="">No dependency</option>
+                  {siblings.filter((s) => s.code !== form.code).map((s) => (
+                    <option key={s.code} value={s.code}>{s.label}</option>
+                  ))}
+                  {module === 'employee' && PROFILE_DEPENDENCY_KEYS.map(([k, l]) => (
+                    <option key={k} value={k}>{l} (profile)</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="fd-dep-eq">Is one of</label>
+                <input id="fd-dep-eq" {...bind('depends_equals')} className={FIELD}
+                  disabled={!form.depends_field} placeholder="e.g. Married, Divorced" />
+              </div>
+            </div>
+          </Group>
+
           <Group title="In force">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
@@ -556,11 +636,38 @@ const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) =
                 <input id="fd-to" type="date" {...bind('effective_to')} className={FIELD} />
               </div>
             </div>
-            {Object.values(form.applicability || {}).some((v) => v?.length) && (
-              <p className="text-[11px] text-[var(--text-muted)]">
-                Applies only where: {Object.entries(form.applicability)
-                  .filter(([, v]) => v?.length).map(([k, v]) => `${k} is ${v.join(' / ')}`).join('; ')}.
-              </p>
+          </Group>
+
+          <Group title="Applies to (blank = everyone)">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {APPLICABILITY_KEYS.map(([key, label]) => (
+                <div key={key}>
+                  <label className={LABEL} htmlFor={`fd-app-${key}`}>{label}</label>
+                  <input id={`fd-app-${key}`} className={FIELD} placeholder="comma separated"
+                    defaultValue={(form.applicability?.[key] || []).join(', ')}
+                    onBlur={(e) => setApplicability(key, e.target.value.split(',')
+                      .map((v) => v.trim()).filter(Boolean))} />
+                </div>
+              ))}
+            </div>
+            {departments.length > 0 && (
+              <div>
+                <span className={LABEL}>Departments</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                  {departments.map((d) => {
+                    const on = (form.applicability?.department_id || []).includes(d.id);
+                    return (
+                      <label key={d.id} className="flex items-center gap-1.5 text-[12px] text-[var(--text-main)]">
+                        <input type="checkbox" checked={on}
+                          onChange={() => setApplicability('department_id', on
+                            ? form.applicability.department_id.filter((x) => x !== d.id)
+                            : [...(form.applicability?.department_id || []), d.id])} />
+                        {d.name}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             )}
           </Group>
 
@@ -586,6 +693,7 @@ const FieldDefinitionModal = ({ module, initial, sections, onClose, onSaved }) =
 };
 
 const STATUS_COPY = {
+  Approved: { verb: 'Approve', body: 'Signs the field off without switching it on. Someone other than its author approves; it starts taking values once activated.' },
   Active: { verb: 'Activate', body: 'The field appears on records straight away. Activation is recorded as the approval.' },
   Retired: { verb: 'Retire', body: 'The field stops accepting new values. Values already recorded are kept and stay visible.' },
 };
@@ -809,8 +917,18 @@ const FieldsPanel = ({ canWrite }) => {
                               className={`${iconBtn} hover:text-[var(--accent-indigo)]`}>
                               <Pencil size={15} />
                             </button>
+                            {d.status === 'Approved' && (
+                              <button type="button" title="Activate" onClick={() => setStatusChange({ def: d, to: 'Active' })}
+                                className={`${iconBtn} hover:text-[var(--accent-green)]`}>
+                                <CheckCircle2 size={15} />
+                              </button>
+                            )}
                             {d.status === 'Draft' && (
                               <>
+                                <button type="button" title="Approve" onClick={() => setStatusChange({ def: d, to: 'Approved' })}
+                                  className={`${iconBtn} hover:text-[var(--accent-indigo)]`}>
+                                  <ShieldCheck size={15} />
+                                </button>
                                 <button type="button" title="Activate" onClick={() => setStatusChange({ def: d, to: 'Active' })}
                                   className={`${iconBtn} hover:text-[var(--accent-green)]`}>
                                   <CheckCircle2 size={15} />
@@ -855,6 +973,7 @@ const FieldsPanel = ({ canWrite }) => {
           module={editing === 'new' ? module : editing.module}
           initial={editing === 'new' ? null : editing}
           sections={sections}
+          siblings={rows}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
         />
@@ -864,6 +983,72 @@ const FieldsPanel = ({ canWrite }) => {
         <StatusDialog def={statusChange.def} to={statusChange.to}
           onClose={() => setStatusChange(null)}
           onDone={() => { setStatusChange(null); load(); }} />
+      )}
+    </div>
+  );
+};
+
+/** FRD §4: "Employee ID is created according to configured numbering". */
+const IdFormatPanel = ({ canWrite }) => {
+  const { scope } = useHrms();
+  const { showSuccess, showError } = useNotification();
+  const [fmt, setFmt] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getEmployeeIdFormat(scope).then(({ data }) => setFmt(data)).catch(() => setFmt(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!fmt) return null;
+  const year = new Date().getFullYear();
+  const example = [String(fmt.prefix || '').toUpperCase(), ...(fmt.include_year ? [year] : []),
+    '1'.padStart(Number(fmt.digits) || 3, '0')].join('-');
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const { data } = await saveEmployeeIdFormat(
+        { prefix: fmt.prefix, include_year: fmt.include_year, digits: Number(fmt.digits) }, scope);
+      setFmt(data);
+      showSuccess(`New employees are numbered like ${data.example}.`);
+    } catch (err) {
+      showError(errText(err, 'Could not save the employee ID format.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 space-y-3">
+      <div>
+        <h3 className="text-[13px] font-bold text-[var(--text-main)]">Employee ID format</h3>
+        <p className="text-[11.5px] text-[var(--text-muted)]">
+          Used when an employee is added without a code. Existing codes never change.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+        <div>
+          <label className={LABEL} htmlFor="idf-prefix">Prefix</label>
+          <input id="idf-prefix" className={FIELD} value={fmt.prefix || ''} disabled={!canWrite}
+            onChange={(e) => setFmt((f) => ({ ...f, prefix: e.target.value.toUpperCase() }))} />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="idf-digits">Digits</label>
+          <input id="idf-digits" type="number" min="1" max="8" className={FIELD} value={fmt.digits ?? 3}
+            disabled={!canWrite} onChange={(e) => setFmt((f) => ({ ...f, digits: e.target.value }))} />
+        </div>
+        <Check label="Include the year" checked={!!fmt.include_year} disabled={!canWrite}
+          onChange={(v) => setFmt((f) => ({ ...f, include_year: v }))} />
+        <div className="text-[12px] text-[var(--text-main)]">
+          Next looks like <b className="font-mono">{example}</b>
+        </div>
+      </div>
+      {canWrite && (
+        <button type="button" onClick={save} disabled={saving}
+          className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-60">
+          {saving ? 'Saving…' : 'Save format'}
+        </button>
       )}
     </div>
   );
@@ -909,7 +1094,12 @@ const EmployeeMasterSetup = () => {
         tabs={[{ key: 'lists', label: 'Dropdown lists' }, { key: 'fields', label: 'Configurable fields' }]} />
       {/* Keyed on the company so switching scope reloads rather than showing stale lists. */}
       {tab === 'lists'
-        ? <ListsPanel key={companyId} canWrite={canWrite} />
+        ? (
+          <>
+            <IdFormatPanel key={`id-${companyId}`} canWrite={canWrite} />
+            <ListsPanel key={companyId} canWrite={canWrite} />
+          </>
+        )
         : <FieldsPanel key={companyId} canWrite={canWrite} />}
     </div>
   );

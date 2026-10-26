@@ -411,6 +411,14 @@ def capabilities_for(user: dict) -> Set[Cap]:
     if role != HrmsRole.ADMIN:
         from app.utils.hrms_permission_policy import apply as apply_permission_rules
         caps = apply_permission_rules(user, role, caps)
+    else:
+        # FRD §17: where the company has switched it on, even the module owner holds no
+        # payroll-sensitive capability unless explicitly granted. Permission management
+        # is untouched, so the grant can always be given back.
+        from app.utils.hrms_permission_policy import (PAYROLL_SENSITIVE_CAPS,
+                                                      admin_payroll_withheld)
+        if admin_payroll_withheld(user):
+            caps = caps - PAYROLL_SENSITIVE_CAPS
 
     return caps - CLIENT_DECISION_CAPS - CLIENT_OWNED_CAPS
 
@@ -458,7 +466,12 @@ def sees_all_people(user: dict) -> bool:
 
 def sees_all_payroll(user: dict) -> bool:
     """Payroll records and payslips: may this caller see EVERYONE's? (Finance approves pay.)"""
-    return hrms_role(user) in PAYROLL_DATA_ROLES
+    role = hrms_role(user)
+    if role == HrmsRole.ADMIN:
+        from app.utils.hrms_permission_policy import admin_payroll_withheld
+        if admin_payroll_withheld(user):
+            return False
+    return role in PAYROLL_DATA_ROLES
 
 
 def can(user: dict, capability: Cap) -> bool:

@@ -148,6 +148,68 @@ async def save_master_lists(actor: dict, company_id: str, payload: dict) -> dict
     return await get_master_lists(company_id)
 
 
+# ─────────────────────────────────────────────────────────────
+# FRD §4 "Employee ID is created according to CONFIGURED numbering"
+# ─────────────────────────────────────────────────────────────
+DEFAULT_EMPLOYEE_ID_FORMAT = {"prefix": "EMP", "include_year": True, "digits": 3}
+_ID_PREFIX_RE = re.compile(r"^[A-Z0-9]{1,10}$")
+
+
+async def get_employee_id_format(company_id: str) -> dict:
+    doc = await get_collection(COLL_SETTINGS).find_one(
+        {"company_id": str(company_id)}, {"employee_id_format": 1}) or {}
+    return {**DEFAULT_EMPLOYEE_ID_FORMAT, **(doc.get("employee_id_format") or {})}
+
+
+def render_employee_code(fmt: dict, seq: int, year: int) -> str:
+    parts = [fmt["prefix"]] + ([str(year)] if fmt.get("include_year") else [])
+    return "-".join(parts + [str(seq).zfill(int(fmt.get("digits") or 3))])
+
+
+async def save_employee_id_format(actor: dict, company_id: str, payload: dict) -> dict:
+    prefix = str(payload.get("prefix") or "").strip().upper()
+    if not _ID_PREFIX_RE.match(prefix):
+        raise HTTPException(status_code=422,
+                            detail="The prefix is 1-10 capital letters or digits, e.g. EMP or SM.")
+    try:
+        digits = int(payload.get("digits") or 3)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Digits must be a whole number.")
+    if not 1 <= digits <= 8:
+        raise HTTPException(status_code=422, detail="Digits must be between 1 and 8.")
+    fmt = {"prefix": prefix, "include_year": bool(payload.get("include_year", True)),
+           "digits": digits}
+    before = await get_employee_id_format(company_id)
+    await get_collection(COLL_SETTINGS).update_one(
+        {"company_id": str(company_id)},
+        {"$set": {"employee_id_format": fmt, "updated_at": datetime.now(timezone.utc)},
+         "$setOnInsert": {"company_id": str(company_id)}}, upsert=True)
+    await audit(actor, AUDIT_MASTER_LISTS_SAVED, ENTITY_EMPLOYEE, "employee_id_format",
+                f"{render_employee_code(before, 1, 2026)} -> {render_employee_code(fmt, 1, 2026)}",
+                company_id)
+    return {**fmt, "example": render_employee_code(fmt, 1, datetime.now(timezone.utc).year)}
+
+
+async def next_employee_code(company_id: str, year: int) -> str:
+    """The next employee number in the company's format. The default format takes exactly
+    the path it always took, so a company that configures nothing numbers as before; a
+    configured one shares the same atomic counter and skips any code already in use (a
+    hand-entered one, or one minted under the old format)."""
+    from app.services.hrms_id_service import next_business_id, next_sequence
+    fmt = await get_employee_id_format(company_id)
+    if fmt == DEFAULT_EMPLOYEE_ID_FORMAT:
+        return await next_business_id("employee", str(company_id), year)
+    profiles = get_collection(COLL_EMPLOYEE_PROFILES)
+    for _ in range(50):
+        seq = await next_sequence("employee", str(company_id), year if fmt["include_year"] else 0)
+        code = render_employee_code(fmt, seq, year)
+        if not await profiles.find_one({"company_id": str(company_id), "employee_code": code},
+                                       {"_id": 1}):
+            return code
+    raise HTTPException(status_code=409, detail="Could not find a free employee number — "
+                                                "check the employee ID format.")
+
+
 async def validate_master_values(company_id: str, clean: dict) -> None:
     """A value from a configured list must be on that list (case-insensitive; the stored
     spelling is the list's). Unconfigured lists accept any text."""
@@ -272,10 +334,26 @@ async def list_history(company_id: str, employee_code: str, *,
     rows = await get_collection(COLL_EMPLOYEE_HISTORY).find(
         {"company_id": str(company_id), "employee_code": employee_code}
     ).sort("changed_at", -1).to_list(500)
+    # FRD §3 System / Audit "Effective From / To": a value is in force until the day before
+    # the same field's next applied or scheduled change. Derived, never stored, so it can
+    # not drift from the rows it is computed from; the latest value has no Effective To.
+    from datetime import date as _date, timedelta as _td
+    starts: dict = {}
+    for r in rows:
+        if r.get("status") != HISTORY_CANCELLED and r.get("effective_from"):
+            starts.setdefault(r["field"], []).append(str(r["effective_from"])[:10])
     out = []
     for r in rows:
         r = dict(r)
         r["id"] = str(r.pop("_id"))
+        start = str(r.get("effective_from") or "")[:10]
+        later = sorted(s for s in starts.get(r["field"], []) if s > start)
+        r["effective_to"] = None
+        if r.get("status") != HISTORY_CANCELLED and start and later:
+            try:
+                r["effective_to"] = (_date.fromisoformat(later[0]) - _td(days=1)).isoformat()
+            except ValueError:
+                pass
         if r["field"] in SENSITIVE_HISTORY_FIELDS and not include_sensitive:
             r["old_value"] = mask(r["old_value"]) if r["field"] == "bank_account" else "hidden"
             r["new_value"] = mask(r["new_value"]) if r["field"] == "bank_account" else "hidden"
@@ -462,6 +540,8 @@ async def save_field_definition(actor: dict, company_id: str, payload: dict) -> 
     for key in ("effective_from", "effective_to", "min_date", "max_date"):
         if payload.get(key) and not is_iso_date(payload[key]):
             raise HTTPException(status_code=422, detail=f"{key} must be YYYY-MM-DD.")
+    if "depends_on" in payload:
+        payload = {**payload, "depends_on": _clean_dependency(payload.get("depends_on"), code)}
 
     coll = get_collection(COLL_FIELD_DEFINITIONS)
     current = await coll.find_one({"company_id": str(company_id), "module": module,
@@ -473,8 +553,9 @@ async def save_field_definition(actor: dict, company_id: str, payload: dict) -> 
             "default_value", "unique", "searchable", "filterable", "exportable",
             "show_in_list", "sensitive", "visible_to_self", "visible_to_manager",
             "visible_to_payroll", "min_length", "max_length", "min_value", "max_value",
-            "pattern", "pattern_message", "min_date", "max_date", "display_order",
-            "applicability", "effective_from", "effective_to")
+            "pattern", "pattern_message", "min_date", "max_date", "depends_on",
+            "source_column", "display_order", "applicability", "effective_from",
+            "effective_to")
         if k in payload}
     definition.update({"label": label, "data_type": data_type, "options": options})
 
@@ -523,6 +604,46 @@ async def save_field_definition(actor: dict, company_id: str, payload: dict) -> 
     return _def_out(saved)
 
 
+DEPENDENCY_RULES = ("required", "only")
+
+
+def _clean_dependency(dep, code: str) -> Optional[dict]:
+    """§22 dependent validation, as saved: one controlling field, the values that trigger the
+    rule, and whether the rule makes this field required or allows it only then. A blank
+    controlling field clears the dependency."""
+    if not dep:
+        return None
+    dep = dep if isinstance(dep, dict) else dict(dep)
+    field = str(dep.get("field") or "").strip().lower()
+    if not field:
+        return None
+    if field == code:
+        raise HTTPException(status_code=422, detail="A field cannot depend on itself.")
+    rule = str(dep.get("rule") or "required")
+    if rule not in DEPENDENCY_RULES:
+        raise HTTPException(status_code=422, detail="Dependent rule must be required or only.")
+    raw = dep.get("equals")
+    equals = [str(v).strip() for v in (raw if isinstance(raw, (list, tuple)) else [raw])
+              if str(v if v is not None else "").strip()]
+    if not equals:
+        raise HTTPException(status_code=422,
+                            detail="Say which value(s) of the other field trigger the rule.")
+    return {"field": field, "equals": equals, "rule": rule}
+
+
+def _dependency_holds(actual, equals: list) -> bool:
+    """Does the controlling field's value match one of `equals`? Text compares without case;
+    a Yes/No field matches yes/true/1 or no/false/0; a multi-select matches on any item."""
+    if actual in (None, "", []):
+        return False
+    wanted = {str(e).strip().lower() for e in equals}
+    if isinstance(actual, bool):
+        return bool(wanted & ({"yes", "true", "1"} if actual else {"no", "false", "0"}))
+    values = actual if isinstance(actual, (list, tuple)) else [actual]
+    return any(str(int(v) if isinstance(v, float) and v.is_integer() else v).strip().lower()
+               in wanted for v in values)
+
+
 def _o(option, key, default=None):
     if isinstance(option, dict):
         return option.get(key, default)
@@ -554,19 +675,41 @@ async def set_field_status(actor: dict, company_id: str, module: str, code: str,
     # §27 — making a field LIVE is the governed move. Retiring one is not: it stops the
     # field being collected and breaks nothing that already holds a value, and refusing it
     # would leave a field that should not be in use waiting on an approver.
-    if new_status == FieldStatus.ACTIVE.value and await _field_change_governed(company_id):
+    if new_status in (FieldStatus.ACTIVE.value, FieldStatus.APPROVED.value) and \
+            await _field_change_governed(company_id):
         raise HTTPException(
             status_code=409,
-            detail=f"{module}.{code} cannot be activated directly. Raise a configuration "
-                   f"change request for it and have somebody else approve it, then "
-                   f"activate it from the Configuration Approvals screen (FRD §27).")
+            detail=f"{module}.{code} cannot be {new_status.lower()} directly. Raise a "
+                   f"configuration change request for it and have somebody else approve it, "
+                   f"then activate it from the Configuration Approvals screen (FRD §27).")
     updates = {"status": new_status, "updated_at": now}
-    if new_status == FieldStatus.ACTIVE.value:
+    # §22 Approved: a sign-off by someone other than the author. Optional -- Draft -> Active
+    # stays open, recording the activator as the approver, exactly as before.
+    if new_status == FieldStatus.APPROVED.value:
+        if current["status"] != FieldStatus.DRAFT.value:
+            raise HTTPException(status_code=409, detail="Only a Draft field can be approved.")
+        if current.get("created_by") and current["created_by"] == _actor_id(actor):
+            raise HTTPException(status_code=403,
+                                detail="You created this field, so the approval is someone "
+                                       "else's to give.")
+        updates.update({"approved_by": _actor_id(actor), "approved_by_name": _actor_name(actor),
+                        "approved_at": now})
+    if new_status == FieldStatus.ACTIVE.value and current["status"] == FieldStatus.APPROVED.value:
+        # Already approved: activation keeps that approver and records who switched it on.
+        updates.update({"activated_by": _actor_id(actor), "activated_at": now})
+        if not current.get("effective_from"):
+            updates["effective_from"] = _today()
+    elif new_status == FieldStatus.ACTIVE.value:
         updates.update({"approved_by": _actor_id(actor), "approved_by_name": _actor_name(actor),
                         "approved_at": now})
         if not current.get("effective_from"):
             updates["effective_from"] = _today()
     if new_status == FieldStatus.RETIRED.value:
+        # §22 Control 3: a field configuration still reads (a bank file column, a policy
+        # scope) is not retired until that is resolved -- the same refusal, naming the
+        # dependants, that a salary component gets.
+        from app.services.hrms_config_dependency_service import ENTITY_FIELD, assert_retirable
+        await assert_retirable(company_id, ENTITY_FIELD, code, module)
         updates.update({"retired_by": _actor_id(actor), "retired_at": now,
                         "effective_to": current.get("effective_to") or _today()})
     entry = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
@@ -696,6 +839,26 @@ async def validate_custom_values(company_id: str, module: str, values: Optional[
                     out[d["code"]] = _check_value(d, d["default_value"])
                 else:
                     raise HTTPException(status_code=422, detail=f"{d['label']} is required.")
+        # §22 dependent validation. The controlling value is the record's custom value when
+        # the field is a custom one, else the profile key of that name from `context`.
+        for d in defs.values():
+            dep = d.get("depends_on")
+            if not dep or d["status"] != FieldStatus.ACTIVE.value or \
+                    not _in_force(d, today) or not _applies(d, context or {}):
+                continue
+            ctrl = dep.get("field")
+            actual = out.get(ctrl) if ctrl in defs else (context or {}).get(ctrl)
+            holds = _dependency_holds(actual, dep.get("equals") or [])
+            empty = out.get(d["code"]) in (None, "", [])
+            ctrl_label = (defs.get(ctrl) or {}).get("label") or str(ctrl).replace("_", " ")
+            when = f"{ctrl_label} is {' / '.join(dep.get('equals') or [])}"
+            if dep.get("rule") == "only":
+                if not holds and not empty and d["code"] in values:
+                    raise HTTPException(status_code=422,
+                                        detail=f"{d['label']} only applies when {when}.")
+            elif holds and empty:
+                raise HTTPException(status_code=422,
+                                    detail=f"{d['label']} is required when {when}.")
     return out
 
 

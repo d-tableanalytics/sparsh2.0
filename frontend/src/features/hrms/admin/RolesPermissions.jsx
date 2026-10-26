@@ -10,6 +10,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getEmployees, getHrmsPermissions, saveHrmsPermission, resetHrmsPermission,
+  getAdminPayrollSetting, saveAdminPayrollSetting,
 } from '../../../services/hrmsApi';
 import { Btn } from '../internal/internalKit.jsx';
 
@@ -167,6 +168,82 @@ const Stat = ({ icon: Icon, label, value, tone }) => (
   </div>
 );
 
+/**
+ * FRD §17: "System Admin — no automatic entitlement to payroll-sensitive values unless
+ * explicitly granted." Off by default (the superadmin keeps today's full access); on, the
+ * superadmin loses payroll and salary actions unless named below. Permission management is
+ * never withheld, so the grant can always be given back.
+ */
+const AdminPayrollCard = ({ scope, people }) => {
+  const { showSuccess, showError } = useNotification();
+  const [setting, setSetting] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getAdminPayrollSetting(scope).then(({ data }) => setSetting(data)).catch(() => setSetting(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!setting) return null;
+  const granted = (setting.allow_users || []).map((u) => u.user_id || u);
+
+  const save = async (next) => {
+    setBusy(true);
+    try {
+      const { data } = await saveAdminPayrollSetting(next, scope);
+      setSetting(data);
+      showSuccess(data.restricted
+        ? 'The superadmin now needs an explicit grant to see payroll values.'
+        : 'The superadmin has full payroll access again.');
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not save that setting.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 space-y-2.5">
+      <label className="flex items-start gap-2.5">
+        <input type="checkbox" className="mt-0.5" checked={!!setting.restricted} disabled={busy}
+          onChange={(e) => save({ restricted: e.target.checked, allow_users: granted })} />
+        <span>
+          <span className="block text-[12.5px] font-bold text-[var(--text-main)]">
+            Superadmin sees payroll values only when explicitly granted
+          </span>
+          <span className="block text-[11.5px] text-[var(--text-muted)]">
+            Payroll, salary, advance and variable-pay actions are withheld from the superadmin
+            unless they are listed below. Permission management is never withheld.
+          </span>
+        </span>
+      </label>
+      {setting.restricted && (
+        <div>
+          <label className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1"
+            htmlFor="admin-payroll-grant">Explicitly granted</label>
+          <select id="admin-payroll-grant" disabled={busy} value=""
+            className="h-9 px-2.5 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] text-[var(--text-main)]"
+            onChange={(e) => e.target.value && save({ restricted: true, allow_users: [...granted, e.target.value] })}>
+            <option value="">Add a person…</option>
+            {people.filter((p) => !granted.includes(p.user_id)).map((p) => (
+              <option key={p.user_id} value={p.user_id}>{p.name}</option>
+            ))}
+          </select>
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {(setting.allow_users || []).map((u) => (
+              <button key={u.user_id} type="button" disabled={busy}
+                onClick={() => save({ restricted: true, allow_users: granted.filter((id) => id !== u.user_id) })}
+                className="px-2.5 h-7 rounded-full border border-[var(--border)] text-[11.5px] text-[var(--text-main)]">
+                {u.name} ×
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const RolesPermissions = () => {
   const { scope, companyId } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -259,6 +336,8 @@ const RolesPermissions = () => {
         subtitle="Choose who may do each HRMS action — by role, plus people who are always allowed or blocked."
       />
       <HrmsScopeBar />
+
+      {!loading && !error && data && <AdminPayrollCard key={companyId} scope={scope} people={people} />}
 
       {loading && <HrmsLoading label="Loading permissions…" />}
       {!loading && error && <HrmsError message={error} onRetry={load} />}

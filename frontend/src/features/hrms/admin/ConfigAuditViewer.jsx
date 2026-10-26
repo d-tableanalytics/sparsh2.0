@@ -6,6 +6,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getConfigAudit, getConfigImpact, exportConfigAudit,
+  listPolicyVersions, simulateAttendancePolicy, listSalaryComponents, simulateSalaryComponent,
 } from '../../../services/hrmsApi';
 import { CAP } from '../access';
 import { FIELD, LABEL } from '../internal/internalKit';
@@ -281,6 +282,117 @@ const ImpactTab = () => {
   );
 };
 
+/**
+ * FRD §29 "Rule Simulation": every simulation in one place -- an attendance or payroll
+ * policy version against a recorded month (optionally for chosen employees), or a salary
+ * component's current definition against the people it pays. Writes nothing; the
+ * designers run the same simulations next to the rule being edited.
+ */
+const SIMULATABLE_POLICIES = [
+  ['ATT_DAY', 'Attendance — daily rules'], ['ATT_REGULARISATION', 'Attendance — regularisation'],
+  ['ATT_CLOSURE', 'Attendance — monthly closure'], ['PAY_POLICY', 'Payroll policy'],
+];
+
+const SimulationTab = () => {
+  const { scope, companyId } = useHrms();
+  const [kind, setKind] = useState('ATT_DAY');
+  const [versions, setVersions] = useState([]);
+  const [components, setComponents] = useState([]);
+  const [target, setTarget] = useState('');
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [codes, setCodes] = useState('');
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const isComponent = kind === 'COMPONENT';
+
+  useEffect(() => {
+    setTarget(''); setResult(null); setError(null);
+    if (!companyId) return;
+    if (isComponent) {
+      listSalaryComponents(scope).then(({ data }) => setComponents(Array.isArray(data) ? data : []))
+        .catch(() => setComponents([]));
+    } else {
+      listPolicyVersions(kind, scope).then(({ data }) => setVersions(Array.isArray(data) ? data : []))
+        .catch(() => setVersions([]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, companyId]);
+
+  const run = async () => {
+    if (!target) { setError('Choose what to simulate.'); return; }
+    setBusy(true); setError(null);
+    try {
+      const { data } = isComponent
+        ? await simulateSalaryComponent(target, {}, scope)
+        : await simulateAttendancePolicy(kind, target, {
+          ...scope, period, ...(codes.trim() ? { employee_codes: codes.trim() } : {}),
+        });
+      setResult(data);
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not run that simulation.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+        <div>
+          <label className={LABEL} htmlFor="sim-kind">Simulate</label>
+          <select id="sim-kind" className={FIELD} value={kind} onChange={(e) => setKind(e.target.value)}>
+            {SIMULATABLE_POLICIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            <option value="COMPONENT">Salary component</option>
+          </select>
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="sim-target">{isComponent ? 'Component' : 'Version'}</label>
+          <select id="sim-target" className={FIELD} value={target} onChange={(e) => setTarget(e.target.value)}>
+            <option value="">Choose…</option>
+            {isComponent
+              ? components.map((c) => <option key={c.code} value={c.code}>{c.code} — {c.name}</option>)
+              : versions.map((v) => (
+                <option key={v.version_no} value={v.version_no}>v{v.version_no} · {v.status} · from {v.effective_from}</option>
+              ))}
+          </select>
+        </div>
+        {!isComponent && (
+          <>
+            <div>
+              <label className={LABEL} htmlFor="sim-period">Against month</label>
+              <input id="sim-period" type="month" className={FIELD} value={period}
+                onChange={(e) => setPeriod(e.target.value)} />
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="sim-codes">Employees (optional)</label>
+              <input id="sim-codes" className={FIELD} value={codes} placeholder="EMP codes, comma separated"
+                onChange={(e) => setCodes(e.target.value)} />
+            </div>
+          </>
+        )}
+      </div>
+      <Btn tone="primary" onClick={run} disabled={busy}>{busy ? 'Simulating…' : 'Run simulation'}</Btn>
+      {error && <p className="text-[12px] text-[var(--accent-red)]">{error}</p>}
+      {result && (
+        <div className="rounded-lg border border-[var(--border)] px-3.5 py-2.5 space-y-2">
+          <p className="text-[12px] text-[var(--text-main)]">
+            {['days_changed', 'days_examined', 'employees_affected', 'payable_days_delta',
+              'requests_examined', 'would_refuse', 'would_allow', 'pending_requests',
+              'records_examined', 'employees_changed', 'net_was', 'net_now', 'left_out']
+              .filter((k) => result[k] !== undefined && result[k] !== null)
+              .map((k) => `${k.replace(/_/g, ' ')}: ${result[k]}`).join(' · ') || 'Done.'}
+          </p>
+          {result.note && <p className="text-[11.5px] text-[var(--text-muted)]">{result.note}</p>}
+          <pre className="text-[11px] text-[var(--text-muted)] whitespace-pre-wrap break-words max-h-80 overflow-auto">
+            {JSON.stringify(result.changes || result.rows || result.employees || result, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ConfigAuditViewer = () => {
   const [tab, setTab] = useState('audit');
   return (
@@ -299,9 +411,14 @@ const ConfigAuditViewer = () => {
         <Btn tone={tab === 'impact' ? 'primary' : 'ghost'} onClick={() => setTab('impact')}>
           Dependency check
         </Btn>
+        <Btn tone={tab === 'simulation' ? 'primary' : 'ghost'} onClick={() => setTab('simulation')}>
+          Rule simulation
+        </Btn>
       </div>
 
-      {tab === 'audit' ? <AuditTab /> : <ImpactTab />}
+      {tab === 'audit' && <AuditTab />}
+      {tab === 'impact' && <ImpactTab />}
+      {tab === 'simulation' && <SimulationTab />}
     </div>
   );
 };

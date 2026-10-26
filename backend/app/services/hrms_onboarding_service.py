@@ -1167,7 +1167,8 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
         raise HTTPException(status_code=409, detail=" ".join(blockers))
 
     year = datetime.now(timezone.utc).year
-    employee_code = await next_business_id("employee", str(company_id), year)
+    from app.services.hrms_employee_master_service import next_employee_code
+    employee_code = await next_employee_code(str(company_id), year)
     now = datetime.now(timezone.utc)
 
     submission = doc.get("submission") or {}
