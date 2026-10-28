@@ -113,7 +113,11 @@ async def complete_chunked_upload(
         }
 
         from app.services.media_index_service import index_media_library_item, INDEXABLE_TYPES
-        if media_type in INDEXABLE_TYPES:
+        from app.assistant.config import config as _ai
+        # Same gate as the direct-upload route -- a large file arriving in chunks must
+        # not be the way round it.
+        _index = _ai.MEDIA_AI_INDEXING_ENABLED and media_type in INDEXABLE_TYPES
+        if _index:
             doc["content_status"] = "processing"
 
         col = get_collection("media_library")
@@ -122,7 +126,7 @@ async def complete_chunked_upload(
 
         # Extract searchable text (document text or audio/video transcript) in the
         # background so the assistant can answer questions about the file contents.
-        if media_type in INDEXABLE_TYPES:
+        if _index:
             background_tasks.add_task(
                 index_media_library_item, str(res.inserted_id), s3_res["key"],
                 original_filename or "media", media_type,

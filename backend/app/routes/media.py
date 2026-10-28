@@ -180,7 +180,13 @@ async def upload_media(
     }
 
     from app.services.media_index_service import index_media_library_item, INDEXABLE_TYPES
-    if media_type in INDEXABLE_TYPES:
+    from app.assistant.config import config as _ai
+    # The file type was the ONLY gate here until 2026-10-28, so every indexable upload
+    # was transcribed and embedded with no way to stop it. `content_status` is set only
+    # when indexing will actually run -- marking a file "processing" that nothing will
+    # process leaves it stuck in that state for ever.
+    _index = _ai.MEDIA_AI_INDEXING_ENABLED and media_type in INDEXABLE_TYPES
+    if _index:
         doc["content_status"] = "processing"
 
     col = get_collection("media_library")
@@ -189,7 +195,7 @@ async def upload_media(
 
     # Extract the file's searchable text (document text or audio/video transcript)
     # in the background so the assistant can answer questions about its contents.
-    if media_type in INDEXABLE_TYPES:
+    if _index:
         background_tasks.add_task(
             index_media_library_item, str(res.inserted_id), result["key"],
             file.filename or "media", media_type,
