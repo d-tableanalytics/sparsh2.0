@@ -2642,6 +2642,18 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # as PROCESS. Holding both is safe: check_run refuses the person who submitted, so
         # one HR user cannot wave their own run through — the maker-checker split is
         # enforced on the ACTOR, not merely on the role.
+        #
+        # -- PAYROLL_PROCESS here is a KNOWN §17 divergence, kept DELIBERATELY ----------
+        # §17's HR row lists no payroll, so strictly this belongs to the Payroll Maker
+        # role alone. It stays until a Payroll Maker actually exists, because removing it
+        # today locks every tenant out of payroll entirely: MD has PAYROLL_PROCESS
+        # withheld by MD_REVIEW_ONLY_WITHHELD, the system admin has it withheld by §17's
+        # default, and as at 2026-10-28 no real tenant has anyone on the PAYROLL_MAKER
+        # rung. HR is the only holder left.
+        #
+        # BEFORE REMOVING IT: assign PAYROLL_MAKER (User Management ▸ governance role) in
+        # every tenant that runs payroll, and confirm one cycle completes. Reviewed with
+        # the product owner on 2026-10-28; the decision was to hold.
         Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK,
         Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
         # §29's administrative screens are HR's, but CONFIG_APPROVE is deliberately absent:
