@@ -231,6 +231,23 @@ async def _require_payroll_matrix_cap(user: dict, company_id: str, key: str) -> 
     _require(user, Cap(wanted))
 
 
+async def _require_attendance_lock_cap(user: dict, company_id: str) -> None:
+    """§23 Monthly Closure "lock authority" — the capability that may lock / reopen a month.
+
+    The same shape as _require_payroll_matrix_cap, for the same reason: WHICH capability
+    closes the month is the company's decision (HR by default, Finance in companies where
+    payroll owns the close), so it is named in the ATT_CLOSURE policy rather than in code.
+    It still resolves through `can()`; only the capability looked up is configurable, and
+    only from ATTENDANCE_LOCK_ALLOWED_CAPS so a typo cannot widen the gate.
+    """
+    from app.models.hrms import ATTENDANCE_LOCK_ALLOWED_CAPS, ATTENDANCE_LOCK_DEFAULT_CAP
+    rules = await attendance_mgmt.closure_rules(company_id)
+    wanted = str(rules.get("lock_cap") or "")
+    if wanted not in ATTENDANCE_LOCK_ALLOWED_CAPS:
+        wanted = ATTENDANCE_LOCK_DEFAULT_CAP
+    _require(user, Cap(wanted))
+
+
 def _require_any(user: dict, *capabilities: Cap) -> None:
     """Capability gate for an endpoint two different roles reach by different routes.
 
@@ -4442,9 +4459,10 @@ async def lock_period(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.ATTENDANCE_LOCK)
+    company = _company(current_user, company_id)
+    await _require_attendance_lock_cap(current_user, company)
     return await attendance_mgmt.lock_period(
-        current_user, _company(current_user, company_id), period,
+        current_user, company, period,
         override_reason=(body.override_reason if body else None))
 
 
@@ -4456,9 +4474,10 @@ async def unlock_period(
     current_user: dict = Depends(get_current_user),
 ):
     """Post-lock changes require an authorised, reasoned reopen (§7.12 BR)."""
-    _require(current_user, Cap.ATTENDANCE_LOCK)
+    company = _company(current_user, company_id)
+    await _require_attendance_lock_cap(current_user, company)
     return await attendance_mgmt.unlock_period(
-        current_user, _company(current_user, company_id), period, body.reason)
+        current_user, company, period, body.reason)
 
 
 # ── §22.8 — leave-type policy register ──
@@ -7011,6 +7030,22 @@ async def payroll_register(
     return _Response(content=text, media_type="text/csv",
                      headers={"Content-Disposition":
                               f'attachment; filename="payroll_register_{period}.csv"'})
+
+
+@router.get("/payroll/runs/{period}/accounting-summary")
+async def payroll_accounting_summary(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §24 Accounting / Bank Mapping: the period totalled per COMPONENT, carrying each
+    component's accounting code, for posting into the finance system."""
+    _require(current_user, Cap.PAYROLL_READ)
+    text = await payroll_mgmt.accounting_summary_csv(
+        current_user, _company(current_user, company_id), period)
+    return _Response(content=text, media_type="text/csv",
+                     headers={"Content-Disposition":
+                              f'attachment; filename="accounting_summary_{period}.csv"'})
 
 
 @router.get("/payroll/runs/{period}/post-lock-adjustments")

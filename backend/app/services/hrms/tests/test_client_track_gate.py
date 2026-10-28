@@ -58,6 +58,12 @@ async def main() -> None:
     import app.db.mongodb as mongo
     import app.utils.hrms_access as HA
 
+    # FRD §17's payroll-sensitive withholding is a SECOND, configurable subtraction on
+    # top of the ADMIN resolution. This file is about the client-track gate, not about
+    # §17, so that layer is switched off -- test_core_relationships_and_access owns it.
+    import app.utils.hrms_permission_policy as _POL
+    _POL.admin_payroll_withheld = lambda user: False
+
     SPARSH, CLIENT_ON, CLIENT_OFF = ObjectId(), ObjectId(), ObjectId()
 
     companies = FakeCollection([

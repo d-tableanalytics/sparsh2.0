@@ -500,6 +500,10 @@ const AppRoutes = () => {
             find the inbox cannot approve anything. They are now in the sidebar's
             Configuration section, each shown to whoever holds the matching capability. */}
         <Route path="config-approvals"     element={<ConfigApprovalInbox />} />
+        {/* Attendance Configuration — seven §23 category tabs over three policy records.
+            The PATH keeps its old spelling on purpose: it is linked from the
+            sidebar and from saved bookmarks, and renaming a route to match a
+            screen title breaks both for no gain. */}
         <Route path="attendance-policies"  element={<AttendancePolicyDesigner />} />
         {/* Configuration Audit Viewer + Impact/Dependency Viewer, as two tabs of one
             screen -- somebody reading a change is usually one click from wanting its

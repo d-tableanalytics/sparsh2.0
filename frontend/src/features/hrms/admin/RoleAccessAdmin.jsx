@@ -17,7 +17,11 @@ const GOVERNANCE_OPTIONS = [
   { value: '', label: '— (Employee)' },
   { value: 'HOD', label: 'HOD (Manager)' },
   { value: 'HR', label: 'HR' },
-  { value: 'FINANCE', label: 'Finance' },
+  { value: 'FINANCE', label: 'Finance / Authorised Approver' },
+  // FRD §17 names these two as roles in their own right, and §12 needs them to be
+  // DIFFERENT people — so they have to be separately assignable, not implied by HR.
+  { value: 'PAYROLL_MAKER', label: 'Payroll Maker' },
+  { value: 'PAYROLL_CHECKER', label: 'Payroll / HR Checker' },
   { value: 'MD', label: 'MD' },
   { value: 'IMPLEMENTOR', label: 'Implementor' },
 ];

@@ -915,6 +915,13 @@ class HrmsRole(str, Enum):
     # costs, never who fills it.
     FINANCE  = "finance"
     MANAGER  = "manager"    # client HOD — hiring manager; raises reqs, co-reviews assessments
+    # FRD §17 names Payroll Maker and Payroll/HR Checker as roles in their own right, and
+    # §12 makes them two DIFFERENT people: the maker opens, calculates and submits, the
+    # checker verifies. They existed only as capabilities on HR and FINANCE before, which
+    # meant a company could not actually appoint "the payroll maker" -- it could only hand
+    # somebody the whole HR role to get the one job done.
+    PAYROLL_MAKER   = "payroll_maker"    # §17: structures, inputs, calculate, submit
+    PAYROLL_CHECKER = "payroll_checker"  # §17: review calculations, exceptions, variance
     EMPLOYEE = "employee"   # client implementor / plain user — self-service only
 
 
@@ -1767,6 +1774,10 @@ GOVERNANCE_TO_HRMS = {
     # finance controller is not senior to HR, they own a different decision.
     "FINANCE":     HrmsRole.FINANCE,
     "HOD":         HrmsRole.MANAGER,
+    # FRD §17's two payroll rungs. Peers of each other and of HR on the ladder: neither is
+    # senior to the other, they are the two halves of one maker-checker control.
+    "PAYROLL_MAKER":   HrmsRole.PAYROLL_MAKER,
+    "PAYROLL_CHECKER": HrmsRole.PAYROLL_CHECKER,
     "IMPLEMENTOR": HrmsRole.EMPLOYEE,
 }
 
@@ -2930,6 +2941,55 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },
+
+    # ── FRD §17 Payroll Maker ──────────────────────────────────────────────────────
+    # "Maintain salary structures as permitted, load payroll inputs, calculate and submit
+    # payroll." Stages 3-7 of §12, and nothing beyond them.
+    #
+    # The two ABSENCES are the point of the role, not an oversight:
+    #
+    #   no PAYROLL_CHECK    -- §12 stage 8 belongs to somebody else. The run refuses a
+    #                          checker who is the submitter anyway (that guard is on the
+    #                          ACTOR), but withholding the capability means the maker is
+    #                          never even offered the button, which is how a control should
+    #                          read on screen.
+    #   no PAYROLL_APPROVE  -- stage 9 is Finance's. A maker who could approve their own
+    #                          batch is the exact failure maker-checker exists to prevent.
+    #
+    # Salary visibility is unavoidable here: you cannot load payroll inputs or read a
+    # variance without seeing pay. That is why this is a named role a company grants
+    # deliberately rather than a capability sprinkled onto HR.
+    HrmsRole.PAYROLL_MAKER: {
+        Cap.MODULE_ACCESS,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_SALARY_READ,
+        # "Maintain salary structures AS PERMITTED": the maker builds them; whether a
+        # structure needs a second pair of eyes is the payroll policy's
+        # `structure_approval_required`, and the checker it then waits for is not this role.
+        Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS,
+        # Payroll rests on the locked attendance month (§18), so the maker must be able to
+        # SEE the lock and the days behind it -- without being able to change either.
+        Cap.ATTENDANCE_READ, Cap.ATTENDANCE_CLOSURE_READ,
+        Cap.ADVANCE_READ, Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
+        Cap.CONFIG_READ, Cap.REPORT_READ, Cap.REPORT_EXPORT,
+    },
+
+    # ── FRD §17 Payroll / HR Checker ───────────────────────────────────────────────
+    # "Review payroll calculations, exceptions and variance." §12 stage 8 only.
+    #
+    # Deliberately a READ-ONLY role plus the single verdict. No PAYROLL_PROCESS (it would
+    # make the checker a maker), no PAYROLL_APPROVE (stage 9 is a third person), no
+    # SALARY_STRUCTURE_MANAGE -- reviewing what a structure produced is not editing it.
+    HrmsRole.PAYROLL_CHECKER: {
+        Cap.MODULE_ACCESS,
+        Cap.EMPLOYEE_READ, Cap.EMPLOYEE_SALARY_READ,
+        Cap.SALARY_STRUCTURE_READ,
+        Cap.PAYROLL_READ, Cap.PAYROLL_CHECK,
+        # The exceptions and the attendance impact are half of what stage 8 verifies.
+        Cap.ATTENDANCE_READ, Cap.ATTENDANCE_CLOSURE_READ,
+        Cap.ADVANCE_READ, Cap.VARIABLE_PAY_READ,
+        Cap.CONFIG_READ, Cap.REPORT_READ, Cap.REPORT_EXPORT,
+    },
 }
 
 
@@ -3730,6 +3790,15 @@ ATTENDANCE_POLICY_RULES = {
                                                 # never a status or payroll change.
         # §23 Early Going
         "early_going_grace_minutes": None,
+        "min_hours": None,                      # "minimum working-hours threshold": a day
+                                                # below it is a half day however the
+                                                # out-punch reads. The shift master and the
+                                                # company timing already carry this key and
+                                                # compute_day already reads it off the
+                                                # merged policy -- naming it here is what
+                                                # lets a POLICY set it per category /
+                                                # location / level instead of only
+                                                # per shift.
         # §23 Half Day
         "half_day_threshold_minutes": None,
         "half_day_late_minutes": None,          # the §23 "late/early combination" rule
@@ -3756,8 +3825,25 @@ ATTENDANCE_POLICY_RULES = {
         "closing_day": None,                    # the day of the month attendance closes
         "enforce_cutoff": False,                # §19 leaves this unconfirmed -> default off
         "block_pending_requests": False,        # refuse to lock with requests outstanding
+        "lock_cap": None,                       # §23 Monthly Closure "lock authority": WHICH
+                                                # capability may lock and reopen a month.
+                                                # None = Cap.ATTENDANCE_LOCK, which is what
+                                                # the route has always demanded. Mirrors the
+                                                # payroll matrix's `lock_cap` deliberately,
+                                                # including the allowlist below: a company
+                                                # that wants only Finance to close the month
+                                                # changes a setting, not a deployment.
     },
 }
+
+# Which capabilities an ATT_CLOSURE policy may name as the lock authority. Same guard, and
+# the same reason, as PAYROLL_MATRIX_ALLOWED_CAPS: a typo in configuration must never
+# silently WIDEN who can lock a month, so anything outside this set falls back to the
+# default rather than being honoured.
+ATTENDANCE_LOCK_ALLOWED_CAPS = {
+    Cap.ATTENDANCE_LOCK.value, Cap.PAYROLL_APPROVE.value, Cap.CONFIG_APPROVE.value,
+}
+ATTENDANCE_LOCK_DEFAULT_CAP = Cap.ATTENDANCE_LOCK.value
 
 AUDIT_POLICY_VERSION_SAVED    = "policy version saved"
 AUDIT_POLICY_VERSION_STATUS   = "policy version status changed"
@@ -10229,7 +10315,10 @@ AUDIT_GOVERNANCE_ROLE_CHANGED = "Governance role changed"
 
 # Assignable via this screen. Every governance rung of the in-house tenant, and nothing
 # else: HRMS has no client-company participants.
-ASSIGNABLE_GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD", "IMPLEMENTOR"}
+ASSIGNABLE_GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD",
+                               # FRD §17 Payroll Maker / Payroll-HR Checker.
+                               "PAYROLL_MAKER", "PAYROLL_CHECKER",
+                               "IMPLEMENTOR"}
 
 
 class GovernanceRoleIn(BaseModel):

@@ -390,7 +390,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       { name: 'Configuration Approvals', path: '/hrms/config-approvals', icon: GitPullRequest },
     ] : []),
     ...(canDraftConfig ? [
-      { name: 'Attendance Policies', path: '/hrms/attendance-policies', icon: SlidersHorizontal },
+      { name: 'Attendance Configuration', path: '/hrms/attendance-policies', icon: SlidersHorizontal },
     ] : []),
     ...(canReadConfig ? [
       { name: 'Configuration Audit', path: '/hrms/config-audit', icon: History },

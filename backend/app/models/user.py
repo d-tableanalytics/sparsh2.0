@@ -14,7 +14,10 @@ class UserRole(str, Enum):
 # is the authority for it. Named here rather than imported because this module is loaded by
 # auth and by every route that touches a user, and it should not pull the whole HRMS model
 # tree in to validate one string. test_governance_role_field.py asserts the two agree.
-GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD", "IMPLEMENTOR"}
+GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD",
+                    # FRD §17 Payroll Maker / Payroll-HR Checker.
+                    "PAYROLL_MAKER", "PAYROLL_CHECKER",
+                    "IMPLEMENTOR"}
 
 
 class UserBase(BaseModel):

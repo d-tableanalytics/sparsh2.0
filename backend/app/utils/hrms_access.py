@@ -456,7 +456,11 @@ MD_REVIEW_ONLY_WITHHELD = frozenset({
 # Whose records a role is FOR. Everyone else holding the matching read capability sees their
 # own (and a MANAGER, where the area has a team view, their team's).
 PEOPLE_DATA_ROLES = frozenset({HrmsRole.ADMIN, HrmsRole.HR, HrmsRole.MD})
-PAYROLL_DATA_ROLES = frozenset({HrmsRole.ADMIN, HrmsRole.HR, HrmsRole.MD, HrmsRole.FINANCE})
+# FRD §17: the payroll maker and checker work on EVERYONE's payroll, so they see the whole
+# company's payroll data -- that is the job. They are deliberately NOT in PEOPLE_DATA_ROLES
+# above: seeing what the company pays is not the same as owning its personnel records.
+PAYROLL_DATA_ROLES = frozenset({HrmsRole.ADMIN, HrmsRole.HR, HrmsRole.MD, HrmsRole.FINANCE,
+                                HrmsRole.PAYROLL_MAKER, HrmsRole.PAYROLL_CHECKER})
 
 
 def sees_all_people(user: dict) -> bool:

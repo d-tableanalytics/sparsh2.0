@@ -741,6 +741,18 @@ async def _apply_regularization(company_id: str, doc: dict, req_no: str, actor: 
                   "regularized_from": req_no, "regularization_flag": True,
                   "corrected_in": doc.get("proposed_in"),
                   "corrected_out": doc.get("proposed_out"),
+                  # §6 Correction: "Reason; attachment/evidence". The day used to carry the
+                  # APPROVER's comments but not the requester's own reason, so the record
+                  # said a correction was allowed and never why it was asked for -- which
+                  # is the half an auditor reading one day actually needs.
+                  "regularisation_reason": doc.get("reason"),
+                  "regularisation_request_type": doc.get("request_type"),
+                  "regularisation_evidence": doc.get("evidence"),
+                  # The FILE stays on the request and is fetched through `regularized_from`
+                  # (regularisation_evidence_url). Copying the S3 object onto the day would
+                  # be a second copy free to drift, which is the mistake the document
+                  # register exists to avoid; the day records only THAT one exists.
+                  "regularisation_has_evidence_file": bool(doc.get("evidence_file")),
                   "manager_status": CorrectionStatus.MANAGER_APPROVED.value,
                   "hr_status": CorrectionStatus.APPROVED.value if hr_signed else None,
                   "approver_comments": remarks, "updated_at": now},
@@ -1174,9 +1186,13 @@ async def lock_period(actor: dict, company_id: str, period: str,
     # Freeze the period's own attendance rows — payroll consumes this flag, not the lock
     # document, so "is THIS row immutable" never needs a second lookup.
     start, end = f"{period}-01", f"{period}-31"
+    # §6 Lock: "Locked Flag; Locked By; Locked Date". `locked_by` alone is an ObjectId,
+    # which answers the question for a database and for nobody else -- the name travels
+    # with it so a day can SAY who closed it without a second lookup per row.
     await get_collection(COLL_ATTENDANCE).update_many(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end}},
-        {"$set": {"locked": True, "locked_by": doc["locked_by"], "locked_at": now}})
+        {"$set": {"locked": True, "locked_by": doc["locked_by"],
+                  "locked_by_name": doc["locked_by_name"], "locked_at": now}})
     await audit(actor, AUDIT_ATTENDANCE_LOCKED, ENTITY_ATT_LOCK, period,
                f"exceptions at lock: {doc['exceptions_at_lock']}", company_id)
     return _out(doc)
@@ -1208,7 +1224,8 @@ async def unlock_period(actor: dict, company_id: str, period: str, reason: str) 
     start, end = f"{period}-01", f"{period}-31"
     await get_collection(COLL_ATTENDANCE).update_many(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end}},
-        {"$set": {"locked": False, "locked_by": None, "locked_at": None}})
+        {"$set": {"locked": False, "locked_by": None, "locked_by_name": None,
+                  "locked_at": None}})
     await audit(actor, AUDIT_ATTENDANCE_UNLOCKED, ENTITY_ATT_LOCK, period, reason, company_id)
     saved = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})

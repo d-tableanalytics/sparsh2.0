@@ -213,7 +213,13 @@ const AdminPayrollCard = ({ scope, people }) => {
           </span>
           <span className="block text-[11.5px] text-[var(--text-muted)]">
             Payroll, salary, advance and variable-pay actions are withheld from the superadmin
-            unless they are listed below. Permission management is never withheld.
+            unless they are listed below. Permission management is never withheld, so access
+            can always be granted back from this page.
+            {!setting.configured && (
+              <span className="block mt-1">
+                On by default (FRD §17). Untick it to give the superadmin payroll access.
+              </span>
+            )}
           </span>
         </span>
       </label>
