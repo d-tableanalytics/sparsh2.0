@@ -129,7 +129,14 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
           </Chip>
         )}
       </div>
+      {/* FRD §6 Identity and Date/Schedule. The title carries the name and the date; a
+          record that is read to settle a dispute also has to say WHICH Sharma, in which
+          department and at which location, without the reader going to the directory. */}
       <Facts items={[
+        { label: 'Employee ID', value: r.employee_code },
+        { label: 'Department', value: r.department },
+        { label: 'Location', value: r.work_location },
+        { label: 'Day', value: r.day },
         { label: 'Scheduled', value: r.scheduled_in ? `${r.scheduled_in} – ${r.scheduled_out || '—'}` : null },
         { label: 'Actual', value: `${r.actual_in || '—'} – ${r.actual_out || '—'}` },
         { label: 'Worked', value: hoursLabel(r.worked_minutes) },
@@ -177,12 +184,25 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
 
       {(r.regularization_flag || r.regularized_from) && (
         <Section title="Regularisation">
+          {/* §6 Correction (flag, proposed in/out, reason, evidence) and §6 Approval
+              (manager, HR, comments). The proposed times are the corrected ones shown
+              above — once applied they ARE the record, so repeating them here would
+              invite the reader to treat one of the two as the real value. */}
           <Facts items={[
             { label: 'Request', value: r.regularized_from },
+            { label: 'Type', value: r.regularisation_request_type },
+            { label: 'Reason given', value: r.regularisation_reason },
+            { label: 'Evidence', value: r.regularisation_evidence },
             { label: 'Manager', value: r.manager_status },
             { label: 'HR', value: r.hr_status },
             { label: 'Comments', value: r.approver_comments },
           ]} />
+          {r.regularisation_has_evidence_file && (
+            <p className="text-[11.5px] text-[var(--text-muted)]">
+              A file was attached to {r.regularized_from}. Open it from the Regularisations
+              tab — it stays on the request rather than being copied onto the day.
+            </p>
+          )}
         </Section>
       )}
 
@@ -194,9 +214,14 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
         </Section>
       )}
 
-      {r.locked && (r.locked_at || r.locked_by) && (
+      {/* §6 Lock: "Locked Flag; Locked By; Locked Date". The flag and the date were shown
+          and the WHO was guarded on but never drawn — so the one question a locked day
+          gets asked ("who closed this?") was the one it could not answer. */}
+      {r.locked && (r.locked_at || r.locked_by_name) && (
         <p className="text-[11.5px] text-[var(--text-muted)]">
-          Locked {stamp(r.locked_at)} — changes now need the month reopened on Monthly Closure.
+          Locked {stamp(r.locked_at)}
+          {r.locked_by_name ? ` by ${r.locked_by_name}` : ''} — changes now need the month
+          reopened on Monthly Closure.
         </p>
       )}
 

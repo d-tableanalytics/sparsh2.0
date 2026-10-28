@@ -80,6 +80,11 @@ async def main() -> None:
 
     from app.models import hrms as M
     from app.utils import hrms_access as HA
+    # FRD §17's payroll-sensitive withholding is a SECOND, configurable subtraction on
+    # top of the ADMIN resolution. This file is about which decisions belong to the
+    # CLIENT, not about §17, so that layer is switched off here.
+    from app.utils import hrms_permission_policy as _POL
+    _POL.admin_payroll_withheld = lambda user: False
     import app.db.mongodb as mongo
 
     NOW = datetime.now(timezone.utc)

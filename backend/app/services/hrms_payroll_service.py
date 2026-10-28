@@ -737,7 +737,12 @@ async def save_salary_structure(actor: dict, company_id: str, payload: dict) -> 
         **totals,
         "status": StructureStatus.PENDING.value if needs_approval else StructureStatus.ACTIVE.value,
         "created_by": _actor_id(actor), "created_by_name": _actor_name(actor),
-        "submitted_by": _actor_id(actor), "submitted_at": now,
+        # §9 Approval: "Created By; Submitted By; Approved By; Approval Date". `submitted_by`
+        # carried only an ObjectId, so the one field the approval trail could not SHOW was
+        # the person who put it up -- the same gap `locked_by` had on a locked attendance
+        # day. The name travels with the id for the same reason.
+        "submitted_by": _actor_id(actor), "submitted_by_name": _actor_name(actor),
+        "submitted_at": now,
         "approved_by": None if needs_approval else _actor_id(actor),
         "approved_by_name": None if needs_approval else _actor_name(actor),
         "approved_at": None if needs_approval else now,
@@ -2064,7 +2069,16 @@ def _decision_action(payload: dict, allowed: dict, *, verb: str) -> tuple:
     read identically to an operator: pass it on silently, say why when sending it back."""
     action = str(payload.get("action") or "").lower()
     if not action:
-        action = verb if payload.get("approved") else "reject"
+        # `approved` is the older clients' field and stays honoured -- but only when it is
+        # actually PRESENT. Treating its absence as False meant a request that named no
+        # action at all (a typo'd key, a caller that sent only remarks) REJECTED the
+        # payroll: a destructive default on the one control §12 puts between a maker and
+        # the money. Silence is now a 422, so the intent has to be stated.
+        if payload.get("approved") is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Say what to do with the payroll: {', '.join(sorted(allowed))}.")
+        action = verb if payload["approved"] else "reject"
     if action not in allowed:
         raise HTTPException(status_code=422,
                             detail=f"Action must be {', '.join(sorted(allowed))}.")
@@ -2340,6 +2354,66 @@ async def payroll_register_csv(actor: dict, company_id: str, period: str) -> str
                r.get("total_deductions"), r.get("total_employer_contributions"),
                r.get("net_pay"), r.get("previous_net"), r.get("variance_amount"),
                r.get("variance_percent"), "; ".join(r.get("exceptions") or [])])
+    return buf.getvalue()
+
+
+async def accounting_summary_csv(actor: dict, company_id: str, period: str) -> str:
+    """§24 "Accounting / Bank Mapping -- optional code/reference for downstream export".
+
+    The register above is one row per EMPLOYEE, which is what payroll reads. An accounting
+    system needs the opposite shape: one row per COMPONENT, totalled for the period and
+    carrying the code the company maps that component to. Without this the accounting code
+    was a field somebody could fill in that nothing ever read -- configuration with no
+    consumer, which is worse than no field at all because it looks like it works.
+
+    Unmapped components are listed too, with a blank code. Silently dropping them would
+    make the export balance against nothing and hide exactly the setup mistake an
+    accountant needs to see.
+    """
+    from app.utils.hrms_access import sees_all_payroll
+    if not sees_all_payroll(actor):
+        raise HTTPException(status_code=403,
+                            detail="Only payroll roles can export the accounting summary.")
+    records = await get_collection(COLL_PAYROLL_RECORDS).find(
+        {"company_id": str(company_id), "period": period}).to_list(5000)
+    meta = {c["code"]: c for c in await list_salary_components(actor, company_id)}
+
+    totals: dict = {}
+    for r in records:
+        for line in r.get("lines") or []:
+            code = line["code"]
+            row = totals.setdefault(code, {"amount": 0.0, "employees": 0})
+            row["amount"] += float(line.get("amount") or 0)
+            row["employees"] += 1
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Period", "Component Code", "Component Name", "Type",
+                     "Accounting Code", "Payslip Section", "Employees", "Total Amount"])
+    for code in sorted(totals):
+        m = component_defaults(meta.get(code) or {"code": code})
+        writer.writerow([period, code, m.get("name") or code,
+                         m.get("component_type"), m.get("accounting_code") or "",
+                         m.get("payslip_section"), totals[code]["employees"],
+                         round(totals[code]["amount"], 2)])
+    # The money that never belonged to a component: monthly inputs and adjustments are
+    # real debits and credits too, so an export that left them out would not reconcile
+    # to the net the bank was asked to pay.
+    for key, label, ctype in (("reimbursements", "Reimbursements", "Earning"),
+                              ("arrears", "Arrears", "Earning"),
+                              ("bonus", "Bonus", "Earning"),
+                              ("other_earnings", "Other earnings", "Earning"),
+                              ("variable_pay_payout", "Variable pay", "Earning"),
+                              ("pf", "PF", "Deduction"), ("esi", "ESI", "Deduction"),
+                              ("pt", "PT", "Deduction"), ("tds", "TDS", "Deduction"),
+                              ("advance_recovery", "Advance recovery", "Recovery"),
+                              ("notice_recovery", "Notice recovery", "Recovery"),
+                              ("other_deductions", "Other deductions", "Deduction")):
+        amount = sum(float(r.get(key) or 0) for r in records)
+        count = sum(1 for r in records if float(r.get(key) or 0))
+        if amount:
+            writer.writerow([period, f"_{key.upper()}", label, ctype, "", "", count,
+                             round(amount, 2)])
     return buf.getvalue()
 
 

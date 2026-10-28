@@ -122,6 +122,14 @@ async def main() -> None:
     from app.models import hrms as M
     from app.utils import hrms_access as A
 
+    # FRD §17 withholds payroll-sensitive capabilities from the system admin unless the
+    # company grants them. That is a SECOND, configurable subtraction layered on top of
+    # the ADMIN resolution, and the property under test in this file is the resolution
+    # itself -- "every capability, so a later phase cannot lock the owner out". So the
+    # §17 layer is switched off here; test_core_relationships_and_access owns it.
+    from app.utils import hrms_permission_policy as _POL
+    _POL.admin_payroll_withheld = lambda user: False
+
     # ---------------------------------------------------------
     section("Role translation (positive)")
     # ---------------------------------------------------------
