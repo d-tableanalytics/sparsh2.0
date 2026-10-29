@@ -187,6 +187,12 @@ async def main() -> int:
 
     # ── 4 ──
     section("4. Configurable fields (FRD §21-22)")
+    # This section exercises the field lifecycle itself, so field governance (on by
+    # default since DEF-02; covered by test_gap5_config_governance) is switched off.
+    await store[M.COLL_SETTINGS].update_one(
+        {"company_id": CO}, {"$set": {"governed_config_types": [
+            "policy_version", "salary_component"]},
+                       "$setOnInsert": {"company_id": CO}}, upsert=True)
     f = await EM.save_field_definition(HR, CO, {
         "module": "employee", "code": "psc_status", "label": "PSC status",
         "data_type": "single_select", "mandatory": True,
@@ -222,6 +228,11 @@ async def main() -> int:
                "calculation_method": "Percentage", "calculation_base": "BASIC", "percentage": 12,
                "sequence": 40}):
         await PR.save_salary_component(HR, CO, c)
+    # New components are created as Draft behind a change request (DEF-02); these are the
+    # fixtures for pricing pay, so they are put live directly, as an activated request would.
+    for c in await store[M.COLL_SALARY_COMPONENTS].find({}).to_list(100):
+        await store[M.COLL_SALARY_COMPONENTS].update_one(
+            {"code": c["code"]}, {"$set": {"lifecycle": "Active", "pending_request_no": None}})
     await expect("BASIC as a % of HRA (circular)", PR.save_salary_component(HR, CO, {
         "code": "BASIC", "name": "Basic", "component_type": "Earning",
         "calculation_method": "Percentage", "calculation_base": "HRA", "percentage": 50}),

@@ -46,6 +46,7 @@ const RULE_FIELDS = {
   ATT_DAY: [
     ['daily_grace_minutes', 'Daily grace (min)', 'Late Coming', 'number'],
     ['monthly_buffer_minutes', 'Monthly late buffer (min)', 'Late Coming', 'number'],
+    ['late_threshold_minutes', 'Late mark only beyond (min after grace)', 'Late Coming', 'number'],
     ['late_escalation_days', 'Escalate at late days / month', 'Late Coming', 'number'],
     ['early_going_grace_minutes', 'Early-going grace (min)', 'Early Going', 'number'],
     ['half_day_threshold_minutes', 'Half day below (worked min)', 'Half Day', 'number'],

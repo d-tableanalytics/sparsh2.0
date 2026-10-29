@@ -51,10 +51,10 @@ SHIFT_PARAMS = {
     "weekly_off_pattern": None,
 }
 APPLICABILITY_KEYS = ("attendance_policy_groups", "locations", "employee_categories",
-                      "grades", "department_ids")
+                      "grades", "levels", "department_ids")
 _PROFILE_KEY = {"attendance_policy_groups": "attendance_policy_group",
                 "locations": "work_location", "employee_categories": "employee_category",
-                "grades": "grade", "department_ids": "department_id"}
+                "grades": "grade", "levels": "level", "department_ids": "department_id"}
 
 
 def _today() -> str:

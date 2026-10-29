@@ -5,7 +5,7 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
-  getConfigAudit, getConfigImpact, exportConfigAudit,
+  getConfigAudit, getConfigImpact, exportConfigAudit, exportConfigSnapshot,
   listPolicyVersions, simulateAttendancePolicy, listSalaryComponents, simulateSalaryComponent,
 } from '../../../services/hrmsApi';
 import { CAP } from '../access';
@@ -49,6 +49,19 @@ const AuditTab = () => {
   // capability an auditor is given — reading the register is a different question.
   const [exporting, setExporting] = useState(false);
   const [entityType, setEntityType] = useState('');
+  // P1-143: what the configuration IS today, beside the audit of how it got there.
+  const [snapshotting, setSnapshotting] = useState(false);
+
+  const runSnapshot = async () => {
+    setSnapshotting(true);
+    try {
+      await exportConfigSnapshot(scope);
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not download the configuration snapshot.');
+    } finally {
+      setSnapshotting(false);
+    }
+  };
 
   const runExport = async () => {
     setExporting(true);
@@ -133,9 +146,14 @@ const AuditTab = () => {
           <option value="field_definition">Field definitions</option>
         </select>
         {can(CAP.CONFIG_AUDIT_READ) && (
-          <Btn onClick={runExport} disabled={exporting}>
-            <Download size={14} /> {exporting ? 'Exporting…' : 'Export'}
-          </Btn>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={runSnapshot} disabled={snapshotting}>
+              <Download size={14} /> {snapshotting ? 'Preparing…' : 'Download configuration snapshot'}
+            </Btn>
+            <Btn onClick={runExport} disabled={exporting}>
+              <Download size={14} /> {exporting ? 'Exporting…' : 'Export'}
+            </Btn>
+          </div>
         )}
       </div>
       {loading && <HrmsLoading label="Loading the configuration audit…" />}

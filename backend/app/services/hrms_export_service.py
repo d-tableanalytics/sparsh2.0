@@ -189,10 +189,14 @@ ATTENDANCE_MONTHLY_COLUMNS = [
 # The statuses a monthly total counts, and the column each lands in. Driven off a map
 # rather than a chain of ifs so a new status is one line and cannot be forgotten in the
 # totals while appearing in the daily rows.
+NO_RECORD_STATUS = "Absent (no record)"
+
 _MONTHLY_BUCKET = {
     "Present": "present", "Half Day": "half_day", "Absent": "absent",
     "On Leave": "leave", "On OD": "od", "Weekly Off": "weekly_off",
     "Holiday": "holiday", "Pending": "pending",
+    # DEF-14: a working day with no record at all is absent -- payroll charges it as LOP.
+    NO_RECORD_STATUS: "absent",
 }
 
 
@@ -209,12 +213,58 @@ async def _attendance_days(actor: dict, company_id: str, period: str,
     return rows[:MAX_EXPORT_ROWS], truncated
 
 
+async def _unrecorded_rows(actor: dict, company_id: str, period: str,
+                           employee_code: str = None) -> list:
+    """DEF-14: every working day with NO attendance record, as report rows. Payroll charges
+    each as LOP (DEF-05), so both attendance reports show it rather than leaving a silent
+    gap. Same row scope as the recorded days: the scope query decides whose days this caller
+    may see."""
+    from app.services.hrms_attendance_service import _scope_query, unrecorded_absences
+    scope = await _scope_query(actor, company_id, {})
+    allowed = scope.get("employee_code")
+    gaps = (await unrecorded_absences(company_id, period, every_day=True)).get("unrecorded") or []
+    out = []
+    for g in gaps:
+        code = g["employee_code"]
+        if employee_code and code != employee_code:
+            continue
+        if isinstance(allowed, dict) and code not in allowed.get("$in", []):
+            continue
+        if isinstance(allowed, str) and code != allowed:
+            continue
+        out.append({"employee_code": code, "employee_name": g.get("employee_name"),
+                    "work_date": g["work_date"], "status": NO_RECORD_STATUS,
+                    "payable_day": 0, "lop_fraction": 1, "source": "No record"})
+    return out
+
+
 async def attendance_daily(actor: dict, company_id: str, period: str,
                            employee_code: str = None) -> dict:
     rows, truncated = await _attendance_days(actor, company_id, period, employee_code)
+    # DEF-14: a day row carries `shift_code` only when a named shift judged it, so the Shift
+    # column was blank for everyone on company timing or on an un-stamped day. Fall back to
+    # the employee's assigned shift, then to the name the rules engine itself uses.
+    from app.models.hrms import COLL_EMPLOYEE_PROFILES
+    codes = list({r.get("employee_code") for r in rows if r.get("employee_code")})
+    assigned = {p["employee_code"]: p.get("shift_code")
+                for p in await get_collection(COLL_EMPLOYEE_PROFILES).find(
+                    {"company_id": str(company_id), "employee_code": {"$in": codes}},
+                    {"employee_code": 1, "shift_code": 1}).to_list(len(codes) or 1)}
     for r in rows:
         minutes = r.get("worked_minutes")
         r["worked_hours"] = round(minutes / 60.0, 2) if minutes else None
+        r["shift_code"] = (r.get("shift_code") or assigned.get(r.get("employee_code"))
+                           or "Company timing")
+    for g in await _unrecorded_rows(actor, company_id, period, employee_code):
+        g["shift_code"] = assigned.get(g["employee_code"]) or "Company timing"
+        rows.append(g)
+    from datetime import date as _date
+    for r in rows:
+        if not r.get("weekday"):
+            try:
+                r["weekday"] = r.get("day") or _date.fromisoformat(r["work_date"]).strftime("%A")
+            except (KeyError, TypeError, ValueError):
+                pass
     rows.sort(key=lambda r: (r.get("employee_code") or "", r.get("work_date") or ""))
     return payload(f"attendance_{period}_daily", ATTENDANCE_DAILY_COLUMNS,
                    _rows(ATTENDANCE_DAILY_COLUMNS, rows), truncated=truncated)
@@ -230,6 +280,9 @@ async def attendance_monthly(actor: dict, company_id: str, period: str,
     disagrees with the payslip -- which is the defect Gap 1 closed one layer down.
     """
     rows, truncated = await _attendance_days(actor, company_id, period, employee_code)
+    # DEF-14: the no-record days the daily report lists are absences here too, so the two
+    # reports agree with each other and with payroll's LOP.
+    rows = rows + await _unrecorded_rows(actor, company_id, period, employee_code)
     totals: dict = {}
     for r in rows:
         code = r.get("employee_code") or ""
@@ -364,6 +417,12 @@ async def reconciliation(actor: dict, company_id: str, period: str) -> dict:
 
     approved_amount = round(sum(payable.values()), 2)
     batch_amount = round(sum(float(b.get("total_amount") or 0) for b in batches), 2)
+    # DEF-13: what reached a batch, each employee's payment ONCE. A failure that was retried
+    # is superseded by its retry row, so the batch FILE totals (retries included) count it
+    # twice and "approved - batched" went negative by exactly the retried amount.
+    batched_amount = total([p for p in payments
+                            if not (p.get("status") in (FAILED, REJECTED)
+                                    and p.get("retry_batch_no"))])
     processed_amount = total(processed)
 
     rows = [
@@ -384,8 +443,10 @@ async def reconciliation(actor: dict, company_id: str, period: str) -> dict:
         {"measure": "Payable but never batched", "employees": len(not_batched),
          "amount": round(sum(not_batched.values()), 2),
          "note": "; ".join(sorted(not_batched)[:20]) or ""},
+        {"measure": "Batched, each payment once", "employees": len(batched_codes),
+         "amount": batched_amount, "note": "Retried failures counted once, in the retry"},
         {"measure": "Difference: approved - batched", "employees": "",
-         "amount": round(approved_amount - batch_amount, 2),
+         "amount": round(approved_amount - batched_amount, 2),
          "note": "Zero when every approved rupee reached a batch"},
         {"measure": "Difference: approved - processed", "employees": "",
          "amount": round(approved_amount - processed_amount, 2),
@@ -398,10 +459,11 @@ async def reconciliation(actor: dict, company_id: str, period: str) -> dict:
     out["summary"] = {
         "period": period, "run_status": run.get("status"), "final": final,
         "approved_amount": approved_amount, "approved_employees": len(payable),
-        "batch_amount": batch_amount, "processed_amount": processed_amount,
+        "batch_amount": batch_amount, "batched_amount": batched_amount,
+        "processed_amount": processed_amount,
         "pending_amount": total(pending), "failed_amount": total(failed),
         "not_batched_amount": round(sum(not_batched.values()), 2),
-        "difference_batched": round(approved_amount - batch_amount, 2),
+        "difference_batched": round(approved_amount - batched_amount, 2),
         "difference_processed": round(approved_amount - processed_amount, 2),
     }
     return out

@@ -849,7 +849,7 @@ async def _finish_view(actor: dict, view: dict, profile: Optional[dict], *, is_s
     view["custom_fields"] = master.visible_custom_fields(
         defs, profile.get("custom_fields"), is_hr=is_hr, is_self=is_self,
         is_manager=hrms_role(actor) == HrmsRole.MANAGER,
-        is_payroll=can(actor, Cap.PAYROLL_PROCESS))
+        is_payroll=can(actor, Cap.PAYROLL_PROCESS), context=profile)
     if is_hr and profile.get("employee_code"):
         view["scheduled_changes"] = await master.scheduled_for(company_id,
                                                                 profile["employee_code"])
@@ -1077,6 +1077,22 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
     tracked = {f: (before.get(f), clean[f]) for f in EMPLOYEE_TRACKED_FIELDS
                if f in clean and clean[f] != before.get(f)
                and not (clean[f] in (None, "", []) and before.get(f) in (None, "", []))}
+    # DEF-09 -- every other field (personal, contact, statutory, each custom field) is
+    # recorded with its old and new value too. These are not effective-dated: they apply
+    # now, so their history row is dated today whatever `effective_from` says.
+    def _empty(v):
+        return v in (None, "", [])
+    untracked = {f: (before.get(f), clean[f]) for f in clean
+                 if f not in EMPLOYEE_TRACKED_FIELDS and f != "custom_fields"
+                 and clean[f] != before.get(f) and not (_empty(clean[f]) and _empty(before.get(f)))}
+    if "custom_fields" in clean:
+        old_custom = before.get("custom_fields") or {}
+        new_custom = clean.get("custom_fields") or {}
+        for key in sorted(set(old_custom) | set(new_custom)):
+            old_v, new_v = old_custom.get(key), new_custom.get(key)
+            if old_v != new_v and not (_empty(old_v) and _empty(new_v)):
+                untracked[f"custom_fields.{key}"] = (old_v, new_v)
+
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     scheduled = effective_from > today
     if scheduled:
@@ -1101,14 +1117,18 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
     await master.record_changes(actor, company_id, saved, tracked,
                                 effective_from=effective_from, reason=reason,
                                 status=HISTORY_SCHEDULED if scheduled else HISTORY_APPLIED)
+    await master.record_changes(actor, company_id, saved, untracked,
+                                effective_from=today, reason=reason, status=HISTORY_APPLIED)
     if scheduled and tracked:
         await audit(actor, AUDIT_EMPLOYEE_CHANGE_SCHEDULED, ENTITY_EMPLOYEE, str(user_id),
-                    f"{', '.join(sorted(tracked))} from {effective_from}", company_id)
+                    f"{', '.join(sorted(tracked))} from {effective_from}", company_id,
+                    changes=master.audit_changes(tracked))
 
     changed = sorted(k for k in clean if k not in ("updated_at", "updated_by"))
     if changed:
+        applied = {**({} if scheduled else tracked), **untracked}
         await audit(actor, AUDIT_EMPLOYEE_UPDATED, ENTITY_EMPLOYEE, str(user_id),
-                    ", ".join(changed), company_id)
+                    ", ".join(changed), company_id, changes=master.audit_changes(applied))
     if salary_changing and "base_salary" in clean:
         # Pay changes get their own audit line so a payroll dispute can be traced without
         # reading every field-level update row.

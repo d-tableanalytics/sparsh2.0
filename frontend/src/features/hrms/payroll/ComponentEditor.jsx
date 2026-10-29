@@ -65,9 +65,19 @@ const VariablePicker = ({ bases, vars, onPick }) => {
 export const ComponentList = ({ components, canManage, onEdit, onToggle, busyCode }) => {
   const sorted = [...components].sort((a, b) => (a.sequence ?? 100) - (b.sequence ?? 100)
     || a.code.localeCompare(b.code));
-  const status = (c) => (
-    <Chip tone={c.active === false ? 'neutral' : 'good'}>{c.active === false ? 'Retired' : 'Active'}</Chip>
-  );
+  // The lifecycle, not just the on/off flag: a new component waiting for approval (DEF-02)
+  // is a Draft that pays nobody, and showing it as "Active" said the opposite.
+  const status = (c) => {
+    const label = c.active === false ? 'Retired' : (c.lifecycle || 'Active');
+    return (
+      <div className="flex flex-col items-end gap-0.5">
+        <Chip tone={label === 'Active' ? 'good' : label === 'Retired' ? 'neutral' : 'warn'}>{label}</Chip>
+        {c.pending_request_no && (
+          <span className="text-[10.5px] text-[var(--text-muted)]">Awaiting approval · {c.pending_request_no}</span>
+        )}
+      </div>
+    );
+  };
   const actions = (c) => canManage && (
     <div className="flex gap-3">
       <button type="button" onClick={() => onEdit(c)}
@@ -139,7 +149,7 @@ export const ComponentEditorModal = ({
     calculation_method: component?.calculation_method || 'Fixed',
     calculation_base: component?.calculation_base || '',
     percentage: component?.percentage ?? '',
-    proration: component?.proration || '',
+    proration: component?.proration_configured === false ? '' : (component?.proration || ''),
     lifecycle: component?.lifecycle || '',
     effective_from: component?.effective_from || '',
     effective_to: component?.effective_to || '',

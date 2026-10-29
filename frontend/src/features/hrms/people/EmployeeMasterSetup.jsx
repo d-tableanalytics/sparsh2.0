@@ -87,7 +87,7 @@ const BLANK_FIELD = {
 // `_applies` compares the record's value with the listed ones). Company is implicit --
 // every definition already belongs to one company.
 const APPLICABILITY_KEYS = [
-  ['work_location', 'Locations'], ['grade', 'Grades'], ['level', 'Levels'],
+  ['legal_entity', 'Companies / legal entities'], ['work_location', 'Locations'], ['grade', 'Grades'], ['level', 'Levels'],
   ['employee_category', 'Employee categories'], ['payroll_group', 'Payroll groups'],
 ];
 

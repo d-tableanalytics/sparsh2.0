@@ -45,6 +45,7 @@ const TYPE_LABEL = {
   policy_version: 'Policy versions — attendance rules, payroll policy',
   salary_component: 'Salary components — formulas, slabs, proration',
   field_definition: 'Custom field definitions — what is mandatory, masked and exported',
+  attendance_rules: 'Company attendance rules — grace, half day, closing day',
 };
 
 /**
@@ -130,7 +131,7 @@ const RequestDetail = ({ request, canApprove, canDraft, busy, onDecide, onActiva
   const [comments, setComments] = useState('');
   const [simPeriod, setSimPeriod] = useState(new Date().toISOString().slice(0, 7));
   const drafting = DRAFTER_STATUSES.includes(request.status);
-  const simulable = request.entity_type !== 'field_definition';
+  const simulable = !['field_definition', 'attendance_rules'].includes(request.entity_type);
   const impact = request.impact || {};
   const change = request.definition_change || {};
   const pending = request.status === 'Pending Approval';
@@ -434,7 +435,14 @@ const ConfigApprovalInbox = () => {
       )}
       {!loading && !error && !!rows.length && (
         <div className="space-y-2">
-          <RecordList rows={rows} columns={columns} keyOf={(r) => r.request_no} />
+          {/* renderCard is required: RecordList always renders the phone cards (hidden on
+              desktop), and without it the whole page threw "renderCard is not a function". */}
+          <RecordList rows={rows} columns={columns} keyOf={(r) => r.request_no}
+            renderCard={(r) => (
+              <div className="space-y-1.5">
+                {columns.map((col) => <div key={col.key}>{col.render(r)}</div>)}
+              </div>
+            )} />
           {openNo && (
             <div className="rounded-lg border border-[var(--border)] px-3.5 py-3">
               {detail

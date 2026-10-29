@@ -190,8 +190,8 @@ from app.services import hrms_pulse_service as pulse_mgmt
 from app.services import hrms_employee_360_service as employee_360_mgmt
 from app.services.hrms_audit_service import read_audit
 from app.utils.hrms_access import (
-    NO_ACCESS_MESSAGE, can, capabilities_for, ensure_hrms_enabled, hrms_role,
-    is_internal_user, scope_company_id,
+    can, capabilities_for, ensure_hrms_enabled, hrms_role, is_internal_user,
+    permission_denied_message, scope_company_id,
 )
 
 
@@ -210,7 +210,7 @@ def _require(user: dict, capability: Cap) -> None:
     """Capability gate. Every protected endpoint calls this and nothing else, so there is
     exactly one place a permission decision can be made (and audited)."""
     if not can(user, capability):
-        raise HTTPException(status_code=403, detail=NO_ACCESS_MESSAGE)
+        raise HTTPException(status_code=403, detail=permission_denied_message(capability))
 
 
 async def _require_payroll_matrix_cap(user: dict, company_id: str, key: str) -> None:
@@ -239,7 +239,7 @@ def _require_any(user: dict, *capabilities: Cap) -> None:
     settled by an ownership check in the service, not here.
     """
     if not any(can(user, c) for c in capabilities):
-        raise HTTPException(status_code=403, detail=NO_ACCESS_MESSAGE)
+        raise HTTPException(status_code=403, detail=permission_denied_message(*capabilities))
 
 
 def _company(user: dict, requested: str = None) -> str:
@@ -2042,6 +2042,7 @@ async def delete_hrms_document(
 async def list_hrms_appointments(
     status: Optional[str] = Query(None),
     uk: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     company_id: Optional[str] = Query(None),
@@ -2052,7 +2053,7 @@ async def list_hrms_appointments(
     _require(current_user, Cap.APPOINTMENT_READ)
     return await appointments.list_appointments(
         current_user, _company(current_user, company_id),
-        status=status, uk=uk, search=search, limit=limit)
+        status=status, uk=uk, employee_code=employee_code, search=search, limit=limit)
 
 
 @router.get("/appointments/eligible")
@@ -2073,7 +2074,8 @@ async def create_hrms_appointment(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Draft an appointment letter, defaulting every term from the accepted offer."""
+    """Draft an appointment letter, defaulting every term from the accepted offer -- or,
+    with `employee_code`, from the employee record of someone added directly in HR."""
     _require(current_user, Cap.APPOINTMENT_WRITE)
     return await appointments.create_appointment(
         current_user, _company(current_user, company_id), body.model_dump())
@@ -5099,6 +5101,22 @@ async def decide_payroll_run(
         current_user, _company(current_user, company_id), period, body.model_dump())
 
 
+@router.post("/payroll/runs/{period}/approve-stage")
+async def act_on_payroll_stage(
+    period: str,
+    body: PayrollApprovalIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """P1-095: pass, return or reject the stage a run waits on under the company's
+    CONFIGURED approval chain. The route admits any payroll role; the stage's own
+    capability and roles are checked by the service, because which applies depends on
+    which stage the run is at."""
+    _require_any(current_user, Cap.PAYROLL_PROCESS, Cap.PAYROLL_CHECK, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.act_on_stage(
+        current_user, _company(current_user, company_id), period, body.model_dump())
+
+
 # ── Phase PAYSLIP-1 (§22.7, SM-HR-031/SM-HR-064) — the itemised payslip ──
 @router.get("/payslips/{period}")
 async def get_payslip(
@@ -7602,6 +7620,25 @@ async def export_config_audit(
         current_user, _company(current_user, company_id),
         entity_type=entity_type, limit=limit)
     return _export_response(data, fmt, "config_audit")
+
+
+@router.get("/config/snapshot")
+async def export_config_snapshot(
+    fmt: str = Query("xlsx", pattern="^(xlsx|csv|json)$"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The configuration IN FORCE, one section per area, with versions and effective dates
+    (P1-143). Read-only. `config.audit_read`, like the configuration audit beside it: the
+    two together are what an auditor or a UAT sign-off needs."""
+    _require(current_user, Cap.CONFIG_AUDIT_READ)
+    from app.services import hrms_config_snapshot_service as snapshot
+    result = await snapshot.export(_company(current_user, company_id), fmt)
+    if fmt == "json":
+        return result
+    body, media, name = result
+    return _Response(content=body, media_type=media,
+                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ── Which configuration types this company governs (FRD §27) ──

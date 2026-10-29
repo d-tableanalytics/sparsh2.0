@@ -53,7 +53,13 @@ export const RecordList = ({ rows, columns, renderCard, keyOf, empty }) => {
         {rows.map((row) => (
           <div key={keyOf(row)}
             className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3.5">
-            {renderCard(row)}
+            {/* A list that supplies no card falls back to its columns stacked, rather than
+                throwing and blanking the whole page. */}
+            {renderCard ? renderCard(row) : (
+              <div className="space-y-1.5">
+                {columns.map((col) => <div key={col.key}>{col.render(row)}</div>)}
+              </div>
+            )}
           </div>
         ))}
       </div>

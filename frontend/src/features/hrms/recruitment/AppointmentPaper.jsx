@@ -53,7 +53,7 @@ const AppointmentPaper = ({ appointment, signature, showAcknowledgement = true }
       </p>
 
       <div className="text-[14px] leading-[1.75] whitespace-pre-wrap mb-8">
-        {appointment.content}
+        {appointment.rendered_content || appointment.content}
       </div>
 
       <table className="w-full text-[13.5px] mb-9" style={{ borderCollapse: 'collapse' }}>

@@ -164,6 +164,12 @@ async def main() -> int:
 
     # ── 3. Dependent validation ─────────────────────────────────────────────────────
     section("3. FRD 22 dependent validation")
+    # The field lifecycle itself is under test here, so field governance (on by default
+    # since DEF-02; covered by test_gap5_config_governance) is switched off.
+    await getter(M.COLL_SETTINGS).update_one(
+        {"company_id": CO}, {"$set": {"governed_config_types": [
+            "policy_version", "salary_component"]},
+                       "$setOnInsert": {"company_id": CO}}, upsert=True)
     await expect("a field depending on itself",
                  EM.save_field_definition(HR, CO, {
                      "module": "employee", "code": "spouse_name", "label": "Spouse name",

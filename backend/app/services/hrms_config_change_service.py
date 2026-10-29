@@ -44,9 +44,9 @@ from app.models.hrms import (
     COLL_CONFIG_APPROVALS, COLL_CONFIG_CHANGE_REQUESTS, COLL_EMPLOYEE_PROFILES,
     COLL_FIELD_DEFINITIONS, COLL_SETTINGS,
     CONFIG_ENTITY_FIELD_DEFINITION, CONFIG_ENTITY_POLICY_VERSION,
-    CONFIG_ENTITY_SALARY_COMPONENT, CONFIG_ENTITY_TYPES,
-    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, DEFAULT_GOVERNED_CONFIG_TYPES,
-    ENTITY_CONFIG_CHANGE,
+    CONFIG_ENTITY_SALARY_COMPONENT, CONFIG_ENTITY_TYPES, CONFIG_ENTITY_ATTENDANCE_RULES,
+    COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES, ALWAYS_GOVERNED_CONFIG_TYPES,
+    DEFAULT_GOVERNED_CONFIG_TYPES, ENTITY_CONFIG_CHANGE,
     ConfigChangeStatus, FieldStatus, PolicyVersionStatus, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
@@ -243,7 +243,10 @@ async def _component_activate(actor: dict, company_id: str, request: dict) -> di
     now = datetime.now(timezone.utc)
     pending = dict(component.get("pending_definition") or {})
     pending.pop("lifecycle", None)
+    # pending_request_no is cleared on every activation: a NEW component (DEF-02) carries
+    # its creating request there with no staged definition behind it.
     updates = {"lifecycle": "Active", "activated_at": now, "updated_at": now,
+               "pending_request_no": None,
                "approved_by": request.get("decided_by"),
                "approved_by_name": request.get("decided_by_name")}
     push = {}
@@ -413,6 +416,53 @@ async def _field_approve(actor: dict, company_id: str, request: dict) -> None:
                   "updated_at": now}})
 
 
+# ─────────────────────────────────────────────────────────────
+# Company attendance rules (FRD §30)
+# ─────────────────────────────────────────────────────────────
+async def _att_rules_load(company_id: str, request: dict) -> dict:
+    doc = await get_collection(COLL_SETTINGS).find_one({"company_id": str(company_id)}) or {}
+    if not (doc.get("shift_policy_pending") or {}).get("changes"):
+        raise HTTPException(status_code=404,
+                            detail="No attendance-rule change is waiting to be applied.")
+    return doc
+
+
+async def _att_rules_impact(company_id: str, request: dict) -> dict:
+    doc = await _att_rules_load(company_id, request)
+    pending = doc["shift_policy_pending"]
+    total = await get_collection(COLL_EMPLOYEE_PROFILES).count_documents(
+        {"company_id": str(company_id)})
+    return {"entity": "Company attendance rules", "employees_affected": total,
+            "total_employees": total,
+            "effective_from": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "references": [], "history": [], "retroactive": False,
+            "warnings": [f"Changes {', '.join(sorted(pending['changes']))} for every employee "
+                         f"whose shift or policy does not override it. Days already judged "
+                         f"keep their status."]}
+
+
+async def _att_rules_activate(actor: dict, company_id: str, request: dict) -> dict:
+    from app.services.hrms_attendance_service import apply_shift_policy, get_shift_policy
+    doc = await _att_rules_load(company_id, request)
+    pending = doc["shift_policy_pending"]
+    current = await get_shift_policy(company_id)
+    await apply_shift_policy(
+        actor, company_id, current, {**current, **pending["changes"]}, pending.get("reason"),
+        approved_by=request.get("decided_by_name") or request.get("decided_by"),
+        via=request.get("request_no"))
+    await get_collection(COLL_SETTINGS).update_one(
+        {"company_id": str(company_id)}, {"$set": {"shift_policy_pending": None}})
+    return await get_shift_policy(company_id)
+
+
+async def _att_rules_describe(company_id: str, request: dict) -> dict:
+    doc = await get_collection(COLL_SETTINGS).find_one({"company_id": str(company_id)}) or {}
+    pending = doc.get("shift_policy_pending") or {}
+    return {"old": pending.get("old"), "new": pending.get("changes"),
+            "old_version": doc.get("shift_policy_version"),
+            "new_version": int(doc.get("shift_policy_version") or 0) + 1}
+
+
 async def _field_describe(company_id: str, request: dict) -> dict:
     """§30's old/new definition -- the staged change against what is live now."""
     definition = await _field_load(company_id, request)
@@ -448,6 +498,12 @@ ENTITY_HANDLERS = {
         "describe": _field_describe,
         "approve": _field_approve,
     },
+    CONFIG_ENTITY_ATTENDANCE_RULES: {
+        "load": _att_rules_load,
+        "impact": _att_rules_impact,
+        "activate": _att_rules_activate,
+        "describe": _att_rules_describe,
+    },
 }
 
 
@@ -457,7 +513,8 @@ ENTITY_HANDLERS = {
 async def governed_types(company_id: str) -> set:
     """The configuration types this company puts through the flow.
 
-    Read from `hrms_settings.governed_config_types`, defaulting to the pay-deciding ones.
+    Read from `hrms_settings.governed_config_types`, defaulting to the pay-deciding ones
+    plus field definitions (DEFAULT_GOVERNED_CONFIG_TYPES).
     An unknown or misspelt name is DROPPED rather than honoured: a typo in this setting
     must not be able to un-govern the salary components by accident, and silently governing
     a type nothing can handle would 422 every save of it.
@@ -487,7 +544,7 @@ async def set_governed_types(actor: dict, company_id: str, types) -> dict:
             status_code=422,
             detail=f"Unknown configuration type(s): {', '.join(sorted(unknown))}. "
                    f"Known: {', '.join(CONFIG_ENTITY_TYPES)}.")
-    final = sorted(wanted | set(DEFAULT_GOVERNED_CONFIG_TYPES))
+    final = sorted(wanted | set(ALWAYS_GOVERNED_CONFIG_TYPES))
     now = datetime.now(timezone.utc)
     await get_collection(COLL_SETTINGS).update_one(
         {"company_id": str(company_id)},
@@ -496,13 +553,13 @@ async def set_governed_types(actor: dict, company_id: str, types) -> dict:
     await audit(actor, AUDIT_CONFIG_DECIDED, ENTITY_CONFIG_CHANGE, "governed_types",
                 ", ".join(final), company_id)
     return {"governed_config_types": final,
-            "always_governed": sorted(DEFAULT_GOVERNED_CONFIG_TYPES),
+            "always_governed": sorted(ALWAYS_GOVERNED_CONFIG_TYPES),
             "known": list(CONFIG_ENTITY_TYPES)}
 
 
 async def get_governed_types(company_id: str) -> dict:
     return {"governed_config_types": sorted(await governed_types(company_id)),
-            "always_governed": sorted(DEFAULT_GOVERNED_CONFIG_TYPES),
+            "always_governed": sorted(ALWAYS_GOVERNED_CONFIG_TYPES),
             "known": list(CONFIG_ENTITY_TYPES)}
 
 

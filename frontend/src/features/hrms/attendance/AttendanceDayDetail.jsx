@@ -3,6 +3,7 @@ import { Lock } from 'lucide-react';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
 import { SOURCE_LABEL, hoursLabel, payableLabel, shiftLabel, stamp } from './attendanceRules';
+import { getRegularisationEvidence } from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ Attendance — one day in full, and the configurable attendance fields.
@@ -107,7 +108,16 @@ const Section = ({ title, children }) => (
 const HISTORY_KEYS = [['actual_in', 'In'], ['actual_out', 'Out'], ['status', 'Status'], ['source', 'Source']];
 
 /** The full record for one employee-day. */
-export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
+export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
+  const c = r.correction;
+  const openEvidence = async () => {
+    try {
+      const { data } = await getRegularisationEvidence(c.req_no, scope);
+      window.open(data.url, '_blank', 'noopener');
+    } catch {
+      window.alert('The evidence file could not be opened right now.');
+    }
+  };
   const defByCode = Object.fromEntries((fieldDefs || []).map((d) => [d.code, d]));
   const custom = Object.entries(r.custom_fields || {});
   const history = [...(r.modification_history || [])].reverse();
@@ -129,6 +139,19 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
           </Chip>
         )}
       </div>
+      {/* FRD §6 Identity / Date / Payroll / Lock. */}
+      <Facts items={[
+        { label: 'Employee ID', value: r.employee_code },
+        { label: 'Employee name', value: r.employee_name },
+        { label: 'Department', value: r.department || 'Not set' },
+        { label: 'Location', value: r.work_location || 'Not set' },
+        { label: 'Date', value: `${day(r.work_date)}${r.day ? ` (${r.day})` : ''}` },
+        { label: 'Shift', value: shiftLabel(r) },
+        { label: 'Final approved status', value: r.final_status || 'Waiting on a regularisation decision' },
+        { label: 'LOP day / fraction', value: r.lop_fraction != null ? String(r.lop_fraction) : null },
+        { label: 'Locked by', value: r.locked ? (r.locked_by_name || r.locked_by || '—') : null },
+        { label: 'Locked on', value: r.locked && r.locked_at ? stamp(r.locked_at) : null },
+      ]} />
       <Facts items={[
         { label: 'Scheduled', value: r.scheduled_in ? `${r.scheduled_in} – ${r.scheduled_out || '—'}` : null },
         { label: 'Actual', value: `${r.actual_in || '—'} – ${r.actual_out || '—'}` },
@@ -175,10 +198,21 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
         </div>
       </Section>
 
-      {(r.regularization_flag || r.regularized_from) && (
+      {(r.regularization_flag || r.regularized_from || c) && (
         <Section title="Regularisation">
           <Facts items={[
-            { label: 'Request', value: r.regularized_from },
+            { label: 'Regularised', value: r.regularization_flag ? 'Yes' : 'No' },
+            { label: 'Request', value: c?.req_no || r.regularized_from },
+            { label: 'Request status', value: c?.status },
+            { label: 'Type', value: c?.request_type || c?.exception_type },
+            { label: 'Proposed In / Out', value: c ? `${c.proposed_in || '—'} – ${c.proposed_out || '—'}` : null },
+            { label: 'Reason', value: c?.reason },
+            { label: 'Evidence', value: c?.evidence },
+            { label: 'Attachment', value: c?.evidence_file_name ? (
+              <button type="button" className="underline text-[var(--accent-indigo)]" onClick={openEvidence}>
+                {c.evidence_file_name}
+              </button>
+            ) : null },
             { label: 'Manager', value: r.manager_status },
             { label: 'HR', value: r.hr_status },
             { label: 'Comments', value: r.approver_comments },

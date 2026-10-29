@@ -18,9 +18,8 @@ DOOR TWO. Field definitions saved straight to live. A custom field decides what 
 mandatory on an employee record, what is masked, what validates and what leaves the company
 in an export, and "make blood group mandatory" or "unmask the PAN" took effect the moment
 one person clicked Save. `field_definition` is now a governed entity type with a handler --
-off by default, because a field change cannot move money and companies add fields
-constantly during onboarding, so `governed_config_types` is the switch a company that wants
-the control turns on.
+ON by default since DEF-02, but outside the floor: a company in its onboarding phase, adding
+fields constantly, may switch it off with `governed_config_types`.
 
 House convention: self-contained, no pytest, fake collections, ASCII output, exit 1 on fail.
 
@@ -87,11 +86,11 @@ async def main() -> int:
     # ── 0. What is governed, and what cannot be un-governed ──────────────────────────
     section("0. The governed-types registry and its floor")
 
-    check("policy versions and salary components are governed out of the box",
-          await CC.governed_types(CO) == {"policy_version", "salary_component"},
+    check("policy versions, salary components and field definitions are governed out of "
+          "the box (DEF-02)",
+          await CC.governed_types(CO) == {"policy_version", "salary_component",
+                                          "field_definition"},
           await CC.governed_types(CO))
-    check("field definitions are NOT, so onboarding is not a queue",
-          not await CC.is_governed(CO, M.CONFIG_ENTITY_FIELD_DEFINITION))
     check("every known type has a handler -- a governed type with none would 422 "
           "every save of it",
           set(M.CONFIG_ENTITY_TYPES) == set(CC.ENTITY_HANDLERS),
@@ -106,6 +105,8 @@ async def main() -> int:
     check("an empty list cannot switch governance off for pay-deciding types",
           relaxed["governed_config_types"] == ["policy_version", "salary_component"],
           relaxed)
+    check("...but field definitions CAN be switched off, so onboarding need not be a queue",
+          not await CC.is_governed(CO, M.CONFIG_ENTITY_FIELD_DEFINITION))
 
     # ── 1. The direct status endpoint ───────────────────────────────────────────────
     section("1. Approved and Active are the flow's to set")
@@ -252,9 +253,11 @@ async def main() -> int:
     # ── 5. Direct activation of a governed field ────────────────────────────────────
     section("5. A governed field cannot be activated directly either")
 
-    await EM.save_field_definition(DRAFTER, CO, {
+    created = await EM.save_field_definition(DRAFTER, CO, {
         "module": "employee", "code": "shirt_size", "label": "Shirt Size",
         "data_type": "Text"})
+    check("a NEW governed field raises its own change request (DEF-02)",
+          created["status"] == "Draft" and created.get("pending_request_no"), created)
     await expect("activating a governed Draft field directly",
                  EM.set_field_status(DRAFTER, CO, "employee", "shirt_size",
                                      {"status": "Active"}),

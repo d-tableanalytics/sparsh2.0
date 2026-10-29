@@ -152,12 +152,17 @@ async def compute_day(company_id: str, employee_code: str, work_date: str,
             and out.get("half_day_basis") in ("late", "early"):
         out.update({"status": "Present", "payable_day": 1.0, "lop_fraction": 0.0,
                     "half_day_reason": f"waived: approved {approved_exception}"})
+    # §5 / §23 Late Coming "late threshold": minutes beyond grace are always measured, but a
+    # day is a LATE MARK only past the threshold. Unset, any late minute is one, as before.
+    threshold = int(p.get("late_threshold_minutes") or 0)
+    out["late_mark"] = int(out.get("late_minutes") or 0) > threshold
     out["flexi_no"] = hours["flexi_no"]
     out["scheduled_in"], out["scheduled_out"] = hours["start"], hours["end"]
     rules = hours.get("rules") or {}
     # A FLEXIBLE shift has core hours, not a start bell: the day is judged by the hours
     # worked (half-day / minimum-hours rules above still apply), never as late or early.
     if rules.get("flexible") and not hours["flexi_no"]:
+        out["late_mark"] = False
         out["late_minutes"] = 0
         out["early_minutes"] = 0
         out["grace_applied_minutes"] = 0
@@ -178,7 +183,7 @@ DERIVED_DAY_FIELDS = ("scheduled_in", "scheduled_out", "early_minutes", "grace_a
                       "payable_minutes", "payable_hours", "scheduled_minutes", "payable_day",
                       "lop_fraction", "missing_out_punch", "shift_code", "rule_source",
                       "rule_version", "half_day_reason", "day_policy_code",
-                      "day_policy_version")
+                      "day_policy_version", "late_mark")
 
 
 def derived_fields(computed: dict) -> dict:

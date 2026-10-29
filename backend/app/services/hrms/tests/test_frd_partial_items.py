@@ -168,9 +168,21 @@ async def main() -> int:
     section("2. Salary components: a live revision goes through approval")
     store[M.COLL_SALARY_COMPONENTS] = FakeCollection()
     store[M.COLL_SETTINGS] = FakeCollection()
-    await PS.save_salary_component(HR, CO, {"code": "HRA", "name": "HRA",
-                                            "component_type": "Earning",
-                                            "calculation_method": "Fixed"})
+    created = await PS.save_salary_component(HR, CO, {"code": "HRA", "name": "HRA",
+                                                      "component_type": "Earning",
+                                                      "calculation_method": "Fixed"})
+    check("a NEW component is created as Draft behind a change request, not live (DEF-02)",
+          created.get("lifecycle") == "Draft" and bool(created.get("pending_request")),
+          created)
+    await expect("creating a new component straight into Active",
+                 PS.save_salary_component(HR, CO, {"code": "TA", "name": "TA",
+                                                   "component_type": "Earning",
+                                                   "lifecycle": "Active"}),
+                 409, "start as Draft")
+    # Put it live as its activated request would, so the revision path below has a live
+    # component to revise.
+    await store[M.COLL_SALARY_COMPONENTS].update_one(
+        {"code": "HRA"}, {"$set": {"lifecycle": "Active", "pending_request_no": None}})
     staged = await PS.save_salary_component(HR, CO, {
         "code": "HRA", "name": "HRA", "component_type": "Earning",
         "calculation_method": "Formula", "formula": "1500", "change_reason": "Flat HRA"})

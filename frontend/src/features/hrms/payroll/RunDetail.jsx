@@ -9,7 +9,7 @@ import { payrollNextStep } from '../common/processGuides';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getPayrollRun, calculatePayroll, listPayrollRecords, listPayslips,
-  submitPayrollRun, checkPayrollRun, decidePayrollRun, lockPayrollRun, closePayrollRun,
+  submitPayrollRun, checkPayrollRun, decidePayrollRun, actOnPayrollStage, lockPayrollRun, closePayrollRun,
   downloadPayrollRegister,
   adjustPayrollRecord, setPayrollAdjustments, listSalaryComponents, approvePayrollAdjustment,
   importPayrollInputs,
@@ -419,7 +419,36 @@ const RunActions = ({ runInfo, period, scope, can, busy, run, showError }) => {
         <Send size={14} /> {busy ? 'Working…' : 'Submit for approval'}
       </Btn>
     );
-  } else if (status === 'Submitted' && can(CAP.PAYROLL_CHECK)) {
+  } else if (runInfo.current_stage && can(runInfo.current_stage.cap)) {
+    // P1-095 — a CONFIGURED approval chain: whichever stage the run waits on, named as the
+    // company named it. Who may act is the stage's own permission (and roles, checked by
+    // the server); the maker and anyone who passed an earlier stage are refused there.
+    const stage = runInfo.current_stage;
+    const last = stage.index === stage.count - 1;
+    title = `${stage.name} — stage ${stage.index + 1} of ${stage.count}`;
+    hint = `Submitted by ${runInfo.submitted_by_name || 'the maker'}${runInfo.submitted_at ? ` on ${when(runInfo.submitted_at)}` : ''}. `
+      + (last
+        ? 'This is the final approval. Approving does not lock it — locking is the next step.'
+        : 'Passing this stage sends it to the next approver in the chain.');
+    remarksLabel = 'Remarks (required to return or reject)';
+    buttons = (
+      <>
+        <Btn disabled={busy} onClick={() => needReason(
+          () => actOnPayrollStage(period, { action: 'return', remarks: text }, scope), 'Payroll returned to the maker.')}>
+          Return
+        </Btn>
+        <Btn tone="danger" disabled={busy} onClick={() => needReason(
+          () => actOnPayrollStage(period, { action: 'reject', remarks: text }, scope), 'Payroll rejected.')}>
+          Reject
+        </Btn>
+        <Btn tone="primary" disabled={busy} onClick={() => act(
+          () => actOnPayrollStage(period, { action: 'approve', remarks: text }, scope),
+          last ? 'Payroll approved.' : `${stage.name} passed — sent to the next approver.`)}>
+          {busy ? 'Working…' : (last ? 'Approve' : `Pass ${stage.name}`)}
+        </Btn>
+      </>
+    );
+  } else if (!runInfo.approval_chain && status === 'Submitted' && can(CAP.PAYROLL_CHECK)) {
     // FRD §12 stage 8 — the Payroll/HR Checker. Verifying is NOT approving: this hands the
     // run on to Finance, which is a different person's decision.
     title = 'Check this payroll';
@@ -442,7 +471,7 @@ const RunActions = ({ runInfo, period, scope, can, busy, run, showError }) => {
         </Btn>
       </>
     );
-  } else if (status === 'Checked' && can(CAP.PAYROLL_APPROVE)) {
+  } else if (!runInfo.approval_chain && status === 'Checked' && can(CAP.PAYROLL_APPROVE)) {
     // FRD §12 stage 9 — Finance / the Authorised Approver.
     title = 'Approve this payroll';
     hint = `Checked by ${runInfo.checked_by_name || 'the checker'}${runInfo.checked_at ? ` on ${when(runInfo.checked_at)}` : ''}. `
@@ -475,15 +504,20 @@ const RunActions = ({ runInfo, period, scope, can, busy, run, showError }) => {
     );
   } else if ((status === 'Locked' || status === 'Paid') && can(CAP.PAYROLL_APPROVE)) {
     const unpaid = runInfo.payment_summary?.unpaid || 0;
+    // DEF-04: failed or bank-pending payments block closing outright — a reason cannot
+    // cover them, because a closed period can no longer raise a retry batch.
+    const blocking = (runInfo.payment_summary?.failed || 0) + (runInfo.payment_summary?.pending || 0);
     title = 'Close period';
     hint = status === 'Paid'
       ? 'Everyone with pay due has been paid. Closing ends the month.'
+      : blocking
+        ? `${blocking} payment(s) are failed or still pending with the bank. Retry them or record them as Processed under Disbursal before closing.`
       : unpaid
         ? `${unpaid} employee(s) are not marked paid yet. Record their payments under Disbursal, or give a reason to close anyway.`
         : 'Close once every payment is confirmed under Disbursal. If some are being paid outside a batch, give a reason.';
     remarksLabel = status === 'Paid' ? 'Remarks (optional)' : 'Reason (needed if anyone is unpaid)';
     buttons = (
-      <Btn tone={status === 'Paid' ? 'primary' : 'ghost'} disabled={busy} onClick={() => act(
+      <Btn tone={status === 'Paid' ? 'primary' : 'ghost'} disabled={busy || blocking > 0} onClick={() => act(
         () => closePayrollRun(period, { remarks: text }, scope), 'Payroll period closed.')}>
         {busy ? 'Working…' : 'Close period'}
       </Btn>
@@ -737,6 +771,9 @@ const RecordDetail = ({ r, onApproveLine }) => {
   return (
     <div className="rounded-lg bg-[var(--input-bg)] p-3 space-y-3">
       <Facts items={[
+        // FRD §10 Salary Basis: which approved structure this month was paid from.
+        { label: 'Salary structure', value: r.structure_effective_from
+          ? `In force from ${day(r.structure_effective_from)}` : 'None on file' },
         { label: 'Joined', value: r.date_of_joining ? day(r.date_of_joining) : null },
         { label: 'Last working day', value: r.last_working_day ? day(r.last_working_day) : null },
         { label: 'Days in month', value: r.days_in_period },
@@ -768,6 +805,12 @@ const RecordDetail = ({ r, onApproveLine }) => {
                   <td className="py-1 pr-2 text-[var(--text-main)]">
                     {l.name || l.code}
                     {l.prorated && <span className="text-[var(--text-muted)]"> · prorated</span>}
+                    {/* DEF-01: the component version (and formula) this line was priced by. */}
+                    {l.component_version != null && (
+                      <span className="text-[var(--text-muted)]" title={l.formula || undefined}>
+                        {' '}· v{l.component_version}{l.formula ? ` · ${l.formula}` : ''}
+                      </span>
+                    )}
                   </td>
                   <td className="py-1 pr-2 text-[var(--text-muted)]">{l.component_type}</td>
                   <td className="py-1 pr-2 text-right tabular-nums">{money(l.full_amount)}</td>

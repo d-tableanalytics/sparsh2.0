@@ -260,6 +260,11 @@ const StructureCard = ({
           {day(structure.effective_from)}{structure.effective_to ? ` – ${day(structure.effective_to)}` : ' onwards'}
         </span>
       </div>
+      {/* FRD §9 Employee: who this structure is for. */}
+      <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
+        {structure.employee_name || '—'} · {structure.employee_code}
+        {structure.status ? ` · ${structure.status}` : ''}
+      </p>
       {structure.revision_reason && (
         <p className="mt-1.5 text-[12px] text-[var(--text-main)]">
           <span className="text-[var(--text-muted)]">Reason:</span> {structure.revision_reason}
@@ -298,7 +303,13 @@ const StructureCard = ({
           <span>Annual CTC <b className="text-[var(--text-main)]">{money(structure.annual_ctc)}</b></span>
         )}
         {structure.payroll_group && <span>Group {structure.payroll_group}</span>}
-        {structure.created_by_name && <span>Set by {structure.created_by_name}</span>}
+        {structure.created_by_name && <span>Created by {structure.created_by_name}</span>}
+        {(structure.submitted_by_name || structure.created_by_name) && (
+          <span>
+            Submitted by {structure.submitted_by_name || structure.created_by_name}
+            {structure.submitted_at && ` · ${when(structure.submitted_at)}`}
+          </span>
+        )}
         {structure.approved_by_name && structure.status !== 'Pending Approval' && (
           <span>
             {structure.status === 'Rejected' ? 'Rejected' : 'Approved'} by {structure.approved_by_name}

@@ -3537,7 +3537,9 @@ EMPLOYEE_TRACKED_FIELDS = (
     "bank_account_type", "attendance_active", "payroll_active",
 )
 # Never echoed in full to someone without sensitive-data access (FRD §18).
-EMPLOYEE_MASKED_FIELDS = ("bank_account", "pan", "aadhaar", "passport")
+# UAN / PF / ESI are statutory identifiers like PAN and are masked the same way (DEF-10).
+EMPLOYEE_MASKED_FIELDS = ("bank_account", "pan", "aadhaar", "passport", "uan", "pf_number",
+                          "esi_number")
 # Values that identify one person; a second employee carrying one is a duplicate (FRD §4).
 EMPLOYEE_DUPLICATE_FIELDS = (
     ("pan", "PAN"), ("aadhaar", "Aadhaar"), ("uan", "UAN"), ("passport", "Passport"),
@@ -3725,6 +3727,9 @@ ATTENDANCE_POLICY_RULES = {
         # §23 Late Coming
         "daily_grace_minutes": None,            # None = inherit the shift / company policy
         "monthly_buffer_minutes": None,
+        "late_threshold_minutes": None,         # "late threshold": late minutes up to this
+                                                # are recorded but not a late mark (None = any
+                                                # late minute is a late mark, as before)
         "late_escalation_days": None,           # "escalation threshold": late days a month
                                                 # that flag the person (None = off). Reported,
                                                 # never a status or payroll change.
@@ -3837,8 +3842,12 @@ CONFIG_ENTITY_SALARY_COMPONENT = "salary_component"
 # definitions saved straight to live, so "make blood group mandatory" or "unmask the PAN"
 # took effect the moment one person clicked Save.
 CONFIG_ENTITY_FIELD_DEFINITION = "field_definition"
+# §30 -- the company attendance rules (grace, half day, closing day...) edited on the
+# attendance Policy Configuration screen. Versioned on every save; governed only when the
+# company turns it on, so the screen keeps saving directly until then.
+CONFIG_ENTITY_ATTENDANCE_RULES = "attendance_rules"
 CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT,
-                       CONFIG_ENTITY_FIELD_DEFINITION)
+                       CONFIG_ENTITY_FIELD_DEFINITION, CONFIG_ENTITY_ATTENDANCE_RULES)
 
 # Which of those types a company actually puts through the §27 flow.
 #
@@ -3847,11 +3856,13 @@ CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPON
 # that, which is the point of the flow existing. PAY_POLICY needs no separate entry -- it
 # IS a policy version, and the payroll policy screen drafts one.
 #
-# FIELD DEFINITIONS are NOT governed by default, deliberately. A field change cannot move
-# money, companies add fields constantly during onboarding, and making every label edit
-# wait for an approver would turn the setup phase into a queue. A company that wants the
-# control turns it on; `governed_config_types` on hrms_settings is that switch.
-DEFAULT_GOVERNED_CONFIG_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
+# FIELD DEFINITIONS are governed by default too (DEF-02, P1-117: "configuration changes
+# require authorised approval before activation" -- a field decides what is mandatory,
+# masked and exported). Unlike the pay-deciding types they are NOT in the floor: a company
+# in its onboarding phase, adding fields constantly, may switch them off with
+# `governed_config_types` on hrms_settings.
+ALWAYS_GOVERNED_CONFIG_TYPES = (CONFIG_ENTITY_POLICY_VERSION, CONFIG_ENTITY_SALARY_COMPONENT)
+DEFAULT_GOVERNED_CONFIG_TYPES = ALWAYS_GOVERNED_CONFIG_TYPES + (CONFIG_ENTITY_FIELD_DEFINITION,)
 
 AUDIT_CONFIG_REQUESTED = "configuration change requested"
 AUDIT_CONFIG_DECIDED   = "configuration change decided"
@@ -6090,7 +6101,8 @@ DEFAULT_DOCUMENT_TYPES = [
     ("Last 3 Payslips",       DocumentCategory.EMPLOYMENT,     "candidate", False, False, False),
     ("Bank Proof",            DocumentCategory.STATUTORY,      "employee",  True,  False, False),
     ("Offer Letter Signed",   DocumentCategory.COMPANY_ISSUED, "candidate", False, False, False),
-    ("Appointment Letter",    DocumentCategory.COMPANY_ISSUED, "candidate", False, False, False),
+    # "both": a letter is also raised for an employee added directly, with no hiring record.
+    ("Appointment Letter",    DocumentCategory.COMPANY_ISSUED, "both",      False, False, False),
     # FRD §3 Documents lists PSC by name. Not mandatory: the FRD does not say it is.
     ("PSC",                   DocumentCategory.PSC,            "employee",  False, False, False),
 ]
@@ -6208,6 +6220,24 @@ This appointment is subject to the terms set out in your offer letter, to the sa
 Please confirm your acceptance of this appointment by acknowledging this letter below. We look forward to welcoming you to the team."""
 
 
+# For an employee added directly in HR (no candidate, no offer), so the letter does not refer
+# to an offer they never received. Same placeholders, so the same renderer serves both.
+DEFAULT_EMPLOYEE_APPOINTMENT_BODY = """We are pleased to confirm your appointment as {designation} at {company}.
+
+Your appointment takes effect from {joining_date} and you will be based at {location}. Your annual cost to company will be {ctc}.
+
+Your employment is governed by the company's policies and terms of service as amended from time to time, and is subject to the submission of the documents requested by the HR team.
+
+Please confirm your acceptance of this appointment by acknowledging this letter below. We are glad to have you on the team."""
+
+
+# The `uk` an employee's letter is stored under. Appointments are keyed (and uniquely indexed)
+# by candidate uk; a directly-added employee has none, so the employee code stands in, with a
+# prefix no candidate business id can carry.
+def employee_appointment_key(employee_code: str) -> str:
+    return f"EMP:{employee_code}"
+
+
 def render_appointment_body(template: str, *, designation: str, company: str, ctc: str,
                             joining_date: str, location: str = "") -> str:
     """Fill the placeholders in an appointment letter body.
@@ -6229,7 +6259,10 @@ def render_appointment_body(template: str, *, designation: str, company: str, ct
 
 
 class AppointmentIn(BaseModel):
-    uk: str
+    # Exactly one of the two: a candidate who accepted an offer, or an employee added
+    # directly in HR (BR-028 -- every employee's profile carries an appointment letter).
+    uk: Optional[str] = None
+    employee_code: Optional[str] = None
     joining_date: Optional[str] = None       # YYYY-MM-DD; defaults from the accepted offer
     designation: Optional[str] = None
     department: Optional[str] = None
@@ -9923,6 +9956,8 @@ class PayrollPolicyIn(BaseModel):
     approver_cap: Optional[str] = None
     lock_cap: Optional[str] = None
     approver_distinct_from_checker: Optional[bool] = None
+    # P1-095: a configured approval chain ([] = back to the default matrix above).
+    approval_levels: Optional[list[dict]] = None
     # §21 "eligibility"; §19 cut-off; §10 "approval where needed". All off by default.
     excluded_employee_categories: Optional[list[str]] = None
     enforce_input_cutoff: Optional[bool] = None
@@ -9971,6 +10006,10 @@ DEFAULT_PAYROLL_POLICY = {
     # Stage 9 may not be performed by the stage-8 checker. Separate from the maker/checker
     # rule, which is never optional.
     "approver_distinct_from_checker": True,
+    # P1-095: the approval chain as CONFIGURATION -- 1 to 3 ordered stages, each
+    # {"name", "cap", "roles"}. None (the default) keeps the matrix above exactly as it
+    # always behaved (Maker -> Checker -> Finance), so no company changes until it opts in.
+    "approval_levels": None,
     # §21 eligibility: employee categories left out of the run (e.g. paid elsewhere).
     "excluded_employee_categories": [],
     # §19 "Monthly Cut-off": refuse monthly input edits after `input_cutoff_day` of the
@@ -10005,7 +10044,7 @@ PAYROLL_POLICY_RUN_LEVEL_KEYS = frozenset({
     "require_attendance_lock", "payslip_release", "variance_threshold_percent",
     "input_cutoff_day", "checker_required", "checker_cap", "approver_cap", "lock_cap",
     "approver_distinct_from_checker", "excluded_employee_categories", "enforce_input_cutoff",
-    "adjustment_approval_above",
+    "adjustment_approval_above", "approval_levels",
 })
 PAYROLL_POLICY_EMPLOYEE_LEVEL_KEYS = frozenset({
     "net_rounding", "sandwich_weekly_off", "structure_approval_required",
@@ -10016,6 +10055,10 @@ PAYROLL_MATRIX_CAP_KEYS = ("checker_cap", "approver_cap", "lock_cap")
 PAYROLL_MATRIX_ALLOWED_CAPS = {
     Cap.PAYROLL_PROCESS.value, Cap.PAYROLL_CHECK.value, Cap.PAYROLL_APPROVE.value,
 }
+# P1-095: the roles a configured approval stage may be limited to (empty = anyone holding
+# the stage's capability). Employees and line managers never approve a payroll.
+PAYROLL_STAGE_ROLES = {"hr", "md", "finance", "admin", "internal"}
+PAYROLL_MAX_APPROVAL_LEVELS = 3
 COLL_PAYROLL_CARRY_FORWARD = "hrms_payroll_carry_forwards"
 COLL_PAYSLIP_TEMPLATE_VERSIONS = "hrms_payslip_template_versions"
 COLL_PAYMENT_BATCHES = "hrms_payment_batches"

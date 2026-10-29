@@ -93,6 +93,7 @@ async def list_document_types(company_id: str, *, include_inactive: bool = False
         await _seed_types(company_id)
     else:
         await _offer_psc_type(company_id)
+        await _widen_appointment_type(company_id)
 
     query = {"company_id": str(company_id)}
     if not include_inactive:
@@ -101,6 +102,16 @@ async def list_document_types(company_id: str, *, include_inactive: bool = False
     if applies_to in ("candidate", "employee"):
         rows = [r for r in rows if (r.get("applies_to") or "both") in (applies_to, "both")]
     return [_type_out(r) for r in rows]
+
+
+async def _widen_appointment_type(company_id: str) -> None:
+    """The seeded "Appointment Letter" type used to apply to candidates only; a directly-added
+    employee now gets one too (BR-028). Widens the SEEDED row only -- a type HR defined by
+    hand keeps whatever HR chose. Idempotent: matches nothing once widened."""
+    await get_collection(COLL_DOCUMENT_TYPES).update_many(
+        {"company_id": str(company_id), "name": "Appointment Letter", "seeded": True,
+         "applies_to": "candidate"},
+        {"$set": {"applies_to": "both"}})
 
 
 async def _offer_psc_type(company_id: str) -> None:
@@ -813,6 +824,8 @@ async def file_system_document(actor, company_id: str, *, owner_type: str, owner
 
     dtype = await get_collection(COLL_DOCUMENT_TYPES).find_one(
         {"company_id": str(company_id), "name": type_name})
+    if dtype and owner_type == "employee" and dtype.get("applies_to") == "candidate":
+        await _widen_appointment_type(company_id)
     if not dtype:
         # The types are seeded on first read; if this company has never opened the Document
         # Center the type may not exist yet, so create just this one rather than seeding
@@ -820,7 +833,7 @@ async def file_system_document(actor, company_id: str, *, owner_type: str, owner
         result = await get_collection(COLL_DOCUMENT_TYPES).insert_one({
             "company_id": str(company_id), "name": type_name,
             "category": DocumentCategory.COMPANY_ISSUED.value,
-            "applies_to": "candidate", "mandatory": False, "expires": False,
+            "applies_to": "both", "mandatory": False, "expires": False,
             "active": True, "seeded": True, "created_at": now})
         dtype = {"_id": result.inserted_id, "name": type_name,
                  "category": DocumentCategory.COMPANY_ISSUED.value}

@@ -70,7 +70,17 @@ FIELD_LABELS = {
     "bank_ifsc": "IFSC", "bank_branch": "Bank branch", "bank_account_holder": "Account holder",
     "bank_account_type": "Account type",
 }
-SENSITIVE_HISTORY_FIELDS = {"base_salary", "bank_account"}
+SENSITIVE_HISTORY_FIELDS = {"base_salary", *EMPLOYEE_MASKED_FIELDS}
+
+
+def field_label(field: str) -> str:
+    """The history/audit label for a field: the curated one, a custom field's key marked
+    as such, else the field name made readable ("personal_email" -> "Personal email")."""
+    if field in FIELD_LABELS:
+        return FIELD_LABELS[field]
+    if field.startswith("custom_fields."):
+        return f"{field.split('.', 1)[1]} (custom field)"
+    return field.replace("_", " ").capitalize()
 
 
 def _today() -> str:
@@ -314,7 +324,7 @@ async def record_changes(actor: dict, company_id: str, profile: dict, changes: d
             "employee_code": profile.get("employee_code"),
             "user_id": profile.get("user_id"),
             "field": field,
-            "label": FIELD_LABELS.get(field, field),
+            "label": field_label(field),
             "old_value": _plain(old),
             "new_value": _plain(new),
             "effective_from": effective_from,
@@ -327,6 +337,18 @@ async def record_changes(actor: dict, company_id: str, profile: dict, changes: d
         })
     await get_collection(COLL_EMPLOYEE_HISTORY).insert_many([dict(r) for r in rows])
     return rows
+
+
+def audit_changes(changes: dict) -> list:
+    """{field: (old, new)} as the audit trail's `changes` list. Identity and bank numbers
+    are masked -- the audit trail is read more widely than the profile itself."""
+    out = []
+    for field, (old, new) in sorted(changes.items()):
+        old, new = _plain(old), _plain(new)
+        if field in EMPLOYEE_MASKED_FIELDS:
+            old, new = mask(old), mask(new)
+        out.append({"field": field_label(field), "old": old, "new": new})
+    return out
 
 
 async def list_history(company_id: str, employee_code: str, *,
@@ -355,8 +377,9 @@ async def list_history(company_id: str, employee_code: str, *,
             except ValueError:
                 pass
         if r["field"] in SENSITIVE_HISTORY_FIELDS and not include_sensitive:
-            r["old_value"] = mask(r["old_value"]) if r["field"] == "bank_account" else "hidden"
-            r["new_value"] = mask(r["new_value"]) if r["field"] == "bank_account" else "hidden"
+            masked = r["field"] in EMPLOYEE_MASKED_FIELDS
+            r["old_value"] = mask(r["old_value"]) if masked else "hidden"
+            r["new_value"] = mask(r["new_value"]) if masked else "hidden"
         out.append(r)
     return out
 
@@ -598,6 +621,23 @@ async def save_field_definition(actor: dict, company_id: str, payload: dict) -> 
                             "reason": payload.get("change_reason"), "old": None,
                             "new": definition}]}
         await coll.insert_one(doc)
+        # DEF-02 -- a governed NEW field raises its own §27 request, as a new salary
+        # component does, so it reaches the approver without anyone having to remember to
+        # raise one. It stays a Draft (collected by nothing) until that request is
+        # approved and activated.
+        if await _field_change_governed(company_id):
+            from app.models.hrms import CONFIG_ENTITY_FIELD_DEFINITION
+            from app.services import hrms_config_change_service as CC
+            request = await CC.create_request(actor, company_id, {
+                "entity_type": CONFIG_ENTITY_FIELD_DEFINITION,
+                "entity_code": f"{module}.{code}",
+                "reason": (str(payload.get("change_reason") or "").strip()
+                           or f"New {module} field {label}"),
+                "effective_from": payload.get("effective_from"),
+                "title": f"{module}.{code} — new field"[:160]})
+            await coll.update_one({"company_id": str(company_id), "module": module,
+                                   "code": code},
+                                  {"$set": {"pending_request_no": request["request_no"]}})
     await audit(actor, AUDIT_FIELD_DEFINITION_SAVED, ENTITY_FIELD_DEFINITION,
                 f"{module}.{code}", label, company_id)
     saved = await coll.find_one({"company_id": str(company_id), "module": module, "code": code})
@@ -721,11 +761,18 @@ async def set_field_status(actor: dict, company_id: str, module: str, code: str,
     return _def_out(await coll.find_one({"_id": current["_id"]}))
 
 
+def _norm(value) -> str:
+    return str(value if value is not None else "").strip().lower()
+
+
 def _applies(definition: dict, context: dict) -> bool:
-    """Applicability: every non-empty list on the definition must contain the record's value."""
+    """Applicability: every non-empty list on the definition must contain the record's value.
+    Compared trimmed and case-insensitively -- the scope is typed free-hand ("m1") while the
+    record holds the master list's spelling ("M1"), and a near-miss must not silently widen
+    or close a field (DEF-07)."""
     rules = definition.get("applicability") or {}
     for field, allowed in rules.items():
-        if allowed and context.get(field) not in allowed:
+        if allowed and _norm(context.get(field)) not in {_norm(a) for a in allowed}:
             return False
     return True
 
@@ -816,6 +863,13 @@ async def validate_custom_values(company_id: str, module: str, values: Optional[
             continue
         if d.get("read_only") and code in current and value != current.get(code):
             raise HTTPException(status_code=422, detail=f"{d['label']} is read-only.")
+        # DEF-07: a field scoped to (say) grade M1, or outside its effective dates, takes no
+        # value on a record it does not apply to. A value already stored (the employee has
+        # since changed grade) is kept as it is, the same way a retired field's is.
+        if value != current.get(code) and value not in (None, "", []) and (
+                not _in_force(d, today) or not _applies(d, context or {})):
+            raise HTTPException(status_code=422,
+                                detail=f"{d['label']} does not apply to this record.")
         clean = _check_value(d, value)
         if clean is None:
             out.pop(code, None)
@@ -863,17 +917,22 @@ async def validate_custom_values(company_id: str, module: str, values: Optional[
 
 
 def visible_custom_fields(defs: list, values: Optional[dict], *, is_hr: bool, is_self: bool,
-                          is_manager: bool, is_payroll: bool) -> dict:
+                          is_manager: bool, is_payroll: bool, context: dict = None) -> dict:
     """Field-level visibility (FRD §22 Visibility): HR sees everything; others see what the
-    definition grants their relationship to the record. Sensitive fields: HR and self only."""
+    definition grants their relationship to the record. Sensitive fields: HR and self only.
+    A field scoped away from this record (FRD §22 Applicability, DEF-07) is not shown to
+    anyone but HR, even if an old value is still stored on it."""
     values = values or {}
     if is_hr:
         return dict(values)
     by_code = {d["code"]: d for d in defs}
+    today = _today()
     out = {}
     for code, value in values.items():
         d = by_code.get(code)
         if not d:
+            continue
+        if context is not None and (not _in_force(d, today) or not _applies(d, context)):
             continue
         if d.get("sensitive") and not is_self:
             continue
