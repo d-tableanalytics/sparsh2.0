@@ -90,8 +90,12 @@ async def main() -> int:
         mod.audit = no_audit
 
     U1, U2, U3, U4 = ObjectId(), ObjectId(), ObjectId(), ObjectId()
-    HR = {"_id": "hr-1", "role": "superadmin", "governance_role": "HR",
-          "full_name": "Dummy HR", "company_id": CO}
+    # A REAL HR user, not a superadmin wearing an HR governance_role. The checks below
+    # assert that "HR holds salary access", and FRD §17 now withholds payroll-sensitive
+    # values from the system admin by default -- so a superadmin here would be testing
+    # the opposite of what the labels claim.
+    HR = {"_id": "hr-1", "role": "clientuser", "_source_collection": "learners",
+          "governance_role": "HR", "full_name": "Dummy HR", "company_id": CO}
     MGR = {"_id": str(U2), "role": "staff", "governance_role": "HOD",
            "full_name": "Dummy Manager", "company_id": CO}
     PLAIN = {"_id": "emp-9", "role": "staff", "full_name": "Dummy Employee",

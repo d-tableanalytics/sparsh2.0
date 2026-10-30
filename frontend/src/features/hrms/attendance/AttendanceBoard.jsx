@@ -527,15 +527,22 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
   );
 
   const columns = [
+    // FRD §6 Identity (Employee ID, Name, Department, Location) and Date/Schedule (Date,
+    // Day). The list API has sent department and work_location since _with_identity was
+    // written; the table simply never drew them, so the two fields §6 uses to tell one
+    // Sharma from another were absent from the screen people read days on.
     { key: 'who', label: 'Employee', render: (r) => (
       <>
         <span className="font-semibold text-[var(--text-main)]">{r.employee_name || r.employee_code}</span>
         <span className="block text-[11px] text-[var(--text-muted)]">
           {r.employee_name ? `${r.employee_code} · ` : ''}{day(r.work_date)}
-          {r.day ? ` (${String(r.day).slice(0, 3)})` : ''}
-          {r.department || r.work_location
-            ? ` · ${[r.department, r.work_location].filter(Boolean).join(', ')}` : ''}
+          {r.day ? ` · ${r.day.slice(0, 3)}` : ''}
         </span>
+        {(r.department || r.work_location) && (
+          <span className="block text-[11px] text-[var(--text-muted)]">
+            {[r.department, r.work_location].filter(Boolean).join(' · ')}
+          </span>
+        )}
       </>
     ) },
     { key: 'sched', label: 'Scheduled', render: (r) => (
@@ -598,7 +605,13 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
           <p className="text-[13px] font-bold text-[var(--text-main)] truncate">{r.employee_name || r.employee_code}</p>
           <p className="text-[11.5px] text-[var(--text-muted)]">
             {r.employee_name ? `${r.employee_code} · ` : ''}{day(r.work_date)}
+            {r.day ? ` · ${r.day.slice(0, 3)}` : ''}
           </p>
+          {(r.department || r.work_location) && (
+            <p className="text-[11px] text-[var(--text-muted)] truncate">
+              {[r.department, r.work_location].filter(Boolean).join(' · ')}
+            </p>
+          )}
         </div>
         <span className="inline-flex items-center gap-1.5 shrink-0">
           {r.locked && <Lock size={12} className="text-[var(--text-muted)]" aria-label="Locked" />}

@@ -419,11 +419,21 @@ async def apply_due_changes(company_id: str) -> int:
             {"company_id": str(company_id), "employee_code": row["employee_code"]})
         if not profile:
             continue
+        # WHAT IT WAS, read BEFORE the write.
+        #
+        # Re-reading it here rather than trusting the value captured when the change was
+        # scheduled is deliberate: between those two moments somebody may have moved the
+        # person again, and the row has to say what the field actually held on the day it
+        # changed. But it has to be read FIRST. Reading `profile` back after _apply_field
+        # records "Mumbai -> Mumbai" the instant anything hands this function a profile
+        # dict that the update writes through -- and then the old value is gone, which is
+        # the one thing an effective-dated history exists to keep (FRD §4, §18).
+        was = _plain(profile.get(row["field"]))
         await _apply_field(company_id, profile, row["field"], row["new_value"])
         await get_collection(COLL_EMPLOYEE_HISTORY).update_one(
             {"_id": row["_id"]},
             {"$set": {"status": HISTORY_APPLIED, "applied_at": datetime.now(timezone.utc),
-                      "old_value": _plain(profile.get(row["field"]))}})
+                      "old_value": was}})
         applied += 1
     return applied
 

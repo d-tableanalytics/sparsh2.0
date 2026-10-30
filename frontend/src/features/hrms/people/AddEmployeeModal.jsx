@@ -26,9 +26,18 @@ import { CustomFieldInput } from './EmployeeProfile';
  */
 
 // Field -> its company list. Empty list = not configured = free text.
+//
+// FRD §4 names what HR assigns at creation: "company, department, designation, grade/level,
+// location and reporting manager". `legal_entity` is that company (a tenant can run several
+// legal entities) and `level` sits beside grade -- both were editable only AFTER the record
+// existed, on the profile screen, so the create step could not carry out its own step of
+// the process. They are effective-dated tracked fields (EMPLOYEE_TRACKED_FIELDS), so set
+// here they become the first history row rather than an untracked backfill later.
 const LISTS = [
+  ['legal_entity', 'legal_entities', 'Company / legal entity'],
   ['work_location', 'locations', 'Location'],
   ['grade', 'grades', 'Grade'],
+  ['level', 'levels', 'Level'],
   ['employee_category', 'employee_categories', 'Employee category'],
 ];
 
@@ -48,6 +57,7 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
     employment_status: 'Active', employment_type: 'Full-time',
     joined_on: '', base_salary: '',
     official_email: '', personal_mobile: '', work_location: '', grade: '',
+    legal_entity: '', level: '',
     employee_category: '', reporting_manager_id: '',
   });
   const [custom, setCustom] = useState({});
@@ -110,8 +120,8 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
       // Send only what was filled — an empty string is not "clear this field", it is
       // "untouched", and the server treats a present key as an instruction.
       ['department_id', 'designation_id', 'employment_status', 'employment_type', 'joined_on',
-        'official_email', 'personal_mobile', 'work_location', 'grade', 'employee_category',
-        'reporting_manager_id']
+        'official_email', 'personal_mobile', 'legal_entity', 'work_location', 'grade', 'level',
+        'employee_category', 'reporting_manager_id']
         .forEach((k) => { if (form[k]) payload[k] = typeof form[k] === 'string' ? form[k].trim() : form[k]; });
       if (canSetSalary && form.base_salary !== '') payload.base_salary = Number(form.base_salary);
       if (Object.keys(custom).length) payload.custom_fields = custom;

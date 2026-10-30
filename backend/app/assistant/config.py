@@ -2,7 +2,12 @@
 
 Values here are intentionally static for Phase 0. Secrets (e.g. OpenAI key) are
 read from app.config.settings when the LLM layer is wired in Phase 1.
+
+The one exception is MEDIA_AI_INDEXING_ENABLED, which reads the environment: it
+governs per-upload spend and storage, and ops needs to flip it without a deploy.
 """
+
+import os as _os
 
 
 class AssistantConfig:
@@ -79,6 +84,24 @@ class AssistantConfig:
     MEDIA_VECTOR_INDEX: str = "media_vector_index"
     # Per-file content chunks for the Media Library (vector-searchable).
     MEDIA_CHUNK_COLLECTION: str = "media_chunks"
+
+    # ── Media Library AI indexing ─────────────────────────────────────────
+    # OFF by default (2026-10-28). Every audio, video, PDF and document upload
+    # used to be transcribed, chunked and embedded automatically, with a file-type
+    # check as the only gate -- no switch anywhere. On this installation that had
+    # grown media_chunks to 39,548 documents and 808 MB, roughly 80% of the whole
+    # database, plus an uncapped per-upload Whisper and embeddings bill.
+    #
+    # Turning it off changes NOTHING already stored and breaks no search: the
+    # extracted `content_text` on each media_library row is what keyword search
+    # reads, and existing chunks stay queryable. New uploads simply stop being
+    # transcribed and embedded.
+    #
+    # Set MEDIA_AI_INDEXING_ENABLED=true in the environment to turn it back on,
+    # so ops can flip it without a deployment.
+    MEDIA_AI_INDEXING_ENABLED: bool = (
+        _os.getenv("MEDIA_AI_INDEXING_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes", "on"))
 
     # ── Multi-modal attachments ───────────────────────────────────────────
     # Master switch for the file-upload subsystem (additive; safe to disable).

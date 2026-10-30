@@ -303,12 +303,15 @@ const StructureCard = ({
           <span>Annual CTC <b className="text-[var(--text-main)]">{money(structure.annual_ctc)}</b></span>
         )}
         {structure.payroll_group && <span>Group {structure.payroll_group}</span>}
-        {structure.created_by_name && <span>Created by {structure.created_by_name}</span>}
-        {(structure.submitted_by_name || structure.created_by_name) && (
-          <span>
-            Submitted by {structure.submitted_by_name || structure.created_by_name}
-            {structure.submitted_at && ` · ${when(structure.submitted_at)}`}
-          </span>
+        {structure.created_by_name && <span>Set by {structure.created_by_name}</span>}
+        {/* §9 Approval wants Submitted By beside Created By. They are the same person on a
+            first save, so it is only worth the line when they differ — a structure put up
+            again after a rejection is exactly that case, and is also the one where who
+            re-submitted it matters. */}
+        {structure.submitted_by_name
+          && structure.submitted_by_name !== structure.created_by_name && (
+          <span>Submitted by {structure.submitted_by_name}
+            {structure.submitted_at && ` · ${when(structure.submitted_at)}`}</span>
         )}
         {structure.approved_by_name && structure.status !== 'Pending Approval' && (
           <span>

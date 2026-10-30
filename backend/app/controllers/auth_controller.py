@@ -257,7 +257,11 @@ ADMIN_TIER = {"superadmin", "admin"}
 # ladder at all. Ranked lowest EXPLICITLY rather than by falling through to the
 # IMPLEMENTOR default, so nobody later reads the omission as an oversight and
 # "corrects" it upward.
-CLIENT_RANK = {"MD": 4, "HR": 3, "FINANCE": 3, "HOD": 2,
+# PAYROLL_MAKER / PAYROLL_CHECKER rank WITH HR and Finance, not above or below each
+# other: FRD §17 makes them two halves of one control, and ranking either one higher
+# would let it assign tasks to its own counterparty.
+CLIENT_RANK = {"MD": 4, "HR": 3, "FINANCE": 3,
+               "PAYROLL_MAKER": 3, "PAYROLL_CHECKER": 3, "HOD": 2,
                "IMPLEMENTOR": 1, "CLIENT": 1}
 ASSIGN_RANK_DENIED_MESSAGE = (
     "You can only assign tasks to your own level or below within your team/company."

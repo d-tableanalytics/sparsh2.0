@@ -1350,6 +1350,12 @@ export const closePayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/close`, payload || {}, { params });
 export const downloadPayrollRegister = (period, params) =>
   api.get(`/hrms/payroll/runs/${period}/register`, { params, responseType: 'blob' });
+/** FRD §24 Accounting / Bank Mapping: the period totalled per COMPONENT, carrying each
+ *  component's accounting code, for posting into the finance system. The register above is
+ *  one row per EMPLOYEE; accounting needs the other shape. */
+export const downloadAccountingSummary = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/accounting-summary`,
+    { params, responseType: 'blob' });
 export const listPostLockAdjustments = (period, params) =>
   api.get(`/hrms/payroll/runs/${period}/post-lock-adjustments`, { params });
 export const createPostLockAdjustment = (period, payload, params) =>

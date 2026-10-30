@@ -367,9 +367,20 @@ async def save_permission(actor: dict, company_id: str, cap_value: str, payload:
 
 
 async def get_admin_payroll_setting(company_id: str) -> dict:
+    """What the Roles & Permissions screen shows for the §17 System Admin rule.
+
+    Reports the EFFECTIVE value, not the stored one. An unconfigured company is restricted
+    by default (admin_payroll_withheld), so returning the raw `restricted` here would draw
+    the toggle OFF while the system behaved as ON -- a screen disagreeing with the gate
+    about who can see people's pay. `configured` says whether the company has actually
+    chosen, so the UI can tell "defaulted" apart from "decided".
+    """
     doc = await get_collection(COLL_PERMISSION_POLICIES).find_one(
         {"company_id": str(company_id), "cap": policy.ADMIN_PAYROLL_RULE}) or {}
-    return {"restricted": bool(doc.get("restricted")),
+    stored = doc.get("restricted")
+    effective = (policy.ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT if stored is None
+                 else bool(stored))
+    return {"restricted": effective, "configured": stored is not None,
             "allow_users": await _names(company_id, doc.get("allow_users"))}
 
 

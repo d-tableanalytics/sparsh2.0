@@ -139,25 +139,21 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
           </Chip>
         )}
       </div>
-      {/* FRD §6 Identity / Date / Payroll / Lock. */}
+      {/* FRD §6 Identity and Date/Schedule. The title carries the name and the date; a
+          record that is read to settle a dispute also has to say WHICH Sharma, in which
+          department and at which location, without the reader going to the directory. */}
       <Facts items={[
         { label: 'Employee ID', value: r.employee_code },
-        { label: 'Employee name', value: r.employee_name },
-        { label: 'Department', value: r.department || 'Not set' },
-        { label: 'Location', value: r.work_location || 'Not set' },
-        { label: 'Date', value: `${day(r.work_date)}${r.day ? ` (${r.day})` : ''}` },
-        { label: 'Shift', value: shiftLabel(r) },
-        { label: 'Final approved status', value: r.final_status || 'Waiting on a regularisation decision' },
-        { label: 'LOP day / fraction', value: r.lop_fraction != null ? String(r.lop_fraction) : null },
-        { label: 'Locked by', value: r.locked ? (r.locked_by_name || r.locked_by || '—') : null },
-        { label: 'Locked on', value: r.locked && r.locked_at ? stamp(r.locked_at) : null },
-      ]} />
-      <Facts items={[
+        { label: 'Department', value: r.department },
+        { label: 'Location', value: r.work_location },
+        { label: 'Day', value: r.day },
         { label: 'Scheduled', value: r.scheduled_in ? `${r.scheduled_in} – ${r.scheduled_out || '—'}` : null },
         { label: 'Actual', value: `${r.actual_in || '—'} – ${r.actual_out || '—'}` },
         { label: 'Worked', value: hoursLabel(r.worked_minutes) },
         { label: 'Payable hours', value: r.payable_hours != null ? `${r.payable_hours} h` : null },
         { label: 'Payable day', value: payableLabel(r) },
+        { label: 'Final approved status', value: r.final_status || 'Waiting on a regularisation decision' },
+        { label: 'LOP day / fraction', value: r.lop_fraction != null ? String(r.lop_fraction) : null },
         { label: 'Late', value: r.late_minutes ? `${r.late_minutes} min` : '—' },
         { label: 'Early going', value: r.early_minutes ? `${r.early_minutes} min` : '—' },
         { label: 'Grace used', value: r.grace_applied_minutes ? `${r.grace_applied_minutes} min` : null },
@@ -200,14 +196,18 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
 
       {(r.regularization_flag || r.regularized_from || c) && (
         <Section title="Regularisation">
+          {/* §6 Correction (flag, proposed in/out, reason, evidence) and §6 Approval
+              (manager, HR, comments). The proposed times are the corrected ones shown
+              above — once applied they ARE the record, so repeating them here would
+              invite the reader to treat one of the two as the real value. */}
           <Facts items={[
             { label: 'Regularised', value: r.regularization_flag ? 'Yes' : 'No' },
             { label: 'Request', value: c?.req_no || r.regularized_from },
             { label: 'Request status', value: c?.status },
-            { label: 'Type', value: c?.request_type || c?.exception_type },
+            { label: 'Type', value: c?.request_type || c?.exception_type || r.regularisation_request_type },
             { label: 'Proposed In / Out', value: c ? `${c.proposed_in || '—'} – ${c.proposed_out || '—'}` : null },
-            { label: 'Reason', value: c?.reason },
-            { label: 'Evidence', value: c?.evidence },
+            { label: 'Reason given', value: c?.reason || r.regularisation_reason },
+            { label: 'Evidence', value: c?.evidence || r.regularisation_evidence },
             { label: 'Attachment', value: c?.evidence_file_name ? (
               <button type="button" className="underline text-[var(--accent-indigo)]" onClick={openEvidence}>
                 {c.evidence_file_name}
@@ -217,6 +217,12 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
             { label: 'HR', value: r.hr_status },
             { label: 'Comments', value: r.approver_comments },
           ]} />
+          {r.regularisation_has_evidence_file && !c?.evidence_file_name && (
+            <p className="text-[11.5px] text-[var(--text-muted)]">
+              A file was attached to {r.regularized_from}. Open it from the Regularisations
+              tab — it stays on the request rather than being copied onto the day.
+            </p>
+          )}
         </Section>
       )}
 
@@ -228,9 +234,14 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
         </Section>
       )}
 
-      {r.locked && (r.locked_at || r.locked_by) && (
+      {/* §6 Lock: "Locked Flag; Locked By; Locked Date". The flag and the date were shown
+          and the WHO was guarded on but never drawn — so the one question a locked day
+          gets asked ("who closed this?") was the one it could not answer. */}
+      {r.locked && (r.locked_at || r.locked_by_name) && (
         <p className="text-[11.5px] text-[var(--text-muted)]">
-          Locked {stamp(r.locked_at)} — changes now need the month reopened on Monthly Closure.
+          Locked {stamp(r.locked_at)}
+          {r.locked_by_name ? ` by ${r.locked_by_name}` : ''} — changes now need the month
+          reopened on Monthly Closure.
         </p>
       )}
 

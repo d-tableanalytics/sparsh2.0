@@ -121,11 +121,32 @@ PAYROLL_SENSITIVE_CAPS = frozenset({
 })
 
 
+# FRD §17 System Admin: "no automatic entitlement to payroll-sensitive values unless
+# explicitly granted". The DEFAULT is therefore withheld, not granted -- administering the
+# system and reading what people are paid are different things, and a company should not
+# have to discover a toggle to get the posture the FRD describes.
+ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT = True
+
+
 def admin_payroll_withheld(user: dict) -> bool:
-    """Is this superadmin kept out of payroll values by the company's setting? Off unless
-    the company turned it on; a superadmin it names in `allow_users` is explicitly granted."""
+    """Is this superadmin kept out of payroll VALUES? §17 says yes unless granted.
+
+    Three states, not two, and the difference matters:
+
+      unset  -> withheld. A company that has configured nothing gets §17's posture.
+      True   -> withheld. The company said so explicitly.
+      False  -> allowed. The company DELIBERATELY turned the restriction off, and that
+                choice outranks the default -- otherwise the toggle would do nothing.
+
+    `allow_users` names the superadmins explicitly granted access while the restriction is
+    on. Permission management itself is never withheld (it is not in PAYROLL_SENSITIVE_CAPS),
+    so an admin who finds payroll blank can always grant it back from Roles & Permissions.
+    """
     rule = policies_for(policy_company(user)).get(ADMIN_PAYROLL_RULE) or {}
-    if not rule.get("restricted"):
+    restricted = rule.get("restricted")
+    if restricted is None:
+        restricted = ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT
+    if not restricted:
         return False
     return str((user or {}).get("_id") or "") not in (rule.get("allow_users") or [])
 

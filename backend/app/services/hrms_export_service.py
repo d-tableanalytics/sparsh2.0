@@ -167,7 +167,10 @@ async def employee_master(actor: dict, company_id: str, *, search: str = None,
 ATTENDANCE_DAILY_COLUMNS = [
     ("employee_code", "Employee ID"), ("employee_name", "Name"),
     ("department", "Department"), ("work_location", "Work Location"),
-    ("work_date", "Date"), ("weekday", "Day"), ("status", "Status"),
+    # `day`, not `weekday`: list_attendance._with_identity is what puts the weekday name on
+    # a row, and it calls the field `day`. The column asked for a key nothing ever sets, so
+    # the Day column of every daily export came out blank.
+    ("work_date", "Date"), ("day", "Day"), ("status", "Status"),
     ("shift_code", "Shift"), ("actual_in", "In"), ("actual_out", "Out"),
     ("worked_hours", "Worked Hours"), ("late_minutes", "Late (min)"),
     ("early_minutes", "Early (min)"), ("payable_day", "Payable Day"),

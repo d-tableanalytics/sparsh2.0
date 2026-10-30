@@ -408,7 +408,15 @@ async def main() -> int:
 
     POL._internal["id"] = CO
     owner = {"_id": "sa-1", "role": "superadmin", "_source_collection": "staff"}
-    check("by default the superadmin holds every payroll capability",
+    # FRD §17: "no AUTOMATIC entitlement to payroll-sensitive values unless explicitly
+    # granted". The default was permissive until 2026-10-27; it is now withheld, so an
+    # unconfigured company already has §17's posture rather than having to find a toggle.
+    check("by default the superadmin holds NO payroll capability (§17)",
+          M.Cap.PAYROLL_READ not in A.capabilities_for(owner)
+          and not A.sees_all_payroll(owner))
+    POL._set_cache_for_tests(CO, {POL.ADMIN_PAYROLL_RULE: {"restricted": False,
+                                                           "allow_users": []}})
+    check("...unless the company deliberately turns the restriction off",
           M.Cap.PAYROLL_READ in A.capabilities_for(owner) and A.sees_all_payroll(owner))
     POL._set_cache_for_tests(CO, {POL.ADMIN_PAYROLL_RULE: {"restricted": True,
                                                            "allow_users": []}})

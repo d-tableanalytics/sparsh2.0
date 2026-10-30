@@ -438,7 +438,14 @@ async def main() -> None:
         check("INTERNAL can read employees", A.can(INTERNAL, M.Cap.EMPLOYEE_READ))
         check("INTERNAL CANNOT read client salary", not A.can(INTERNAL, M.Cap.EMPLOYEE_SALARY_READ))
         check("INTERNAL CANNOT write client salary", not A.can(INTERNAL, M.Cap.EMPLOYEE_SALARY_WRITE))
-        check("superadmin sees everything (implicit ADMIN)", A.can(SUPER, M.Cap.EMPLOYEE_SALARY_WRITE))
+        # ADMIN still resolves to "every capability" -- but FRD §17 subtracts the
+        # payroll-sensitive ones unless the company grants them, and that subtraction is
+        # the LAST thing capabilities_for does. So the implicit-everything rule is checked
+        # on a capability §17 does not touch; the payroll side is
+        # test_core_relationships_and_access's subject.
+        check("superadmin sees everything (implicit ADMIN)", A.can(SUPER, M.Cap.EMPLOYEE_READ))
+        check("...but NOT payroll values by default (§17 System Admin)",
+              not A.can(SUPER, M.Cap.EMPLOYEE_SALARY_WRITE))
 
         # =================================================================
         section("Masters -- create, normalise, duplicate")

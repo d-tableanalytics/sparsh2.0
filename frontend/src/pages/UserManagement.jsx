@@ -369,7 +369,10 @@ const UserManagement = () => {
                                             <option value="">— None —</option>
                                             <option value="HR">HR</option>
                                             <option value="HOD">HOD</option>
-                                            <option value="FINANCE">Finance</option>
+                                            <option value="FINANCE">Finance / Authorised Approver</option>
+                                            {/* FRD §17 payroll roles — §12 requires the maker and the checker to be two different people. */}
+                                            <option value="PAYROLL_MAKER">Payroll Maker</option>
+                                            <option value="PAYROLL_CHECKER">Payroll / HR Checker</option>
                                             <option value="MD">MD</option>
                                             <option value="IMPLEMENTOR">Implementor</option>
                                         </select>

@@ -11,6 +11,7 @@ import {
   getPayrollRun, calculatePayroll, listPayrollRecords, listPayslips,
   submitPayrollRun, checkPayrollRun, decidePayrollRun, actOnPayrollStage, lockPayrollRun, closePayrollRun,
   downloadPayrollRegister,
+  downloadAccountingSummary,
   adjustPayrollRecord, setPayrollAdjustments, listSalaryComponents, approvePayrollAdjustment,
   importPayrollInputs,
 } from '../../../services/hrmsApi';
@@ -125,6 +126,18 @@ export const RunDetailModal = ({ period, scope, can, onClose, onDone, showSucces
     }
   };
 
+  const exportAccounting = async () => {
+    setExporting(true);
+    try {
+      const { data } = await downloadAccountingSummary(period, scope);
+      saveBlob(data, `accounting_summary_${period}.csv`);
+    } catch (err) {
+      showError(await blobErrText(err, 'Could not export the accounting summary.'));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const calculate = () => run(async () => {
     setCalcError(null);
     try {
@@ -180,6 +193,13 @@ export const RunDetailModal = ({ period, scope, can, onClose, onDone, showSucces
                 {records.length > 0 && (
                   <Btn disabled={exporting} onClick={exportRegister}>
                     <Download size={14} /> {exporting ? 'Exporting…' : 'Export register'}
+                  </Btn>
+                )}
+                {/* §24: the same period the other way up — per COMPONENT with its
+                    accounting code, which is the shape a finance system posts from. */}
+                {records.length > 0 && (
+                  <Btn disabled={exporting} onClick={exportAccounting}>
+                    <Download size={14} /> Accounting summary
                   </Btn>
                 )}
                 {canProcess && editable && (
