@@ -36,10 +36,11 @@ from app.models.hrms import (
     AUDIT_APPOINTMENT_ACK, AUDIT_APPOINTMENT_CANCELLED, AUDIT_APPOINTMENT_EDITED,
     AUDIT_APPOINTMENT_GENERATED, AUDIT_APPOINTMENT_OPENED, AUDIT_APPOINTMENT_SENT,
     AUDIT_STAGE_CHANGED, COLL_APPOINTMENTS, COLL_CANDIDATES, COLL_EMPLOYEE_PROFILES,
-    COLL_OFFERS,
-    COLL_REQUISITIONS, DEFAULT_APPOINTMENT_BODY, EDITABLE_APPOINTMENT_STATUSES,
-    ENTITY_APPOINTMENT, ENTITY_CANDIDATE, AppStatus, AppointmentStatus, Cap, HrmsRole,
-    LinkKind, OfferStatus, can_transition, is_iso_date, render_appointment_body,
+    COLL_OFFERS, COLL_REQUISITIONS, COLL_SALARY_STRUCTURES, DEFAULT_APPOINTMENT_BODY,
+    DEFAULT_EMPLOYEE_APPOINTMENT_BODY, EDITABLE_APPOINTMENT_STATUSES, ENTITY_APPOINTMENT,
+    ENTITY_CANDIDATE, ENTITY_EMPLOYEE, AppStatus, AppointmentStatus, Cap, HrmsRole, LinkKind,
+    OfferStatus, StructureStatus, can_transition, employee_appointment_key, is_iso_date,
+    render_appointment_body,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -71,6 +72,15 @@ def _actor_name(actor: Optional[dict]) -> str:
 def _out(doc: dict, *, include_ctc: bool = True) -> dict:
     doc = dict(doc)
     doc.pop("_id", None)
+    # The letter as the recipient reads it, placeholders filled -- `content` stays the
+    # editable template. Rendered with the real CTC before any redaction below.
+    doc["rendered_content"] = render_appointment_body(
+        doc.get("content") or "",
+        designation=doc.get("designation"), company=doc.get("company_name"),
+        ctc=f"{doc.get('ctc'):,.0f}" if doc.get("ctc") is not None else "",
+        joining_date=doc.get("joining_date"), location=doc.get("location"))
+    if not include_ctc and doc.get("ctc") is not None:
+        doc["rendered_content"] = doc["rendered_content"].replace(f"{doc['ctc']:,.0f}", "(hidden)")
     if not include_ctc:
         # Omitted, not nulled -- a viewer must not be able to confuse "you may not see this"
         # with "no salary was stated". Same rule Phase 8 applies to an offer's CTC.
@@ -106,10 +116,20 @@ def _validate_joining(value: str) -> str:
 # -------------------------------------------------------------
 # Scoping
 # -------------------------------------------------------------
-async def _own_source_uk(actor: dict, company_id: str) -> Optional[str]:
+def _letter_keys(profile: Optional[dict]) -> list:
+    """Every `uk` an employee's appointment letter can be stored under: the candidate record
+    they were hired from (if any), and their own employee code (a directly-added employee)."""
+    profile = profile or {}
+    keys = [profile["source_uk"]] if profile.get("source_uk") else []
+    if profile.get("employee_code"):
+        keys.append(employee_appointment_key(profile["employee_code"]))
+    return keys
+
+
+async def _own_letter_keys(actor: dict, company_id: str) -> list:
     profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
         {"company_id": str(company_id), "user_id": str(actor.get("_id") or "")})
-    return (profile or {}).get("source_uk")
+    return _letter_keys(profile)
 
 
 async def _scope_filter(actor: dict, company_id: str) -> dict:
@@ -117,13 +137,13 @@ async def _scope_filter(actor: dict, company_id: str) -> dict:
     hrms_candidate_service._scope_filter.
 
     An EMPLOYEE caller (self-service "download my Appointment Letter" from their own
-    profile) is scoped to the ONE letter raised against their own hiring record — resolved
-    via the `source_uk` an employee profile is stamped with at onboarding (Phase 9). Fails
-    CLOSED, the same PIP/Letters/ATT-1 pattern: no linked candidate record, no letter."""
+    profile) is scoped to the letter raised against their own hiring record — resolved
+    via the `source_uk` an employee profile is stamped with at onboarding (Phase 9) — or
+    against their employee code when HR added them directly. Fails CLOSED, the same
+    PIP/Letters/ATT-1 pattern: no profile, no letter."""
     role = hrms_role(actor)
     if role == HrmsRole.EMPLOYEE:
-        own_uk = await _own_source_uk(actor, company_id)
-        return {"uk": own_uk or "__none__"}
+        return {"uk": {"$in": await _own_letter_keys(actor, company_id) or ["__none__"]}}
     if role != HrmsRole.MANAGER:
         return {}
     rows = await get_collection(COLL_REQUISITIONS).find(
@@ -145,12 +165,19 @@ async def _require_visible(actor: dict, company_id: str, appointment_no: str) ->
 # Read
 # -------------------------------------------------------------
 async def list_appointments(actor: dict, company_id: str, *, status: str = None,
-                            uk: str = None, search: str = None, limit: int = 200) -> dict:
+                            uk: str = None, employee_code: str = None, search: str = None,
+                            limit: int = 200) -> dict:
     query = {"company_id": str(company_id)}
     if status:
         query["status"] = status
     if uk:
         query["uk"] = uk
+    if employee_code:
+        # An employee's letter may sit under their candidate uk OR their own code; the
+        # profile knows which, so the caller does not have to.
+        profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+            {"company_id": str(company_id), "employee_code": employee_code})
+        query["uk"] = {"$in": _letter_keys(profile) or ["__none__"]}
     # Scope is applied LAST and therefore wins over a caller-supplied `uk` — an EMPLOYEE
     # caller's self-scope (see _scope_filter) must narrow to their own record even if the
     # request also passed a `uk` (HR viewing a DIFFERENT employee's profile passes one too;
@@ -249,6 +276,8 @@ async def create_appointment(actor: dict, company_id: str, payload: dict) -> dic
     them: the letter confirms what was agreed, so re-entering the figures by hand is a way
     to introduce a discrepancy between two documents that must say the same thing.
     """
+    if (payload.get("employee_code") or "").strip():
+        return await _create_for_employee(actor, company_id, payload)
     uk = (payload.get("uk") or "").strip()
     if not uk:
         raise HTTPException(status_code=422, detail="Select a candidate.")
@@ -333,6 +362,122 @@ async def create_appointment(actor: dict, company_id: str, payload: dict) -> dic
     await audit(actor, AUDIT_APPOINTMENT_GENERATED, ENTITY_APPOINTMENT, appointment_no,
                 f"{designation} for {candidate.get('candidate_name')}", company_id)
     await audit(actor, AUDIT_APPOINTMENT_GENERATED, ENTITY_CANDIDATE, uk,
+                appointment_no, company_id)
+
+    return _out(doc, include_ctc=can(actor, Cap.EMPLOYEE_SALARY_READ))
+
+
+async def _employee_annual_ctc(company_id: str, profile: dict) -> Optional[float]:
+    """The annual CTC on the employee's latest ACTIVE salary structure, else 12 x the
+    monthly base salary on the profile, else None (HR fills it in on the draft)."""
+    rows = await get_collection(COLL_SALARY_STRUCTURES).find(
+        {"company_id": str(company_id), "employee_code": profile.get("employee_code"),
+         "status": StructureStatus.ACTIVE.value}).sort("effective_from", -1).limit(1).to_list(1)
+    if rows and rows[0].get("annual_ctc"):
+        return float(rows[0]["annual_ctc"])
+    if profile.get("base_salary"):
+        return round(float(profile["base_salary"]) * 12, 2)
+    return None
+
+
+async def _create_for_employee(actor: dict, company_id: str, payload: dict) -> dict:
+    """Draft an appointment letter for an employee added directly in HR.
+
+    BR-028 asks for an Appointment Letter on every employee profile, but a person created
+    straight in the employee master never passed through recruitment, so there is no
+    candidate and no accepted offer to default the terms from. The EMPLOYEE RECORD is the
+    source of truth instead. Everything after this (edit, send, public acknowledgement,
+    cancel) is the same lifecycle a candidate's letter goes through.
+
+    An employee who WAS hired through recruitment is pointed back at that letter rather
+    than given a second one.
+    """
+    from app.services.hrms_employee_service import get_employee_by_code
+    from app.services.hrms_letter_service import _company_name
+
+    employee_code = payload["employee_code"].strip()
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": employee_code})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    view = await get_employee_by_code(actor, company_id, employee_code) or {}
+    name = view.get("name") or employee_code
+
+    existing = await get_collection(COLL_APPOINTMENTS).find_one({
+        "company_id": str(company_id), "uk": {"$in": _letter_keys(profile)},
+        "status": {"$ne": AppointmentStatus.CANCELLED.value}})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{name} already has an appointment letter '
+                    f'({existing["appointment_no"]}, {existing["status"]}).'))
+
+    uk = employee_appointment_key(employee_code)
+    # The unique (company_id, uk) index keeps one row per person, cancelled ones included,
+    # so a cancelled letter is re-drafted in place rather than inserted beside it.
+    cancelled = await get_collection(COLL_APPOINTMENTS).find_one(
+        {"company_id": str(company_id), "uk": uk})
+
+    joining = _validate_joining(payload.get("joining_date") or view.get("joined_on"))
+    ctc = _validate_money(payload.get("ctc") if payload.get("ctc") is not None
+                          else await _employee_annual_ctc(company_id, profile))
+    designation = (clean_text(payload.get("designation"), limit=140)
+                   or view.get("designation") or view.get("job_title")
+                   or view.get("legacy_designation") or "the role")
+
+    year = datetime.now(timezone.utc).year
+    appointment_no = await next_business_id("appointment", str(company_id), year)
+    now = datetime.now(timezone.utc)
+
+    doc = {
+        "appointment_no": appointment_no,
+        "access_code": new_access_code(),
+        "company_id": str(company_id),
+        "uk": uk,
+        "employee_code": employee_code,
+        "request_no": None,
+        "offer_no": None,
+        # `candidate_*` names kept so the board, the paper and the public page need no
+        # second set of fields; on this row they describe the employee.
+        "candidate_name": name,
+        "candidate_email": view.get("official_email") or view.get("email"),
+        "designation": designation,
+        "department": (clean_text(payload.get("department"), limit=140)
+                       or view.get("department") or view.get("legacy_department")),
+        "company_name": (clean_text(payload.get("company_name"), limit=140)
+                         or view.get("legal_entity") or await _company_name(company_id)),
+        "location": (clean_text(payload.get("location"), limit=160)
+                     or view.get("work_location") or view.get("business_unit")),
+        "ctc": ctc,
+        "joining_date": joining,
+        "content": (clean_text(payload.get("content"), limit=20000)
+                    or DEFAULT_EMPLOYEE_APPOINTMENT_BODY),
+        "status": AppointmentStatus.GENERATED.value,
+        "version": 1,
+        "history": [],
+        "signature": clean_text(payload.get("signature"), limit=120),
+        "generated_by": str(actor.get("_id") or ""),
+        "generated_by_name": _actor_name(actor),
+        "generated_at": now,
+        "sent_by": None, "sent_at": None,
+        "acknowledged_at": None, "acknowledgement_signature": None,
+        "document_acks": [
+            {"doc": label, "required": bool(required),
+             "acknowledged_at": None, "signature": None}
+            for label, required in (await employment_documents(company_id)).items()
+        ],
+        "created_at": now,
+    }
+    if cancelled:
+        doc["previous_appointment_no"] = cancelled["appointment_no"]
+        await get_collection(COLL_APPOINTMENTS).replace_one(
+            {"_id": cancelled["_id"]}, dict(doc))
+    else:
+        await get_collection(COLL_APPOINTMENTS).insert_one(dict(doc))
+
+    await audit(actor, AUDIT_APPOINTMENT_GENERATED, ENTITY_APPOINTMENT, appointment_no,
+                f"{designation} for {name}", company_id)
+    await audit(actor, AUDIT_APPOINTMENT_GENERATED, ENTITY_EMPLOYEE, employee_code,
                 appointment_no, company_id)
 
     return _out(doc, include_ctc=can(actor, Cap.EMPLOYEE_SALARY_READ))
@@ -434,6 +579,9 @@ async def send_appointment(actor: dict, company_id: str, appointment_no: str,
         raise HTTPException(
             status_code=409, detail="This appointment letter has already been sent.")
 
+    if current.get("employee_code"):
+        return await _finish_employee_send(actor, company_id, current)
+
     # -- the candidate's pipeline stage --
     candidate = await get_collection(COLL_CANDIDATES).find_one(
         {"uk": current["uk"], "company_id": str(company_id)})
@@ -499,6 +647,43 @@ async def send_appointment(actor: dict, company_id: str, appointment_no: str,
     return await get_appointment(actor, company_id, appointment_no)
 
 
+async def _finish_employee_send(actor: dict, company_id: str, current: dict) -> dict:
+    """The bookkeeping after a directly-added employee's letter goes out.
+
+    The candidate's version minus the two candidate-only steps (pipeline stage, opening
+    onboarding): this person is already employed. Instead the employee is told in-app, so
+    the letter reaches them without HR copying a link.
+    """
+    appointment_no = current["appointment_no"]
+    from app.services.hrms_link_service import register_link
+    await register_link(
+        company_id=company_id, kind=LinkKind.APPOINTMENT, code=current["access_code"],
+        target_type="employee", target_id=appointment_no, actor=actor,
+        candidate_name=current.get("candidate_name"))
+    await _file_letter_document(actor, company_id, current, status_verified=False)
+
+    await audit(actor, AUDIT_APPOINTMENT_SENT, ENTITY_APPOINTMENT, appointment_no,
+                f"sent to {current.get('candidate_name')}", company_id)
+    await audit(actor, AUDIT_APPOINTMENT_SENT, ENTITY_EMPLOYEE, current["employee_code"],
+                appointment_no, company_id)
+
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": current["employee_code"]},
+        {"user_id": 1})
+    if (profile or {}).get("user_id"):
+        await notify_user(
+            profile["user_id"], "Your appointment letter has been issued",
+            f"{appointment_no} is ready. Please read and acknowledge it.",
+            link=f"/appointment/{current['access_code']}")
+
+    await notify_hrms_role(
+        company_id, ["HR"], f"Appointment letter sent: {current.get('candidate_name')}",
+        f"{appointment_no} has been issued to employee {current['employee_code']}.",
+        kind="success", link="/hrms/appointments")
+
+    return await get_appointment(actor, company_id, appointment_no)
+
+
 async def cancel_appointment(actor: dict, company_id: str, appointment_no: str,
                              payload: dict) -> dict:
     """Withdraw an appointment letter.
@@ -550,10 +735,11 @@ async def _file_letter_document(actor, company_id: str, appointment: dict,
     """
     try:
         from app.services.hrms_document_service import file_system_document
+        is_employee = bool(appointment.get("employee_code"))
         await file_system_document(
             actor, company_id,
-            owner_type="candidate",
-            owner_id=appointment.get("uk"),
+            owner_type="employee" if is_employee else "candidate",
+            owner_id=appointment.get("employee_code") if is_employee else appointment.get("uk"),
             owner_name=appointment.get("candidate_name"),
             type_name="Appointment Letter",
             reference=appointment.get("appointment_no"),
@@ -712,8 +898,12 @@ async def acknowledge_appointment(code: str, payload: dict) -> dict:
     company_id = doc.get("company_id")
     await audit(None, AUDIT_APPOINTMENT_ACK, ENTITY_APPOINTMENT, doc["appointment_no"],
                 doc.get("candidate_name"), company_id)
-    await audit(None, AUDIT_APPOINTMENT_ACK, ENTITY_CANDIDATE, doc["uk"],
-                doc["appointment_no"], company_id)
+    if doc.get("employee_code"):
+        await audit(None, AUDIT_APPOINTMENT_ACK, ENTITY_EMPLOYEE, doc["employee_code"],
+                    doc["appointment_no"], company_id)
+    else:
+        await audit(None, AUDIT_APPOINTMENT_ACK, ENTITY_CANDIDATE, doc["uk"],
+                    doc["appointment_no"], company_id)
 
     # Item 2: the filed document is now proven — mark it Verified.
     fresh = await get_collection(COLL_APPOINTMENTS).find_one({"access_code": code})
@@ -724,7 +914,8 @@ async def acknowledge_appointment(code: str, payload: dict) -> dict:
     # to remember to tick it. Best-effort: the signature is already recorded, and a
     # checklist that could not be updated must not undo it.
     try:
-        await _tick_policy_ack(company_id, doc["uk"])
+        if not doc.get("employee_code"):
+            await _tick_policy_ack(company_id, doc["uk"])
     except Exception as e:                          # pragma: no cover - defensive
         print(f"[WARN] policy_ack not ticked for {doc.get('uk')}: {e}")
 

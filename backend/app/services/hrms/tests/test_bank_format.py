@@ -60,23 +60,25 @@ CONTEXT = {"batch_no": "PAYB-2026-001", "generated_date": "2026-03-31"}
 
 def legacy_output() -> str:
     """The previous hard-coded implementation, reproduced here verbatim from the code it
-    replaced. If the DEFAULT format ever drifts from this, the test says so."""
+    replaced, plus the Generated Date column P1-108 added after Payroll Period. If the
+    DEFAULT format ever drifts from this, the test says so."""
     import csv
     import io as _io
     buf = _io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Batch No", "Payroll Period", "Employee ID", "Beneficiary Name",
+    w.writerow(["Batch No", "Payroll Period", "Generated Date", "Employee ID", "Beneficiary Name",
                 "Account Number", "IFSC", "Bank", "Branch", "Account Type", "Amount",
                 "Payment Mode", "Narration"])
     for r in PAYMENTS:
-        w.writerow(["PAYB-2026-001", r["period"], r["employee_code"], r.get("account_holder"),
+        w.writerow(["PAYB-2026-001", r["period"], CONTEXT["generated_date"], r["employee_code"],
+                    r.get("account_holder"),
                     r.get("bank_account"), r.get("bank_ifsc"), r.get("bank_name"),
                     r.get("bank_branch"), r.get("bank_account_type"),
                     f"{float(r['amount']):.2f}", r.get("payment_mode"),
                     f"Salary {r['period']}"])
     w.writerow([])
     total = sum(float(r["amount"]) for r in PAYMENTS)
-    w.writerow(["Total", "", "", "", "", "", "", "", "", f"{total:.2f}", "",
+    w.writerow(["Total", "", "", "", "", "", "", "", "", "", f"{total:.2f}", "",
                 f"{len(PAYMENTS)} payment(s)"])
     return buf.getvalue()
 

@@ -86,7 +86,9 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
     && (d.default_value == null || d.default_value === '')
     && (!d.effective_from || d.effective_from <= today) && (!d.effective_to || d.effective_to >= today)
     && Object.entries(d.applicability || {})
-      .every(([field, allowed]) => !allowed?.length || allowed.includes(form[field])))
+      .every(([field, allowed]) => !allowed?.length || allowed
+        .map((v) => String(v ?? '').trim().toLowerCase())
+        .includes(String(form[field] ?? '').trim().toLowerCase())))
     .sort((a, b) => (a.display_order ?? 100) - (b.display_order ?? 100));
 
   const checkDuplicates = async () => {

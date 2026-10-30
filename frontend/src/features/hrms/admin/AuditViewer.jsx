@@ -45,11 +45,26 @@ const AuditViewer = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // The old/new values a change carries (DEF-09). Blank renders as an em dash.
+  const show = (v) => (v === null || v === undefined || v === '' ? '—'
+    : (typeof v === 'object' ? JSON.stringify(v) : String(v)));
+  const changesText = (r) => (r.changes || [])
+    .map((c) => `${c.field}: ${show(c.old)} → ${show(c.new)}`).join('; ');
+  const Changes = ({ r }) => (r.changes?.length ? (
+    <ul className="mt-1 space-y-0.5">
+      {r.changes.map((c) => (
+        <li key={c.field} className="text-[11.5px] text-[var(--text-muted)]">
+          <span className="font-semibold text-[var(--text-main)]">{c.field}</span>: {show(c.old)} → {show(c.new)}
+        </li>
+      ))}
+    </ul>
+  ) : null);
+
   const exportCsv = () => {
     if (!rows.length) return;
     const escape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const headers = ['created_at', 'actor_name', 'action', 'entity', 'entity_id', 'detail'];
-    const csv = [headers, ...rows.map((r) => headers.map((h) => r[h]))]
+    const headers = ['created_at', 'actor_name', 'action', 'entity', 'entity_id', 'detail', 'changes'];
+    const csv = [headers, ...rows.map((r) => headers.map((h) => (h === 'changes' ? changesText(r) : r[h])))]
       .map((r) => r.map(escape).join(',')).join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
     const a = document.createElement('a');
@@ -80,7 +95,10 @@ const AuditViewer = () => {
       </>
     ) },
     { key: 'detail', label: 'Detail', render: (r) => (
-      <span className="text-[var(--text-main)]">{r.detail || '—'}</span>
+      <>
+        <span className="text-[var(--text-main)]">{r.detail || '—'}</span>
+        <Changes r={r} />
+      </>
     ) },
   ];
 
@@ -128,6 +146,7 @@ const AuditViewer = () => {
                   {r.actor_name || 'system'} · {r.entity}{r.entity_id ? ` · ${r.entity_id}` : ''}
                 </p>
                 {r.detail && <p className="text-[12px] text-[var(--text-main)]">{r.detail}</p>}
+                <Changes r={r} />
               </div>
             )}
             keyOf={(r) => r._id} />

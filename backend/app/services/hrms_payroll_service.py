@@ -159,6 +159,54 @@ def _policy_changes(before: dict, after: dict) -> list:
             for k in sorted(after) if before.get(k) != after[k]]
 
 
+def _clean_approval_levels(levels) -> list:
+    """P1-095: validate a configured approval chain. [] means "back to the default matrix".
+
+    Each stage names a PAYROLL capability (the same allow-list the lock stage uses) and may
+    be narrowed to HRMS roles. A typo is refused at save time rather than discovered when a
+    payroll cannot be approved."""
+    from app.models.hrms import PAYROLL_MAX_APPROVAL_LEVELS, PAYROLL_STAGE_ROLES
+    if not levels:
+        return []
+    if not isinstance(levels, list) or len(levels) > PAYROLL_MAX_APPROVAL_LEVELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"The approval chain has 1 to {PAYROLL_MAX_APPROVAL_LEVELS} stages.")
+    out, names = [], set()
+    for i, stage in enumerate(levels, start=1):
+        stage = stage if isinstance(stage, dict) else {}
+        name = str(stage.get("name") or "").strip()[:60]
+        if not name:
+            raise HTTPException(status_code=422, detail=f"Approval stage {i} needs a name.")
+        if name.lower() in names:
+            raise HTTPException(status_code=422, detail=f"Two approval stages are called {name}.")
+        names.add(name.lower())
+        cap = str(stage.get("cap") or "").strip()
+        if cap not in PAYROLL_MATRIX_ALLOWED_CAPS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name}: the permission must be one of "
+                       f"{', '.join(sorted(PAYROLL_MATRIX_ALLOWED_CAPS))}.")
+        roles = sorted({str(r).strip().lower() for r in stage.get("roles") or []
+                        if str(r).strip()})
+        unknown = [r for r in roles if r not in PAYROLL_STAGE_ROLES]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name}: unknown role(s) {', '.join(unknown)}. Choose from "
+                       f"{', '.join(sorted(PAYROLL_STAGE_ROLES))}.")
+        out.append({"name": name, "cap": cap, "roles": roles})
+    return out
+
+
+def approval_chain(policy: dict) -> Optional[list]:
+    """The configured approval chain (P1-095), or None when the company uses the default
+    Maker -> Checker -> Finance matrix -- in which case check_run / decide_run behave
+    exactly as they always have."""
+    levels = (policy or {}).get("approval_levels")
+    return list(levels) if levels else None
+
+
 async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> dict:
     """§21 "Change payroll cut-off, eligibility, component applicability, rounding and
     approval controls WITH VERSIONING" — through the §27 change flow, not around it.
@@ -206,6 +254,8 @@ async def save_payroll_policy(actor: dict, company_id: str, payload: dict) -> di
             raise HTTPException(
                 status_code=422,
                 detail=f"{key} must be one of: {', '.join(sorted(PAYROLL_MATRIX_ALLOWED_CAPS))}.")
+    if "approval_levels" in clean:
+        clean["approval_levels"] = _clean_approval_levels(clean["approval_levels"])
     if not clean:
         raise HTTPException(status_code=422, detail="Nothing to change.")
     if not reason:
@@ -282,7 +332,21 @@ def component_defaults(component: dict) -> dict:
     ctype = c.get("component_type") or ComponentType.EARNING.value
     c.setdefault("calculation_method", CalculationMethod.FIXED.value)
     c["calculation_method"] = c["calculation_method"] or CalculationMethod.FIXED.value
-    c["proration"] = c.get("proration") or _DEFAULT_PRORATION.get(ctype, ProrationRule.NONE.value)
+    default_proration = _DEFAULT_PRORATION.get(ctype, ProrationRule.NONE.value)
+    # DEF-03: an employer contribution DERIVED from other components (a percentage of Basic,
+    # a formula, a slab) is priced from its base exactly as the employee-side deduction on
+    # the same base is, and that deduction is not prorated. Prorating only the employer half
+    # again by payable days gave Employer PF 1,704 against Employee PF 1,800 on one 12%-of-
+    # Basic definition. A FIXED employer amount still prorates by payable days, and an
+    # explicitly configured rule always wins.
+    if ctype == ComponentType.EMPLOYER_CONTRIBUTION.value and c["calculation_method"] in (
+            CalculationMethod.PERCENTAGE.value, CalculationMethod.FORMULA.value,
+            CalculationMethod.SLAB.value):
+        default_proration = ProrationRule.NONE.value
+    # Whether proration was CONFIGURED or is the type default: the editor must not save the
+    # resolved default back as an explicit rule, or a later default change never reaches it.
+    c["proration_configured"] = bool(c.get("proration"))
+    c["proration"] = c.get("proration") or default_proration
     c["rounding"] = c.get("rounding") or RoundingRule.NONE.value
     c["payslip_section"] = c.get("payslip_section") or _DEFAULT_SECTION.get(
         ctype, PayslipSection.OTHER_EARNINGS.value)
@@ -495,6 +559,9 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
                 # approval.
                 resolved = {**component_defaults(current),
                             "frequency": current.get("frequency") or "Monthly"}
+                if not resolved.pop("proration_configured"):
+                    # The editor posts "" for a type-default proration; that is no change.
+                    resolved["proration"] = None
                 empty = (None, "", [], {})
                 changed = {k: v for k, v in clean.items()
                            if resolved.get(k) != v
@@ -503,6 +570,26 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
                     return _out(current)
                 return await _stage_component_change(actor, company_id, current, changed,
                                                       payload, now)
+
+    # DEF-02 -- a NEW component is configuration too. Unguarded, it was written with no
+    # lifecycle, which the pay engine reads as live, so it paid from the moment it was
+    # saved. Governed, it is created as a Draft and a §27 request is raised for it; it
+    # becomes Active only through _component_activate, exactly like a revision.
+    new_request_reason = None
+    if not current:
+        from app.models.hrms import CONFIG_ENTITY_SALARY_COMPONENT
+        from app.services import hrms_config_change_service as CC
+        if await CC.is_governed(company_id, CONFIG_ENTITY_SALARY_COMPONENT):
+            if clean.get("lifecycle") in GOVERNED_COMPONENT_STATES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{code} cannot be created {clean['lifecycle']}. New components "
+                           f"start as Draft and go live once somebody else approves them in "
+                           f"Configuration Approvals (FRD §27).")
+            clean["lifecycle"] = "Draft"
+            new_request_reason = (str(payload.get("change_reason") or "").strip()
+                                  or f"New salary component {code}"
+                                     + (f" ({clean['name']})" if clean.get("name") else ""))
 
     clean["updated_at"] = now
     change = {"at": now, "by": _actor_id(actor), "by_name": _actor_name(actor),
@@ -518,6 +605,16 @@ async def save_salary_component(actor: dict, company_id: str, payload: dict) -> 
     )
     await audit(actor, AUDIT_SALARY_COMPONENT_SAVED, ENTITY_SALARY_COMPONENT, code,
                 clean.get("component_type"), company_id)
+    if new_request_reason:
+        request = await CC.create_request(actor, company_id, {
+            "entity_type": CONFIG_ENTITY_SALARY_COMPONENT, "entity_code": code,
+            "reason": new_request_reason, "effective_from": payload.get("effective_from"),
+            "title": f"{code} — new component"[:160]})
+        await coll.update_one({"company_id": str(company_id), "code": code},
+                              {"$set": {"pending_request_no": request["request_no"]}})
+        out = _out(await coll.find_one({"company_id": str(company_id), "code": code}))
+        out["pending_request"] = request
+        return out
     doc = await coll.find_one({"company_id": str(company_id), "code": code})
     return _out(doc)
 
@@ -853,6 +950,35 @@ _component_type_cache: dict = {}
 _component_meta_cache: dict = {}
 
 
+def component_on(component: dict, period_end: str) -> dict:
+    """The definition of a component IN FORCE on `period_end` (DEF-01, §25 "formula has
+    version, effective dates").
+
+    Activating a revision overwrites the live definition and keeps the one it replaced in
+    `versions` as Superseded. A run for a period BEFORE the revision's effective date must
+    be priced by that earlier version -- reading only the live definition gave a February
+    run the March formula, or dropped the component altogether because its live
+    `effective_from` was now later than February. The earlier version runs until the day
+    before its successor starts.
+    """
+    start = component.get("effective_from")
+    versions = [v for v in component.get("versions") or [] if v.get("status") == "Superseded"]
+    if not period_end or not start or start <= period_end or not versions:
+        return component
+    earlier = [v for v in versions
+               if not str((v.get("definition") or {}).get("effective_from") or "") > period_end]
+    if not earlier:
+        return component
+    chosen = max(earlier, key=lambda v: int(v.get("version") or 0))
+    definition = dict(chosen.get("definition") or {})
+    out = {**component, **definition, "version": chosen.get("version"),
+           "effective_from": definition.get("effective_from")}
+    until = (date.fromisoformat(start[:10]) - timedelta(days=1)).isoformat()
+    if not out.get("effective_to") or out["effective_to"] > until:
+        out["effective_to"] = until
+    return component_defaults(out)
+
+
 async def _load_component_types(company_id: str) -> None:
     rows = await list_salary_components(None, company_id)
     _component_type_cache.clear()
@@ -1145,6 +1271,12 @@ async def get_run(actor: dict, company_id: str, period: str) -> dict:
         {"company_id": str(company_id), "period": period})
     run["attendance_locked"] = (lock or {}).get("status") == "Locked"
     run["policy"] = await get_payroll_policy(company_id)
+    # P1-095: the configured chain and the stage this run waits on (None = default matrix).
+    chain = approval_chain(run["policy"])
+    run["approval_chain"] = chain
+    idx = _stage_index(run, chain) if chain else None
+    run["current_stage"] = ({**chain[idx], "index": idx, "count": len(chain)}
+                            if idx is not None else None)
     # FRD §18 — told to the screen BEFORE anyone clicks Submit, rather than only refusing
     # the click. A maker who unlocked the month to fix one day should see that the run is
     # stale while they are looking at it.
@@ -1372,7 +1504,14 @@ def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
     overwhelmingly common case and means this phase changes no existing company's figures.
     """
     components = (structure or {}).get("components") or []
-    if not any(_period_dependent(meta.get(c.get("code")) or {}) for c in components):
+    period_dependent = any(_period_dependent(meta.get(c.get("code")) or {}) for c in components)
+    # DEF-01: a structure stores each line's AMOUNT as priced when it was saved. Once a
+    # formula / slab / percentage is revised, that amount is stale -- re-price every derived
+    # line (dependants included) from the rule in force for this period. A structure whose
+    # lines all match their rule is returned untouched, as before.
+    stale = any(_priced_by_other_rule(c, component_defaults(meta.get(c.get("code")) or {}))
+                for c in components)
+    if not period_dependent and not stale:
         return structure
     lines = [{"code": c.get("code"), "amount": c.get("amount") or 0,
               "percentage": c.get("percentage_override") or c.get("percentage")}
@@ -1381,11 +1520,39 @@ def _reprice_for_period(structure: Optional[dict], meta: dict, days: dict,
                              days=days, profile=profile, period_end=period_end,
                              constants=constants, inputs=inputs)
     fresh = {r["code"]: r["amount"] for r in resolved}
+
+    def reprice(c: dict) -> bool:
+        m = meta.get(c.get("code")) or {}
+        return _period_dependent(m) or (stale and component_defaults(m).get(
+            "calculation_method") in _DERIVED_METHODS)
     return {**structure,
             "components": [
                 {**c, "amount": fresh.get(c.get("code"), c.get("amount"))}
-                if _period_dependent(meta.get(c.get("code")) or {}) else c
+                if reprice(c) else c
                 for c in components]}
+
+
+_DERIVED_METHODS = {CalculationMethod.FORMULA.value, CalculationMethod.SLAB.value,
+                    CalculationMethod.PERCENTAGE.value}
+
+
+def _priced_by_other_rule(line: dict, m: dict) -> bool:
+    """True when a stored structure line was priced by a different rule than `m` (DEF-01):
+    another version, another formula text, another slab table, another default %."""
+    method = m.get("calculation_method")
+    if method not in _DERIVED_METHODS:
+        return False
+    if line.get("method") and line["method"] != method:
+        return True
+    if m.get("version") is not None and line.get("component_version") is not None             and line["component_version"] != m["version"]:
+        return True
+    if method == CalculationMethod.FORMULA.value:
+        return (line.get("formula") or "") != (m.get("formula") or "")
+    if method == CalculationMethod.SLAB.value:
+        return line.get("slabs") is not None and line.get("slabs") != m.get("slabs")
+    if line.get("percentage_override") is None and m.get("percentage") is not None:
+        return line.get("percentage") is not None and             float(line["percentage"]) != float(m["percentage"])
+    return False
 
 
 def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
@@ -1431,7 +1598,12 @@ def _component_lines(structure: Optional[dict], meta: dict, ratio: float, *,
                       "full_amount": round(full, 2), "amount": round(paid, 2),
                       "prorated": prorate and round(paid, 2) != round(full, 2),
                       "proration": m["proration"], "frequency": m.get("frequency"),
-                      "component_version": m.get("version")})
+                      "component_version": m.get("version"),
+                      # DEF-01: the rule itself, so a past record shows the formula it was
+                      # priced by even after the component has been revised.
+                      "method": m.get("calculation_method"),
+                      "formula": (m.get("formula") if m.get("calculation_method")
+                                  == CalculationMethod.FORMULA.value else None)})
     present = {l["code"] for l in lines}
     for code, amount in (imported or {}).items():
         m = component_defaults(meta.get(code) or {})
@@ -1562,7 +1734,9 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
                    f"Monthly Closure) before payroll is calculated (FRD §12 stage 2).")
 
     await _load_component_types(company_id)
-    meta = dict(_component_meta_cache)
+    # DEF-01: each component as it stood for THIS period, so re-running an earlier month
+    # after a revision still uses -- and stamps on each line -- the version then in force.
+    meta = {code: component_on(m, end) for code, m in _component_meta_cache.items()}
     # §25 constants, read once for the whole run rather than per employee.
     run_constants = await constants_for(company_id)
     profiles = await _eligible_profiles(company_id, start, end,
@@ -2057,7 +2231,9 @@ async def submit_run(actor: dict, company_id: str, period: str, payload: dict) -
         {"_id": run["_id"]},
         {"$set": {"status": PayrollRunStatus.SUBMITTED.value, "submitted_by": _actor_id(actor),
                   "submitted_by_name": _actor_name(actor), "submitted_at": now,
-                  "totals": totals, "updated_at": now},
+                  "totals": totals, "updated_at": now,
+                  # P1-095: a resubmitted run starts the configured chain again.
+                  "approval_stage": 0, "stage_approvers": []},
          "$push": {"approval_trail": _trail(actor, "Maker", "Submitted for approval",
                                             payload.get("remarks"))}})
     await audit(actor, AUDIT_PAYROLL_SUBMITTED, ENTITY_PAYROLL_RUN, period, None, company_id)
@@ -2095,6 +2271,9 @@ async def check_run(actor: dict, company_id: str, period: str, payload: dict) ->
     and it is enforced on the ACTOR, not the role: HR holds both PAYROLL_PROCESS and
     PAYROLL_CHECK (§12 names the checker "Payroll/HR Checker"), so a role-level test would
     let a single HR user wave their own run through."""
+    chain = approval_chain(await get_payroll_policy(company_id))
+    if chain:
+        return await act_on_stage(actor, company_id, period, payload, chain=chain)
     run = await _get_run(company_id, period)
     if run["status"] != PayrollRunStatus.SUBMITTED.value:
         raise HTTPException(
@@ -2135,8 +2314,11 @@ async def decide_run(actor: dict, company_id: str, period: str, payload: dict) -
     The approver is never the maker, and -- when the matrix says so -- never the checker
     either. §19 leaves the exact approvers unconfirmed, which is why this is policy and
     not code."""
-    run = await _get_run(company_id, period)
     policy = await get_payroll_policy(company_id)
+    chain = approval_chain(policy)
+    if chain:
+        return await act_on_stage(actor, company_id, period, payload, chain=chain)
+    run = await _get_run(company_id, period)
     checker_required = bool(policy.get("checker_required", True))
 
     acceptable = ([PayrollRunStatus.CHECKED.value] if checker_required
@@ -2171,6 +2353,102 @@ async def decide_run(actor: dict, company_id: str, period: str, payload: dict) -
          "$push": {"approval_trail": _trail(actor, "Approver", new_status,
                                             payload.get("remarks"))}})
     await audit(actor, AUDIT_PAYROLL_DECIDED, ENTITY_PAYROLL_RUN, period, new_status, company_id)
+    return await get_run(actor, company_id, period)
+
+
+def _stage_index(run: dict, chain: list) -> Optional[int]:
+    """Which configured stage a run is waiting on, or None when it is not awaiting one."""
+    if run.get("status") == PayrollRunStatus.SUBMITTED.value:
+        return 0
+    if run.get("status") == PayrollRunStatus.CHECKED.value:
+        # A run checked under the default matrix before a chain was configured has passed
+        # one stage, which is what the default's Checker stage is.
+        idx = int(run.get("approval_stage") or 1)
+        return idx if idx < len(chain) else None
+    return None
+
+
+def _may_act_on_stage(actor: dict, stage: dict) -> bool:
+    from app.models.hrms import Cap
+    from app.utils.hrms_access import can, hrms_role
+    try:
+        if not can(actor, Cap(stage["cap"])):
+            return False
+    except ValueError:
+        return False
+    roles = stage.get("roles") or []
+    if not roles:
+        return True
+    role = hrms_role(actor)
+    # No HRMS role at all is the Sparsh superuser, who `can()` already treats as such.
+    return role is None or getattr(role, "value", role) in roles
+
+
+async def act_on_stage(actor: dict, company_id: str, period: str, payload: dict, *,
+                       chain: Optional[list] = None) -> dict:
+    """P1-095: pass, return or reject the stage a run is waiting on, under the company's
+    CONFIGURED approval chain.
+
+    Statuses stay the ones every other screen and step already reads: Submitted until the
+    first stage passes, Checked between stages, Approved once the last stage passes (and
+    then Lock, unchanged). Two rules are never configurable: the maker cannot act on any
+    stage of their own run, and one person cannot pass two stages of the same run."""
+    chain = chain or approval_chain(await get_payroll_policy(company_id))
+    if not chain:
+        raise HTTPException(status_code=409,
+                            detail="This company uses the standard check-then-approve steps.")
+    run = await _get_run(company_id, period)
+    idx = _stage_index(run, chain)
+    if idx is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{period} is not waiting for an approval (currently \"{run['status']}\").")
+    stage = chain[idx]
+    if not _may_act_on_stage(actor, stage):
+        raise HTTPException(status_code=403,
+                            detail=f"The {stage['name']} stage is not yours to act on.")
+    me = _actor_id(actor)
+    if run.get("submitted_by") and run["submitted_by"] == me:
+        raise HTTPException(status_code=403,
+                            detail="Maker-checker: you submitted this payroll, so someone else "
+                                   "must approve it.")
+    if me in (run.get("stage_approvers") or []) or (
+            idx and not run.get("stage_approvers") and run.get("checked_by") == me):
+        raise HTTPException(status_code=403,
+                            detail="You already approved an earlier stage of this payroll, so "
+                                   "this stage is someone else's to give.")
+    final = idx == len(chain) - 1
+    passed = PayrollRunStatus.APPROVED.value if final else PayrollRunStatus.CHECKED.value
+    action = str(payload.get("action") or "").lower()
+    if action == "check":
+        action = "approve"
+    action, new_status = _decision_action(
+        {**payload, "action": action},
+        {"approve": passed, "reject": PayrollRunStatus.REJECTED.value,
+         "return": PayrollRunStatus.RETURNED.value},
+        verb="approve")
+    now = datetime.now(timezone.utc)
+    fields = {"status": new_status, "updated_at": now}
+    if action == "approve":
+        fields.update({"approval_stage": idx + 1,
+                       "stage_approvers": list(run.get("stage_approvers") or []) + [me]})
+        if final:
+            fields.update({"decided_by": me, "decided_by_name": _actor_name(actor),
+                           "decided_at": now, "decision_remarks": payload.get("remarks")})
+        else:
+            fields.update({"checked_by": me, "checked_by_name": _actor_name(actor),
+                           "checked_at": now, "check_remarks": payload.get("remarks")})
+    else:
+        fields.update({"decided_by": me, "decided_by_name": _actor_name(actor),
+                       "decided_at": now, "decision_remarks": payload.get("remarks")})
+    await get_collection(COLL_PAYROLL_RUNS).update_one(
+        {"_id": run["_id"]},
+        {"$set": fields,
+         "$push": {"approval_trail": _trail(actor, stage["name"], new_status,
+                                            payload.get("remarks"))}})
+    await audit(actor, AUDIT_PAYROLL_CHECKED if (action == "approve" and not final)
+                else AUDIT_PAYROLL_DECIDED, ENTITY_PAYROLL_RUN, period,
+                f"{stage['name']}: {new_status}", company_id)
     return await get_run(actor, company_id, period)
 
 
@@ -2222,6 +2500,22 @@ async def close_run(actor: dict, company_id: str, period: str, payload: dict) ->
         raise HTTPException(status_code=409, detail="Only a locked payroll can be closed.")
     from app.services.hrms_disbursal_service import payment_summary
     summary = await payment_summary(company_id, period)
+    # DEF-04 -- a payment the bank FAILED/REJECTED (and nobody has retried) or one still
+    # Pending in a batch is unfinished business, not something a remark can wave through:
+    # once the period is closed no retry batch can be raised, so the money would be stuck.
+    # It must be retried, or confirmed as paid (UTR + date) if it was settled outside the
+    # batch. A reason still covers people never put in a batch at all (paid off-system).
+    if summary["failed"] or summary["pending"]:
+        parts = []
+        if summary["failed"]:
+            parts.append(f"{summary['failed']} failed/rejected payment(s) not yet retried")
+        if summary["pending"]:
+            parts.append(f"{summary['pending']} payment(s) still pending with the bank")
+        raise HTTPException(
+            status_code=409,
+            detail=f"This period cannot be closed: {' and '.join(parts)}. Under Disbursal, "
+                   f"retry them in a new batch or record them as Processed with the UTR and "
+                   f"payment date, then close.")
     if summary["unpaid"] and not (payload.get("remarks") or "").strip():
         raise HTTPException(
             status_code=409,

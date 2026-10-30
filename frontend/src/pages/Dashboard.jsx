@@ -21,7 +21,8 @@ const Dashboard = () => {
     registered_entities: 0,
     active_batches: 0,
     strategic_learners: 0,
-    session_velocity: 0
+    session_velocity: 0,
+    attendance_rate: null,
   });
   const [pulseData, setPulseData] = useState([]);
   const [mixData, setMixData] = useState([]);
@@ -42,7 +43,7 @@ const Dashboard = () => {
             : Promise.resolve({ data: [] })
       ]);
       
-      setStats(statsRes.data.kpis);
+      setStats((prev) => ({ ...prev, ...(statsRes.data?.kpis || {}) }));
       setPulseData(statsRes.data.operational_pulse);
       setMixData(statsRes.data.session_mix);
       setTeamMembers(teamRes.data || []);
@@ -69,6 +70,9 @@ const Dashboard = () => {
   const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
   const canReadLogs = user?.role === 'superadmin' || user?.permissions?.logs?.read;
 
+  const hasAttendanceRate = Number.isFinite(Number(stats?.attendance_rate))
+    && stats?.attendance_rate !== null && stats?.attendance_rate !== '';
+
   const statsTiles = isAdmin ? [
     ...(canReadCompanies ? [{ label: 'Registered Entities', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: 'total companies' }] : []),
     ...(canReadBatches ? [{ label: 'Active Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'in progress' }] : []),
@@ -76,7 +80,8 @@ const Dashboard = () => {
     ...(canReadLogs ? [{ label: 'Session Velocity', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed sessions' }] : [])
   ] : [
     { label: 'Team Magnitude', value: stats.strategic_learners, icon: Users, color: 'var(--accent-indigo)', trend: 'My Company', sub: 'active nodes' },
-    { label: 'Attendance Pulse', value: `${stats.attendance_rate}%`, icon: Target, color: 'var(--accent-green)', trend: 'Overall', sub: 'participation rate' },
+    // DEF-15: no attendance data (or the stats call failed) reads as "—", never "undefined%".
+    { label: 'Attendance Pulse', value: hasAttendanceRate ? `${stats.attendance_rate}%` : '—', icon: Target, color: 'var(--accent-green)', trend: 'Overall', sub: hasAttendanceRate ? 'participation rate' : 'no attendance recorded yet' },
     { label: 'Batch Lifecycle', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'program batches' },
     { label: 'Sessions Ingested', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed track' }
   ];

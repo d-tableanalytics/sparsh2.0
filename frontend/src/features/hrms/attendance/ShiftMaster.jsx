@@ -27,6 +27,7 @@ const APPLICABILITY = [
   { key: 'locations', label: 'Locations', list: 'locations' },
   { key: 'employee_categories', label: 'Employee categories', list: 'employee_categories' },
   { key: 'grades', label: 'Grades', list: 'grades' },
+  { key: 'levels', label: 'Levels', list: 'levels' },
 ];
 
 const RESOLUTION_HELP = (
@@ -284,7 +285,8 @@ const ShiftEditorModal = ({ shift, lists, departments, scope, onClose, onDone, s
     reason: '',
   }));
   const [applicability, setApplicability] = useState(() => ({
-    attendance_policy_groups: [], locations: [], employee_categories: [], grades: [], department_ids: [],
+    attendance_policy_groups: [], locations: [], employee_categories: [], grades: [], levels: [],
+    department_ids: [],
     ...(shift?.applicability || {}),
   }));
   const [busy, setBusy] = useState(false);
@@ -393,7 +395,9 @@ const ShiftEditorModal = ({ shift, lists, departments, scope, onClose, onDone, s
           <input id="shift-end" type="time" className={FIELD} value={f.end} onChange={set('end')} />
         </div>
         {num('break_minutes', 'Break (min)', { max: 1440 })}
-        {num('min_hours', 'Min hours', { max: 24, step: '0.25', placeholder: 'none' })}
+        {/* Overrides the attendance policy's minimum hours for this shift (DEP-06); blank
+            keeps the policy's value. */}
+        {num('min_hours', 'Min hours (this shift)', { max: 24, step: '0.25', placeholder: 'policy value' })}
         {num('daily_grace_minutes', 'Late grace (min)', { max: 1440 })}
         {num('early_going_grace_minutes', 'Early-going grace', { max: 1440 })}
         {num('half_day_threshold_minutes', 'Half day below (min)', { max: 1440 })}
@@ -457,7 +461,8 @@ const ShiftEditorModal = ({ shift, lists, departments, scope, onClose, onDone, s
                     {upcoming && <Chip tone="warn">Upcoming</Chip>}
                   </div>
                   <p className="text-[var(--text-muted)]">
-                    {timing(v)} · break {v.break_minutes ?? 0}m · grace {v.daily_grace_minutes ?? 0}m
+                    {timing(v)} · break {v.break_minutes ?? 0}m
+                    {v.min_hours != null ? ` · min ${v.min_hours}h` : ''} · grace {v.daily_grace_minutes ?? 0}m
                     {' '}/ early {v.early_going_grace_minutes ?? 0}m · half day &lt; {v.half_day_threshold_minutes ?? '—'}m
                     {v.absent_threshold_minutes != null ? ` · absent < ${v.absent_threshold_minutes}m` : ''}
                     {' '}· off {v.weekly_off_pattern ? describeWeeklyOff(v.weekly_off_pattern) : 'company default'}

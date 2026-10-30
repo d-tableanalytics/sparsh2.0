@@ -67,7 +67,8 @@ DATE_FORMATS = {
 
 DEFAULT_FORMAT_NAME = "DEFAULT"
 
-# The previous hard-coded layout, as a format. Reproduces it exactly, totals row included.
+# The previous hard-coded layout, as a format -- totals row included -- plus the Generated
+# Date column P1-108 requires.
 DEFAULT_FORMAT = {
     "name": DEFAULT_FORMAT_NAME,
     "bank": None,
@@ -84,6 +85,9 @@ DEFAULT_FORMAT = {
     "columns": [
         {"source": "batch_no", "label": "Batch No"},
         {"source": "period", "label": "Payroll Period"},
+        # P1-108: the file carries the date it was generated, beside batch, period and the
+        # control total. The one deliberate change to the original layout.
+        {"source": "generated_date", "label": "Generated Date"},
         {"source": "employee_code", "label": "Employee ID"},
         {"source": "account_holder", "label": "Beneficiary Name"},
         {"source": "bank_account", "label": "Account Number"},

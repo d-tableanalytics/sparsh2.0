@@ -282,8 +282,13 @@ async def main() -> int:
 
     daily = await EX.attendance_daily(HR, CO, PERIOD)
     dhead = headers(daily)
-    check("the daily view has a row per employee-day",
-          daily["returned"] == 23, daily["returned"])
+    # DEF-14: recorded days, plus every working day with NO record (absent -> LOP).
+    statuses = by_header(daily, "Status")
+    check("the daily view has a row per recorded employee-day",
+          sum(1 for s in statuses if s != "Absent (no record)") == 23, daily["returned"])
+    check("...and lists working days with no record as absent (DEF-14)",
+          daily["returned"] > 23
+          and "Absent (no record)" in statuses, daily["returned"])
     check("...with the columns the checklist names",
           all(h in dhead for h in ["Status", "In", "Out", "Worked Hours", "Late (min)",
                                    "Early (min)", "Payable Day", "LOP Fraction"]), dhead)
@@ -292,28 +297,35 @@ async def main() -> int:
 
     monthly = await EX.attendance_monthly(HR, CO, PERIOD)
     mhead = headers(monthly)
-    check("the monthly view is one row per employee",
-          monthly["returned"] == 1, monthly["returned"])
+    # DEF-14: the no-record days the daily view lists are absences in the monthly totals
+    # too (full LOP each), so both reports agree with payroll.
+    gaps = [r for r in daily["rows"] if r[dhead.index("Status")] == "Absent (no record)"]
+    e001_gaps = sum(1 for r in gaps if r[dhead.index("Employee ID")] == "E-001")
+    employees = {r[dhead.index("Employee ID")] for r in daily["rows"]}
+    mcodes = by_header(monthly, "Employee ID")
+    e001 = mcodes.index("E-001")
+    check("the monthly view is one row per employee in the daily view",
+          monthly["returned"] == len(employees), (monthly["returned"], sorted(employees)))
     check("...with the totals the checklist names",
           all(h in mhead for h in ["Present", "Absent", "Half Day", "Leave", "OD",
                                    "Late Days", "Late (min)", "Payable Days",
                                    "LOP Days"]), mhead)
     check("present, half day and absent are counted by status",
-          (by_header(monthly, "Present")[0], by_header(monthly, "Half Day")[0],
-           by_header(monthly, "Absent")[0]) == (21, 1, 1),
-          [by_header(monthly, h)[0] for h in ("Present", "Half Day", "Absent")])
+          (by_header(monthly, "Present")[e001], by_header(monthly, "Half Day")[e001],
+           by_header(monthly, "Absent")[e001]) == (21, 1, 1 + e001_gaps),
+          [by_header(monthly, h)[e001] for h in ("Present", "Half Day", "Absent")])
     check("late days count the days, and late minutes the minutes",
-          (by_header(monthly, "Late Days")[0],
-           by_header(monthly, "Late (min)")[0]) == (1, 75),
-          (by_header(monthly, "Late Days")[0], by_header(monthly, "Late (min)")[0]))
+          (by_header(monthly, "Late Days")[e001],
+           by_header(monthly, "Late (min)")[e001]) == (1, 75),
+          (by_header(monthly, "Late Days")[e001], by_header(monthly, "Late (min)")[e001]))
     # 21 whole days + 0.75 = 21.75, NOT 21.5 -- summing the rows' own fractions is what
     # keeps the monthly total agreeing with what payroll paid (Gap 1).
     check("payable days SUM the rows' own fractions rather than counting statuses",
-          by_header(monthly, "Payable Days")[0] == 21.75,
-          by_header(monthly, "Payable Days")[0])
+          by_header(monthly, "Payable Days")[e001] == 21.75,
+          by_header(monthly, "Payable Days")[e001])
     check("...and LOP days likewise",
-          by_header(monthly, "LOP Days")[0] == 1.25,
-          by_header(monthly, "LOP Days")[0])
+          by_header(monthly, "LOP Days")[e001] == 1.25 + e001_gaps,
+          by_header(monthly, "LOP Days")[e001])
 
     # ── 4. Payment batch and the reconciliation (P1-127, P1-112) ───────────────────
     section("4. Payment batch and payroll-versus-bank reconciliation")

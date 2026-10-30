@@ -78,6 +78,9 @@ const RULE_FIELDS = {
     F('daily_grace_minutes', 'Daily grace (min)', 'Late Coming', 'number', 'Late Coming',
       'Arriving within this many minutes of the shift start is not late at all.'),
     F('monthly_buffer_minutes', 'Monthly late buffer (min)', 'Late Coming', 'number'),
+    F('late_threshold_minutes', 'Late mark only beyond (min after grace)', 'Late Coming',
+      'number', 'Late Coming', 'Late minutes are always measured; a day counts as a late mark '
+      + 'only past this. Blank: any late minute is one.'),
     F('late_escalation_days', 'Escalate at late days / month', 'Late Coming', 'number',
       'Late Coming', 'Reported only — it never changes a status or the pay.'),
 

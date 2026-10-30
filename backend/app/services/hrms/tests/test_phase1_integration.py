@@ -87,8 +87,14 @@ def main() -> None:
         # administrative access is not the authority to decide on a client's behalf.
         from app.models.hrms import (Cap as _Cap, CLIENT_DECISION_CAPS as _DECISIONS,
                                      CLIENT_OWNED_CAPS as _OWNED)
-        check("admin gets every registered capability bar the client's own",
-              len(body["capabilities"]) == len(_Cap) - len(_DECISIONS | _OWNED))
+        # FRD §17: unless the company grants it, even the module owner holds no
+        # payroll-sensitive capability (admin_payroll_withheld) -- so those are expected
+        # to be missing too, exactly when that rule says so.
+        from app.utils.hrms_permission_policy import (PAYROLL_SENSITIVE_CAPS as _PAY,
+                                                      admin_payroll_withheld as _withheld)
+        _expected = set(_Cap) - _DECISIONS - _OWNED - (set(_PAY) if _withheld(SUPERADMIN) else set())
+        check("admin gets every registered capability bar the client's own (and §17's payroll ones)",
+              set(body["capabilities"]) == {c.value for c in _expected})
         check("and none of those five is in the served list",
               not ({c.value for c in _DECISIONS} & set(body["capabilities"])))
         check("capabilities are sorted", body["capabilities"] == sorted(body["capabilities"]))

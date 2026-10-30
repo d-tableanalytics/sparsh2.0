@@ -105,8 +105,9 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         if v > 0:
             mix_data.append({"name": k, "value": v, "color": colors.get(k, "var(--text-muted)")})
 
-    # 5. Attendance (If learner, calculate for their company)
-    attendance_rate = 0
+    # 5. Attendance (If learner, calculate for their company). None -- not 0 -- when there is
+    # nothing to measure, so the dashboard says "no data" instead of a false 0% (DEF-15).
+    attendance_rate = None
     if not is_staff:
         attendance_col = get_collection("attendance")
         # Simplified: count present vs total records for the company

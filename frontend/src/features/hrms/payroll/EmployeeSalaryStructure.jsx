@@ -260,6 +260,11 @@ const StructureCard = ({
           {day(structure.effective_from)}{structure.effective_to ? ` – ${day(structure.effective_to)}` : ' onwards'}
         </span>
       </div>
+      {/* FRD §9 Employee: who this structure is for. */}
+      <p className="mt-1 text-[11.5px] text-[var(--text-muted)]">
+        {structure.employee_name || '—'} · {structure.employee_code}
+        {structure.status ? ` · ${structure.status}` : ''}
+      </p>
       {structure.revision_reason && (
         <p className="mt-1.5 text-[12px] text-[var(--text-main)]">
           <span className="text-[var(--text-muted)]">Reason:</span> {structure.revision_reason}

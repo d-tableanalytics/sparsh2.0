@@ -214,7 +214,8 @@ async def bank_file(actor: dict, company_id: str, batch_no: str,
                   "bank_format_version": fmt.get("version"), "updated_at": now}})
     await audit(actor, AUDIT_PAYMENT_FILE, ENTITY_PAYMENT_BATCH, batch_no,
                 fmt.get("name"), company_id)
-    return f"{batch_no}_{batch['period']}.{extension}", content
+    # DEF-12: the download's file name carries the date it was generated, as the file does.
+    return f"{batch_no}_{batch['period']}_{now.strftime('%Y%m%d')}.{extension}", content
 
 
 def _clean_status(payload: dict) -> dict:

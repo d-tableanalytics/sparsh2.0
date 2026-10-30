@@ -23,6 +23,19 @@ import { ROUNDING, errText, useSubmit } from './payrollKit';
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 
+// P1-095: the configured approval chain. What a company that has configured nothing gets
+// today, shown as the starting point for a custom chain.
+const DEFAULT_CHAIN = [
+  { name: 'Checker', cap: 'payroll.check', roles: [] },
+  { name: 'Finance Approver', cap: 'payroll.approve', roles: [] },
+];
+const STAGE_CAPS = [
+  ['payroll.check', 'Payroll / HR Checker'],
+  ['payroll.approve', 'Finance / Authorised Approver'],
+  ['payroll.process', 'Payroll Maker'],
+];
+const STAGE_ROLES = [['hr', 'HR'], ['md', 'MD'], ['finance', 'Finance'], ['admin', 'Admin']];
+
 const VERSION_TONE = {
   Draft: 'neutral', 'Pending Approval': 'warn', Approved: 'accent',
   Active: 'good', Superseded: 'neutral', Retired: 'neutral',
@@ -42,7 +55,12 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
   useEffect(() => {
     let live = true;
     getPayrollPolicy(scope)
-      .then(({ data }) => { if (live) setForm({ ...data }); })
+      .then(({ data }) => {
+        if (!live) return;
+        const levels = data?.approval_levels || [];
+        setForm({ ...data, custom_chain: levels.length > 0,
+          chain_stages: levels.length ? levels : DEFAULT_CHAIN });
+      })
       .catch((err) => { if (live) setError(errText(err, 'Could not load the payroll policy.')); });
     // A company with no versions yet is the normal case, not an error: the flat settings
     // are still the base everything resolves from, so an empty list is simply empty.
@@ -77,6 +95,10 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       showError('Effective to is before effective from.');
       return;
     }
+    if (form.custom_chain && form.chain_stages.some((st) => !String(st.name || '').trim())) {
+      showError('Give every approval stage a name.');
+      return;
+    }
     const list = (text) => String(text || '').split(',').map((v) => v.trim()).filter(Boolean);
     const approvalAbove = String(form.adjustment_approval_above ?? '').trim();
     run(() => savePayrollPolicy({
@@ -98,8 +120,22 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
       checker_required: !!form.checker_required,
       approver_distinct_from_checker: !!form.approver_distinct_from_checker,
       lock_cap: form.lock_cap || 'payroll.approve',
+      // P1-095: only sent when it says something — a custom chain, or switching back to
+      // the default from one ([] = default).
+      ...(form.custom_chain
+        ? { approval_levels: form.chain_stages.map((st) => ({ ...st, name: st.name.trim() })) }
+        : (form.approval_levels?.length ? { approval_levels: [] } : {})),
     }, scope), 'Drafted as a change request — open it in Configuration Approvals (Draft) and send it for approval.');
   };
+
+  const setStage = (i, patch) => setForm((f) => ({
+    ...f, chain_stages: f.chain_stages.map((st, j) => (j === i ? { ...st, ...patch } : st)),
+  }));
+  const toggleRole = (i, role) => setStage(i, {
+    roles: form.chain_stages[i].roles?.includes(role)
+      ? form.chain_stages[i].roles.filter((r) => r !== role)
+      : [...(form.chain_stages[i].roles || []), role],
+  });
 
   const check = (key, label, hint) => (
     <label className="flex items-start gap-2.5">
@@ -209,6 +245,55 @@ const PayrollPolicyModal = ({ scope, canEdit, onClose, onDone, showSuccess, show
                 <option value="payroll.process">Payroll Maker</option>
               </select>
             </div>
+            {/* P1-095 — the approval levels themselves, as configuration. */}
+            {check('custom_chain', 'Use a custom approval chain',
+              'On: the run passes through the stages below, in order, instead of check-then-approve. '
+              + 'The maker can never approve their own run, and nobody can pass two stages.')}
+            {form.custom_chain && (
+              <div className="space-y-2">
+                {form.chain_stages.map((st, i) => (
+                  <div key={i} className="rounded-lg border border-[var(--border)] p-2.5 space-y-2">
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className={LABEL} htmlFor={`pp-stage-${i}`}>Stage {i + 1} name</label>
+                        <input id={`pp-stage-${i}`} className={FIELD} value={st.name} disabled={!canEdit}
+                          maxLength={60} onChange={(e) => setStage(i, { name: e.target.value })} />
+                      </div>
+                      <div className="flex-1">
+                        <label className={LABEL} htmlFor={`pp-stage-cap-${i}`}>Permission needed</label>
+                        <select id={`pp-stage-cap-${i}`} className={FIELD} value={st.cap} disabled={!canEdit}
+                          onChange={(e) => setStage(i, { cap: e.target.value })}>
+                          {STAGE_CAPS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                        </select>
+                      </div>
+                      {canEdit && form.chain_stages.length > 1 && (
+                        <Btn tone="ghost" onClick={() => setForm((f) => ({
+                          ...f, chain_stages: f.chain_stages.filter((_x, j) => j !== i) }))}>
+                          Remove
+                        </Btn>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--text-main)]">
+                      <span className="text-[11.5px] text-[var(--text-muted)]">Only these roles (none ticked = anyone with the permission):</span>
+                      {STAGE_ROLES.map(([v, label]) => (
+                        <label key={v} className="inline-flex items-center gap-1.5">
+                          <input type="checkbox" disabled={!canEdit}
+                            checked={(st.roles || []).includes(v)} onChange={() => toggleRole(i, v)} />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {canEdit && form.chain_stages.length < 3 && (
+                  <Btn tone="ghost" onClick={() => setForm((f) => ({
+                    ...f, chain_stages: [...f.chain_stages,
+                      { name: `Stage ${f.chain_stages.length + 1}`, cap: 'payroll.approve', roles: [] }] }))}>
+                    Add stage
+                  </Btn>
+                )}
+              </div>
+            )}
           </div>
 
           {/* §27 Effective Dating and Request. A governed change cannot be raised without

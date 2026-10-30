@@ -688,7 +688,7 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
           showSuccess={showSuccess} showError={showError} />
       )}
       {viewing && (
-        <DayDetailModal row={viewing} fieldDefs={fieldDefs} onClose={() => setViewing(null)} />
+        <DayDetailModal row={viewing} fieldDefs={fieldDefs} scope={scope} onClose={() => setViewing(null)} />
       )}
     </div>
   );
@@ -957,6 +957,11 @@ const RegularizationsTab = ({ scope, companyId, can, showSuccess, showError }) =
         {r.approval_levels === 1 && r.status === 'Pending' && (
           <span className="text-[11px] text-[var(--text-muted)]">Manager approval is final</span>
         )}
+        {r.decision_remarks && (
+          <span className="text-[11px] text-[var(--text-muted)] text-right max-w-[220px]">
+            {r.decided_by_name ? `${r.decided_by_name}: ` : ''}{r.decision_remarks}
+          </span>
+        )}
         {can(CAP.ATTENDANCE_REGULARIZE_APPROVE) &&
           (r.status === 'Pending' || r.status === 'Manager Approved') && (
           <Btn tone="ghost" onClick={() => setActing(r)}>Act</Btn>
@@ -978,6 +983,8 @@ const RegularizationsTab = ({ scope, companyId, can, showSuccess, showError }) =
         { label: 'Exception', value: r.exception_type },
         { label: 'Proposed', value: `${r.proposed_in || '—'} – ${r.proposed_out || '—'}` },
         { label: 'Reason', value: r.reason },
+        ...(r.decision_remarks
+          ? [{ label: `${r.status} because`, value: r.decision_remarks }] : []),
         ...(r.approval_levels === 1
           ? [{ label: 'Approval', value: 'Manager approval is final' }] : []),
       ]} />
@@ -1024,9 +1031,16 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
       ? 'Manager step — HR still gives the final sign-off after this.'
       : 'HR-final step — only HR can approve now; approving recalculates the attendance record.');
 
-  const act = (decision) => run(
-    () => actOnRegularization(row.req_no, { decision, remarks: remarks.trim() || undefined }, scope),
-    `${row.req_no} ${decision.toLowerCase()}.`);
+  const act = (decision) => {
+    // DEF-06: returning or rejecting must say why — the server refuses it otherwise.
+    if ((decision === 'Returned' || decision === 'Rejected') && !remarks.trim()) {
+      showError(`Add a comment explaining why you are ${decision === 'Returned' ? 'returning' : 'rejecting'} this request.`);
+      return;
+    }
+    run(
+      () => actOnRegularization(row.req_no, { decision, remarks: remarks.trim() || undefined }, scope),
+      `${row.req_no} ${decision.toLowerCase()}.`);
+  };
 
   return (
     <Modal title={`Act on ${row.req_no}`} labelledBy="reg-act-title"
@@ -1065,7 +1079,7 @@ const RegularizeActionModal = ({ row, scope, onClose, onDone, showSuccess, showE
         { label: 'Approval levels', value: oneLevel ? '1 — manager only' : '2 — manager, then HR' },
       ]} />
       <div>
-        <label className={LABEL} htmlFor="reg-act-remarks">Remarks</label>
+        <label className={LABEL} htmlFor="reg-act-remarks">Remarks <span className="font-normal normal-case text-[var(--text-muted)]">(required to return or reject)</span></label>
         <textarea id="reg-act-remarks" rows={2} value={remarks} className={TEXTAREA}
           onChange={(e) => setRemarks(e.target.value)} />
       </div>
@@ -1411,6 +1425,51 @@ const ClosureTab = ({ scope, companyId, can, showSuccess, showError }) => {
               )}
             </div>
           )}
+          {/* DEF-05. Working days with no attendance record at all — payroll charges each
+              as LOP, so they are named here before the month is locked. */}
+          {dash.unrecorded_days > 0 && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3.5 space-y-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-[12.5px] font-bold text-[var(--accent-orange)]">
+                  <AlertTriangle size={14} className="shrink-0" />
+                  {dash.unrecorded_days} working day(s) with no attendance record
+                  ({dash.unrecorded_employees} employee(s))
+                </p>
+                <p className="text-[11.5px] text-[var(--text-muted)]">
+                  Counted in Unexplained Absence. Payroll treats each as a full day of LOP;
+                  record the day, a leave or an OD if the person was not absent.
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11.5px]">
+                  <thead>
+                    <tr className="text-left text-[var(--text-muted)]">
+                      <th className="py-1 pr-3 font-semibold">Employee</th>
+                      <th className="py-1 pr-3 font-semibold">Date</th>
+                      <th className="py-1 font-semibold">What is wrong</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(dash.unrecorded_examples || []).map((m) => (
+                      <tr key={`${m.employee_code}:${m.work_date}`}
+                        className="border-t border-[var(--border-subtle)]">
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">
+                          {m.employee_name ? `${m.employee_name} (${m.employee_code})` : m.employee_code}
+                        </td>
+                        <td className="py-1.5 pr-3 text-[var(--text-main)]">{day(m.work_date)}</td>
+                        <td className="py-1.5 text-[var(--text-muted)]">{m.why}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {dash.unrecorded_examples_truncated && (
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Showing the first {(dash.unrecorded_examples || []).length} of {dash.unrecorded_days}.
+                </p>
+              )}
+            </div>
+          )}
           {dash.status === 'Locked' && canLock && (
             <p className="text-[11.5px] text-[var(--text-muted)]">
               A month cannot be reopened once its payroll is locked.
@@ -1503,6 +1562,7 @@ const UnlockModal = ({ period, scope, onClose, onDone, showSuccess, showError })
 const TimingRulesCard = ({ scope, companyId, showSuccess, showError }) => {
   const [p, setP] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [reason, setReason] = useState('');
   useEffect(() => {
     if (!companyId) return;
     getShiftPolicy(scope).then(({ data }) => setP(data)).catch(() => setP({}));
@@ -1529,9 +1589,16 @@ const TimingRulesCard = ({ scope, companyId, showSuccess, showError }) => {
         regularisation_window_days: Number(p.regularisation_window_days || 0),
         regularisation_evidence_required: !!p.regularisation_evidence_required,
         attendance_closing_day: optional(p.attendance_closing_day),
+        change_reason: reason.trim() || undefined,
       }, scope);
-      setP(data);
-      showSuccess('Timing rules saved. New punches are judged against them.');
+      // FRD §27/§30: where the company governs its attendance rules the save is a change
+      // request, and the rules on screen stay the ones in force until it is activated.
+      const { pending_request: pendingRequest, ...policy } = data || {};
+      setP(policy);
+      setReason('');
+      showSuccess(pendingRequest
+        ? `Sent for approval as ${pendingRequest.request_no} — open it in Configuration Approvals; the current rules stay in force until it is activated.`
+        : 'Timing rules saved. New punches are judged against them.');
     } catch (err) {
       showError(errorDetail(err, 'Could not save the timing rules.'));
     } finally { setSaving(false); }
@@ -1590,7 +1657,10 @@ const TimingRulesCard = ({ scope, companyId, showSuccess, showError }) => {
         blank for no rule. <b>Regularisation window</b>: how many days back a correction may be
         requested; 0 = no limit. <b>Closing day</b>: the month&apos;s attendance cut-off.
       </p>
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        <input aria-label="Reason for this change" value={reason} className={`${FIELD} sm:max-w-md`}
+          placeholder="Reason for this change (required if your company approves rule changes)"
+          onChange={(e) => setReason(e.target.value)} />
         <Btn tone="primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save timing rules'}</Btn>
       </div>
     </section>

@@ -513,6 +513,10 @@ export const exportPayrollReconciliation = (period, params) =>
 /** FRD §29/§30 configuration audit (P1-128). Needs config.audit_read. */
 export const exportConfigAudit = (params) =>
   downloadExport('/hrms/config/audit/export', params, 'hrms_config_audit.csv');
+/** The configuration IN FORCE, one sheet per area, with versions (P1-143). */
+export const exportConfigSnapshot = (params) =>
+  downloadExport('/hrms/config/snapshot', { fmt: 'xlsx', ...params },
+    'hrms_configuration_snapshot.xlsx');
 
 // ══════════════════════════════════════════════════════════════
 // Internal (in-house) recruitment track
@@ -1060,6 +1064,9 @@ export const approvePayrollAdjustment = (period, employeeCode, index, params) =>
     {}, { params });
 export const decidePayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/decision`, payload, { params });
+/** P1-095: pass / return / reject the stage a run waits on under a configured approval chain. */
+export const actOnPayrollStage = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/approve-stage`, payload, { params });
 
 // ── Phase PAYSLIP-1 (§22.7, SM-HR-031/SM-HR-064) ──
 /** The itemised payslip for one period. An employee always gets their OWN — employee_code

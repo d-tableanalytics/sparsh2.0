@@ -11,7 +11,7 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getEmployee, createEmployee, updateEmployee, getEmployeeHierarchy, getDepartments, getDesignations,
-  getAppointments, getEmployees, getEmployeeMasterLists, getEmployeeHistory,
+  getAppointments, createAppointment, appointmentUrlFor, getEmployees, getEmployeeMasterLists, getEmployeeHistory,
   cancelScheduledEmployeeChange, checkEmployeeDuplicates, listFieldDefinitions,
   getDocuments, getDocumentUrl,
   saveEmployeePhotograph, deleteEmployeePhotograph, getEmployeePhotographUrl,
@@ -194,8 +194,9 @@ const isEmpty = (v) => v == null || v === '' || (Array.isArray(v) && v.length ==
 // non-empty applicability list contains this record's value.
 const inForce = (d, today) =>
   (!d.effective_from || d.effective_from <= today) && (!d.effective_to || d.effective_to >= today);
+const norm = (v) => String(v ?? '').trim().toLowerCase();
 const appliesTo = (d, record) => Object.entries(d.applicability || {})
-  .every(([field, allowed]) => !allowed?.length || allowed.includes(record[field]));
+  .every(([field, allowed]) => !allowed?.length || allowed.map(norm).includes(norm(record[field])));
 
 const Row = ({ children }) => (
   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{children}</div>
@@ -427,6 +428,8 @@ const EmployeeProfile = () => {
   const canSeeSalary = employee && 'base_salary' in employee;
   const canSetSalary = can(CAP.EMPLOYEE_SALARY_WRITE);
   const canSeeAppointment = can(CAP.APPOINTMENT_READ);
+  const canDraftAppointment = can(CAP.APPOINTMENT_WRITE);
+  const [draftingLetter, setDraftingLetter] = useState(false);
 
   const applyEmployee = (data) => {
     const next = toForm(data);
@@ -565,16 +568,35 @@ const EmployeeProfile = () => {
   }, [tab, history]);
 
   // BR-028 — the Appointment Letter, if one was ever raised for this person, downloadable
-  // from their profile. `uk` narrows the company-wide list to this one employee; an
-  // EMPLOYEE-role viewer is additionally self-scoped server-side, so this same call is safe
-  // whether HR opened someone else's profile or the employee opened their own.
+  // from their profile. `employee_code` narrows the company-wide list to this one employee —
+  // the server resolves it to the hiring record's letter or, for someone added directly in
+  // HR, the letter raised against the code itself. An EMPLOYEE-role viewer is additionally
+  // self-scoped server-side, so this same call is safe whether HR opened someone else's
+  // profile or the employee opened their own.
   useEffect(() => {
-    if (!canSeeAppointment || !employee?.source_uk) { setAppointmentLetter(null); return; }
-    getAppointments({ ...scope, uk: employee.source_uk })
-      .then(({ data }) => setAppointmentLetter(data?.appointments?.[0] || null))
+    if (!canSeeAppointment || !employee?.employee_code) { setAppointmentLetter(null); return; }
+    getAppointments({ ...scope, employee_code: employee.employee_code })
+      .then(({ data }) => setAppointmentLetter(
+        (data?.appointments || []).find((a) => a.status !== 'Cancelled') || null))
       .catch(() => setAppointmentLetter(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employee?.source_uk, canSeeAppointment]);
+  }, [employee?.employee_code, canSeeAppointment]);
+
+  // A directly-added employee has no hiring record to have raised a letter from, so HR
+  // drafts one here, from the employee record. It is then reviewed and sent from the
+  // Appointments board like any other.
+  const draftAppointmentLetter = async () => {
+    setDraftingLetter(true);
+    try {
+      const { data } = await createAppointment({ employee_code: employee.employee_code }, scope);
+      setAppointmentLetter(data);
+      showSuccess(`Appointment letter ${data.appointment_no} drafted. Review and send it from Appointment Letters.`);
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not draft the appointment letter.');
+    } finally {
+      setDraftingLetter(false);
+    }
+  };
 
   const today = todayIso();
   const personById = useMemo(() => Object.fromEntries(people.map((p) => [p.user_id, p])), [people]);
@@ -920,9 +942,40 @@ const EmployeeProfile = () => {
                   <p className="text-[11px] text-[var(--text-muted)]">{appointmentLetter.status}</p>
                 </div>
               </div>
-              <button type="button" onClick={() => setShowLetter(true)}
-                className="h-8 px-3 shrink-0 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)]">
-                View / Print
+              <div className="flex items-center gap-2 shrink-0">
+                {/* While the letter is live and unsigned the access code is returned, so the
+                    employee can acknowledge it straight from their own profile. */}
+                {appointmentLetter.access_code
+                  && ['Sent', 'Pending Acknowledgement'].includes(appointmentLetter.status) && (
+                  <a href={appointmentUrlFor(appointmentLetter.access_code)} target="_blank" rel="noreferrer"
+                    className="h-8 px-3 inline-flex items-center rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--accent-indigo)]">
+                    Open to acknowledge
+                  </a>
+                )}
+                {appointmentLetter.status === 'Generated' && canDraftAppointment && (
+                  <button type="button" onClick={() => navigate('/hrms/appointments')}
+                    className="h-8 px-3 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)]">
+                    Review &amp; send
+                  </button>
+                )}
+                <button type="button" onClick={() => setShowLetter(true)}
+                  className="h-8 px-3 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)]">
+                  View / Print
+                </button>
+              </div>
+            </div>
+          )}
+          {appointmentLetter === null && canDraftAppointment && employee?.employee_code && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-[var(--border)] bg-[var(--bg-card)] p-3.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <FileText size={16} className="text-[var(--text-muted)] shrink-0" />
+                <p className="text-[12px] text-[var(--text-muted)]">
+                  No appointment letter on file. Draft one from this employee&apos;s record.
+                </p>
+              </div>
+              <button type="button" onClick={draftAppointmentLetter} disabled={draftingLetter}
+                className="h-8 px-3 shrink-0 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-60">
+                {draftingLetter ? 'Drafting…' : 'Generate appointment letter'}
               </button>
             </div>
           )}

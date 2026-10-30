@@ -3,6 +3,7 @@ import { Lock } from 'lucide-react';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
 import { SOURCE_LABEL, hoursLabel, payableLabel, shiftLabel, stamp } from './attendanceRules';
+import { getRegularisationEvidence } from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ Attendance — one day in full, and the configurable attendance fields.
@@ -107,7 +108,16 @@ const Section = ({ title, children }) => (
 const HISTORY_KEYS = [['actual_in', 'In'], ['actual_out', 'Out'], ['status', 'Status'], ['source', 'Source']];
 
 /** The full record for one employee-day. */
-export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
+export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
+  const c = r.correction;
+  const openEvidence = async () => {
+    try {
+      const { data } = await getRegularisationEvidence(c.req_no, scope);
+      window.open(data.url, '_blank', 'noopener');
+    } catch {
+      window.alert('The evidence file could not be opened right now.');
+    }
+  };
   const defByCode = Object.fromEntries((fieldDefs || []).map((d) => [d.code, d]));
   const custom = Object.entries(r.custom_fields || {});
   const history = [...(r.modification_history || [])].reverse();
@@ -142,6 +152,8 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
         { label: 'Worked', value: hoursLabel(r.worked_minutes) },
         { label: 'Payable hours', value: r.payable_hours != null ? `${r.payable_hours} h` : null },
         { label: 'Payable day', value: payableLabel(r) },
+        { label: 'Final approved status', value: r.final_status || 'Waiting on a regularisation decision' },
+        { label: 'LOP day / fraction', value: r.lop_fraction != null ? String(r.lop_fraction) : null },
         { label: 'Late', value: r.late_minutes ? `${r.late_minutes} min` : '—' },
         { label: 'Early going', value: r.early_minutes ? `${r.early_minutes} min` : '—' },
         { label: 'Grace used', value: r.grace_applied_minutes ? `${r.grace_applied_minutes} min` : null },
@@ -182,22 +194,30 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose }) => {
         </div>
       </Section>
 
-      {(r.regularization_flag || r.regularized_from) && (
+      {(r.regularization_flag || r.regularized_from || c) && (
         <Section title="Regularisation">
           {/* §6 Correction (flag, proposed in/out, reason, evidence) and §6 Approval
               (manager, HR, comments). The proposed times are the corrected ones shown
               above — once applied they ARE the record, so repeating them here would
               invite the reader to treat one of the two as the real value. */}
           <Facts items={[
-            { label: 'Request', value: r.regularized_from },
-            { label: 'Type', value: r.regularisation_request_type },
-            { label: 'Reason given', value: r.regularisation_reason },
-            { label: 'Evidence', value: r.regularisation_evidence },
+            { label: 'Regularised', value: r.regularization_flag ? 'Yes' : 'No' },
+            { label: 'Request', value: c?.req_no || r.regularized_from },
+            { label: 'Request status', value: c?.status },
+            { label: 'Type', value: c?.request_type || c?.exception_type || r.regularisation_request_type },
+            { label: 'Proposed In / Out', value: c ? `${c.proposed_in || '—'} – ${c.proposed_out || '—'}` : null },
+            { label: 'Reason given', value: c?.reason || r.regularisation_reason },
+            { label: 'Evidence', value: c?.evidence || r.regularisation_evidence },
+            { label: 'Attachment', value: c?.evidence_file_name ? (
+              <button type="button" className="underline text-[var(--accent-indigo)]" onClick={openEvidence}>
+                {c.evidence_file_name}
+              </button>
+            ) : null },
             { label: 'Manager', value: r.manager_status },
             { label: 'HR', value: r.hr_status },
             { label: 'Comments', value: r.approver_comments },
           ]} />
-          {r.regularisation_has_evidence_file && (
+          {r.regularisation_has_evidence_file && !c?.evidence_file_name && (
             <p className="text-[11.5px] text-[var(--text-muted)]">
               A file was attached to {r.regularized_from}. Open it from the Regularisations
               tab — it stays on the request rather than being copied onto the day.

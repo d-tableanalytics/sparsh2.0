@@ -48,6 +48,23 @@ MODULE_DISABLED_MESSAGE = (
 )
 NO_ACCESS_MESSAGE = "You do not have access to the HRMS module."
 
+
+def permission_denied_message(*capabilities) -> str:
+    """The 403 text for a CAPABILITY denial (DEF-11). The caller is inside HRMS -- the
+    module-off case answers MODULE_DISABLED_MESSAGE elsewhere -- so naming the specific
+    permission tells them, and their administrator, exactly what to grant."""
+    from app.services.hrms_permission_service import capability_label
+    names = []
+    for cap in capabilities:
+        try:
+            names.append(f'"{capability_label(cap)}" ({getattr(cap, "value", cap)})')
+        except Exception:
+            names.append(str(getattr(cap, "value", cap)))
+    if not names:
+        return NO_ACCESS_MESSAGE
+    return (f"You do not have permission for {' or '.join(names)}. "
+            f"Ask your HRMS administrator to grant it.")
+
 # ─────────────────────────────────────────────────────────────
 # Identity
 # ─────────────────────────────────────────────────────────────
@@ -493,7 +510,7 @@ def require_cap(capability: Cap):
     """
     async def _checker(current_user: dict = Depends(get_current_user)) -> dict:
         if not can(current_user, capability):
-            raise HTTPException(status_code=403, detail=NO_ACCESS_MESSAGE)
+            raise HTTPException(status_code=403, detail=permission_denied_message(capability))
         return current_user
     return _checker
 

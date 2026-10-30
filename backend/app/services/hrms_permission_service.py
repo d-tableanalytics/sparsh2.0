@@ -222,6 +222,24 @@ def _auto_label(cap: Cap) -> str:
     return _VERB.get(action, action.replace("_", " ").replace(".", " ").capitalize())
 
 
+_CAP_LABELS: dict = {}
+
+
+def capability_label(cap: Cap) -> str:
+    """The human name of one capability, as the Roles & Permissions screen shows it -- the
+    catalogue's own label, else the automatic verb with its step ("View - Pre-boarding")."""
+    if not _CAP_LABELS:
+        for _module, steps in CATALOGUE:
+            for step, actions in steps:
+                for value, label in actions:
+                    try:
+                        c = Cap(value)
+                    except ValueError:
+                        continue
+                    _CAP_LABELS[c] = label or f"{_auto_label(c)} - {step}"
+    return _CAP_LABELS.get(cap) or _auto_label(cap)
+
+
 def default_roles(cap: Cap) -> list:
     """The roles that hold `cap` by default (for Sparsh's internal staff)."""
     from app.utils.hrms_access import MD_REVIEW_ONLY_WITHHELD, STAFF_SELF_SERVICE_CAPS
