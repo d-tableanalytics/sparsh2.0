@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form, Query
 from typing import List, Optional
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import (
@@ -290,7 +290,10 @@ def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None, anchor_da
         # Specific weekdays (Mon/Wed/Fri) when the form supplied them — the next selected day
         # after curr, which may be later in the SAME week. Falls back to a plain 7-day step
         # when no weekdays were chosen, which is the previous behaviour.
-        wanted = sorted({int(d) % 7 for d in ((repeat_data or {}).get("weekdays") or [])
+        # The form stores JavaScript weekday numbers (Sun=0 … Sat=6); Python's weekday() is
+        # Mon=0 … Sun=6. Compared raw, a "Mon" series landed on Tuesday — every weekly series
+        # one day late — so convert: python = (js + 6) % 7.
+        wanted = sorted({(int(d) + 6) % 7 for d in ((repeat_data or {}).get("weekdays") or [])
                          if str(d).lstrip("-").isdigit()})
         if wanted:
             for ahead in range(1, 8):
@@ -300,7 +303,9 @@ def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None, anchor_da
         return curr_dt + timedelta(weeks=1)
     if repeat_type == "Monthly":
         return _month_step(curr_dt, 1, repeat_data, anchor_day)
-    if repeat_type == "Annually":
+    # The form's value is "Yearly"; "Annually" is the older stored name. Only "Annually" was
+    # handled, so a Yearly series from the form never got a second occurrence.
+    if repeat_type in ("Annually", "Yearly"):
         year = curr_dt.year + 1
         # 29 Feb only exists in a leap year. replace() raised ValueError here, and because the
         # recurring engine does not catch it the exception aborted the WHOLE nightly run for
@@ -1460,8 +1465,138 @@ async def add_resource_from_media(event_id: str, background_tasks: BackgroundTas
     return {"message": "Resource added from Media Library", "resource": resource_obj}
 
 
+# ─── Deleting and restoring tasks from the Calendar ───
+# A TASK deleted from the Calendar is soft-deleted -- `deleted_at` is set and it disappears from
+# every list -- exactly as the Delegation module already does, so it can be restored. (It used
+# to be removed for good, and a recurring series running for years could not be got back.)
+# Events, sessions and todos keep their permanent delete.
+#
+# A recurring task offers three scopes: this occurrence, this and every later one, or the whole
+# series. Everything removed in one action carries one `deletion_batch_id`, so it can be brought
+# back together. A soft-deleted occurrence still blocks its date for the nightly recurring job
+# (it checks whether ANY occurrence exists on a date), so a deleted day is never re-created.
+# "This and following" on a series also caps the series' Repeat End Date on the occurrences that
+# remain -- otherwise an open-ended series would simply carry on generating -- and keeps the
+# original end date, which the matching restore puts back.
+NOT_DELETED = {"deleted_at": None}
+DELETE_SCOPES = ("this", "following", "series")
+
+
+def _occurrence_day(doc: dict) -> str:
+    return str(doc.get("start") or "")[:10]
+
+
+async def _may_manage_task(existing: dict, current_user: dict) -> bool:
+    is_admin = current_user.get("role") == "superadmin"
+    has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    return bool(is_admin or has_delete_perm or is_creator
+                or is_company_task_admin(existing, current_user))
+
+
+async def _soft_delete_tasks(existing: dict, col_name: str, scope: str, current_user: dict) -> list:
+    """Soft-delete the occurrence(s) `scope` names. Returns the deleted docs."""
+    col = get_collection(col_name)
+    gid = existing.get("recurring_group_id")
+    if scope == "this" or not gid:
+        query = {"_id": existing["_id"]}
+    elif scope == "following":
+        query = {"recurring_group_id": gid, "start": {"$gte": existing.get("start") or ""}}
+    else:
+        query = {"recurring_group_id": gid}
+    query = {**query, **NOT_DELETED}
+    docs = await col.find(query).to_list(5000)
+    if not docs:
+        return []
+    now = datetime.utcnow().isoformat()
+    batch = str(ObjectId())
+    await col.update_many({"_id": {"$in": [d["_id"] for d in docs]}},
+                          {"$set": {"deleted_at": now, "deleted_by": str(current_user["_id"]),
+                                    "deleted_by_name": current_user.get("full_name") or current_user.get("email"),
+                                    "deletion_batch_id": batch, "deletion_scope": scope}})
+    if scope == "following" and gid:
+        # Cap what is left of the series at the day before, keeping its own end date to restore.
+        cap = (datetime.fromisoformat(_occurrence_day(existing)) - timedelta(days=1)).date().isoformat()
+        remaining = await col.find({"recurring_group_id": gid, **NOT_DELETED}).to_list(5000)
+        for d in remaining:
+            update = {"repeat_end_date": cap, "capped_by_deletion": batch}
+            if "repeat_end_date_before_deletion" not in d:
+                update["repeat_end_date_before_deletion"] = d.get("repeat_end_date")
+            await col.update_one({"_id": d["_id"]}, {"$set": update})
+    return docs
+
+
+@router.get("/deleted")
+async def list_deleted_tasks(current_user: dict = Depends(get_current_user)):
+    """The deleted tasks this user may restore, newest first -- one entry per delete action
+    (a whole deleted series is one entry, with its first and last date and a count)."""
+    uid = str(current_user["_id"])
+    groups = {}
+    for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
+        docs = await get_collection(col_name).find(
+            {"type": "task", "deleted_at": {"$ne": None},
+             "$or": [{"user_id": uid}, {"deleted_by": uid}]}).to_list(5000)
+        if current_user.get("role") == "superadmin" or current_user.get("permissions", {}).get(
+                "calendar", {}).get("delete"):
+            extra = await get_collection(col_name).find(
+                {"type": "task", "deleted_at": {"$ne": None}}).to_list(5000)
+            seen = {d["_id"] for d in docs}
+            docs += [d for d in extra if d["_id"] not in seen]
+        for d in docs:
+            key = d.get("deletion_batch_id") or str(d["_id"])
+            g = groups.setdefault(key, {
+                "id": str(d["_id"]), "batch_id": d.get("deletion_batch_id"), "title": d.get("title"),
+                "category": d.get("category"), "repeat": d.get("repeat"),
+                "scope": d.get("deletion_scope") or "this", "deleted_at": d.get("deleted_at"),
+                "deleted_by_name": d.get("deleted_by_name"), "count": 0, "first": None, "last": None,
+                "assigned_to": d.get("target_staff_id") or [],
+            })
+            g["count"] += 1
+            day = _occurrence_day(d)
+            g["first"] = min(filter(None, [g["first"], day])) if day else g["first"]
+            g["last"] = max(filter(None, [g["last"], day])) if day else g["last"]
+    return sorted(groups.values(), key=lambda g: str(g.get("deleted_at") or ""), reverse=True)[:300]
+
+
+@router.post("/{event_id}/restore")
+async def restore_deleted_task(event_id: str, scope: str = Query("batch"),
+                               current_user: dict = Depends(get_current_user)):
+    """Restore a deleted task: just this one (`scope=this`), or everything deleted in the same
+    action (`scope=batch`, the default) -- which also lifts a series cap that action set."""
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing or existing.get("type") != "task":
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not existing.get("deleted_at"):
+        raise HTTPException(status_code=409, detail="This task is not deleted.")
+    if not await _may_manage_task(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to restore this task")
+    col = get_collection(col_name)
+    batch = existing.get("deletion_batch_id")
+    query = {"deletion_batch_id": batch} if (scope == "batch" and batch) else {"_id": existing["_id"]}
+    clear = {"deleted_at": None, "deleted_by": None, "deleted_by_name": None,
+             "deletion_batch_id": None, "deletion_scope": None}
+    res = await col.update_many(query, {"$set": clear})
+    if scope == "batch" and batch:
+        # The series this delete capped runs to its own end date again.
+        for d in await col.find({"capped_by_deletion": batch}).to_list(5000):
+            await col.update_one({"_id": d["_id"]}, {
+                "$set": {"repeat_end_date": d.get("repeat_end_date_before_deletion")},
+                "$unset": {"capped_by_deletion": "", "repeat_end_date_before_deletion": ""}})
+    await log_activity(current_user, "Restore Task", col_name,
+                       f"Restored {res.modified_count} task(s): {existing.get('title')}",
+                       meta={"task_id": event_id, "group_id": existing.get("group_id")})
+    await task_events.publish(task_events.recipients_for(existing), {
+        "type": "task_updated", "task_id": event_id, "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [], "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [], "actor_id": str(current_user["_id"]),
+    })
+    return {"restored": res.modified_count, "message": f"Restored {res.modified_count} task(s)"}
+
+
 @router.delete("/{event_id}")
-async def delete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+async def delete_event(event_id: str, background_tasks: BackgroundTasks,
+                       scope: str = Query("this"),
+                       current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
 
@@ -1478,6 +1613,25 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
 
     if not (is_admin or has_delete_perm or is_creator or is_company_admin):
          raise HTTPException(status_code=403, detail="Not authorized to delete this event")
+
+    if existing.get("type") == "task":
+        if scope not in DELETE_SCOPES:
+            raise HTTPException(status_code=422, detail="scope must be this, following or series.")
+        if existing.get("deleted_at"):
+            raise HTTPException(status_code=409, detail="This task is already deleted.")
+        deleted = await _soft_delete_tasks(existing, col_name, scope, current_user)
+        # Told once per delete action, not once per removed occurrence.
+        background_tasks.add_task(notify_task_event, "deleted", existing, current_user)
+        await log_activity(current_user, "Soft Delete Task", col_name,
+                           f"Deleted {len(deleted)} task(s) ({scope}): {existing.get('title')}",
+                           meta={"task_id": event_id, "group_id": existing.get("group_id")})
+        await task_events.publish(task_events.recipients_for(existing), {
+            "type": "task_deleted", "task_id": event_id, "title": existing.get("title"),
+            "assigned_to": existing.get("target_staff_id") or [], "assigned_by": existing.get("user_id"),
+            "watchers": existing.get("watchers") or [], "actor_id": str(current_user["_id"]),
+        })
+        return {"message": f"Deleted {len(deleted)} task(s) — you can restore from Deleted tasks",
+                "deleted": len(deleted), "restorable": True}
 
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
@@ -1601,7 +1755,8 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                 }
             # TPMS activities live in these collections too — they belong to the TPMS
             # Calendar, not the Session Calendar. See calendar_utils.exclude_tpms.
-            db_docs = await custom_col.find(exclude_tpms(query)).to_list(1000)
+            db_docs = await custom_col.find(
+                exclude_tpms({"$and": [query, NOT_DELETED]} if query else dict(NOT_DELETED))).to_list(1000)
         else:
             # Privacy Logic: 
             # Visible if Creator OR explicitly involved in any capacity (Attendee, Coach, Target)
@@ -1615,7 +1770,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                 {"target_staff_id": {"$in": [effective_user_id]}}
             ]
             db_docs = await custom_col.find(
-                exclude_tpms({"$or": involvement_clauses})).to_list(1000)
+                exclude_tpms({"$or": involvement_clauses, **NOT_DELETED})).to_list(1000)
         
         for c in db_docs:
             events.append({

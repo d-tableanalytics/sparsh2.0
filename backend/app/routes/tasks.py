@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -1087,6 +1087,78 @@ async def list_task_companies(current_user: dict = Depends(require_task_access))
         {"is_internal": {"$ne": True}}, {"name": 1}).to_list(None)
     companies = [{"id": str(d["_id"]), "name": d.get("name") or "Unnamed company"} for d in docs]
     return sorted(companies, key=lambda c: c["name"].lower())
+
+
+# ─── Bulk import: many delegation tasks from one Excel / CSV sheet ───
+@router.get("/bulk-import/template")
+async def bulk_import_template(current_user: dict = Depends(require_task_access)):
+    """The Excel template, built for the caller: a Tasks sheet whose Category and Assign To
+    columns are dropdowns of THEIR categories and the people THEY may assign to (Lists sheet),
+    and an Instructions sheet with an example."""
+    from app.services import task_bulk_import_service as bulk
+    _assignable, _everyone, people = await bulk.directory(current_user)
+    data = bulk.build_template(await bulk.category_names(), people)
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="delegation_bulk_import_template.xlsx"'})
+
+
+@router.post("/bulk-import")
+async def bulk_import_tasks(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    dry_run: bool = Query(True),
+    overrides: Optional[str] = Form(None),
+    current_user: dict = Depends(require_task_access),
+):
+    """Preview (dry_run, the default) or import a sheet of tasks.
+
+    Each valid row is created by calendar_events.create_event -- the Assign Task form's own
+    path -- so every rule and side effect of a hand-made task applies. Rows with errors are
+    reported and never created; one failing row does not stop the others.
+    """
+    from app.models.calendar_event import CalendarEventCreate
+    from app.routes.calendar_events import create_event
+    from app.services import task_bulk_import_service as bulk
+
+    rows = bulk.read_sheet(file.filename, await file.read())
+    # Values the user filled in on the preview (a missing deadline above all): {row: {col: v}}.
+    try:
+        fixes = json.loads(overrides) if overrides else {}
+    except ValueError:
+        raise HTTPException(status_code=422, detail="The corrections sent with the file are not valid.")
+    rows = bulk.apply_overrides(rows, fixes if isinstance(fixes, dict) else {})
+    assignable, everyone, _people = await bulk.directory(current_user)
+    today = datetime.now(bulk.IST).date()
+    results = bulk.validate_rows(rows, assignable, everyone, today=today,
+                                 categories=await bulk.category_names())
+
+    created = 0
+    if not dry_run:
+        for r in results:
+            payload = r.get("payload")
+            if not payload:
+                continue
+            try:
+                res = await create_event(CalendarEventCreate(**payload), background_tasks, current_user)
+                r["created_ids"] = res.get("ids") or ([res["id"]] if res.get("id") else [])
+                created += 1
+            except HTTPException as e:
+                r["errors"].append(str(e.detail))
+            except Exception as e:  # one bad row must not stop the rest
+                print(f"BULK TASK IMPORT row {r['row']} failed: {e}")
+                r["errors"].append("Could not create this task.")
+        await log_activity(current_user, "Bulk Import Tasks", "tasks",
+                           f"Imported {created} of {len(results)} tasks from {file.filename}")
+    for r in results:
+        r.pop("payload", None)
+    return {
+        "dry_run": dry_run, "file": file.filename, "total": len(results),
+        "valid": sum(1 for r in results if not r["errors"]) if dry_run else created,
+        "invalid": sum(1 for r in results if r["errors"]),
+        "created": created, "rows": results,
+    }
 
 
 @router.get("/{task_id}")

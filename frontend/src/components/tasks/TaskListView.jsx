@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import {
   ListChecks, CirclePlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, LayoutGrid, ArrowUpDown, Trash2, RotateCcw,
-  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward, Building2,
+  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward, Building2, FileSpreadsheet,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, getTaskCompanies, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
@@ -19,6 +19,7 @@ import TaskCard from './TaskCard';
 import RecurrenceDetail from './RecurrenceDetail';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
+import BulkImportTasksModal from './BulkImportTasksModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import { CategoryPill, AssigneeCell, PriorityPill, DateCell, SortableTh, RowActionsMenu, StatusControl } from './taskCells';
@@ -93,6 +94,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [selected, setSelected] = useState(new Set());
   const [openMenuId, setOpenMenuId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
   const [detailsTaskId, setDetailsTaskId] = useState(null);
   const [expandedGroups, setExpandedGroups] = useState(new Set());
@@ -562,6 +564,12 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                 <CirclePlus size={15} /> Assign Task
               </button>
             )}
+            {allowCreate && (
+              <button onClick={() => setBulkOpen(true)}
+                className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--bg-card)] text-[var(--text-main)] border border-[var(--border)] rounded-xl text-[11px] font-black uppercase tracking-widest hover:border-[var(--accent-indigo)] transition-all">
+                <FileSpreadsheet size={15} /> Bulk Import
+              </button>
+            )}
 
             <DateRangeFilter variant="dropdown" period={period} onPeriodChange={setPeriod} startDate={startDate} endDate={endDate}
               onCustomChange={(field, value) => (field === 'startDate' ? setStartDate(value) : setEndDate(value))} />
@@ -930,6 +938,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         </div>
       )}
 
+      <BulkImportTasksModal isOpen={bulkOpen} onClose={() => setBulkOpen(false)} onImported={fetchTasks} />
       <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} scope={scope} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
