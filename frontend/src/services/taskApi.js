@@ -32,6 +32,20 @@ export const softDeleteTask = (taskId) => api.delete(`/tasks/${taskId}`);
 export const restoreTask = (taskId) => api.post(`/tasks/${taskId}/restore`);
 
 export const createTask = (payload) => api.post('/calendar/events', { ...payload, type: 'task' });
+
+// Bulk import: download the Excel template, then upload a filled sheet. dryRun=true (the
+// default) only validates and returns a per-row preview; dryRun=false creates the valid rows,
+// each through the same path as createTask above.
+export const downloadTaskImportTemplate = () =>
+  api.get('/tasks/bulk-import/template', { responseType: 'blob' });
+// `overrides` are values filled in on the preview, laid over the sheet: { row: { deadline_date,
+// deadline_time, category, assignees } }.
+export const bulkImportTasks = (file, dryRun = true, overrides = null) => {
+  const form = new FormData();
+  form.append('file', file);
+  if (overrides && Object.keys(overrides).length) form.append('overrides', JSON.stringify(overrides));
+  return api.post('/tasks/bulk-import', form, { params: { dry_run: dryRun } });
+};
 export const updateTask = (taskId, updates) => api.patch(`/calendar/events/${taskId}`, updates);
 
 export const addChecklistItem = (taskId, title) => api.post(`/tasks/${taskId}/checklist`, { title });

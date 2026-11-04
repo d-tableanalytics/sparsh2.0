@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import {
   ListChecks, CirclePlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, LayoutGrid, ArrowUpDown, Trash2, RotateCcw,
-  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward, Building2,
+  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward, Building2, FileSpreadsheet,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, getTaskCompanies, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
@@ -19,6 +19,8 @@ import TaskCard from './TaskCard';
 import RecurrenceDetail from './RecurrenceDetail';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
+import BulkImportTasksModal from './BulkImportTasksModal';
+import ConfirmActionModal from './ConfirmActionModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import { CategoryPill, AssigneeCell, PriorityPill, DateCell, SortableTh, RowActionsMenu, StatusControl } from './taskCells';
@@ -93,6 +95,10 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [selected, setSelected] = useState(new Set());
   const [openMenuId, setOpenMenuId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  // Delete / restore waits here for a Yes: { action: 'delete' | 'restore', tasks: [...] }.
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
   const [detailsTaskId, setDetailsTaskId] = useState(null);
   const [expandedGroups, setExpandedGroups] = useState(new Set());
@@ -318,15 +324,10 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
   const hasActiveFilters = period !== 'all_time' || assignedTo || category || tag || frequency || search || statusFilter !== 'all';
 
-  const handleRestore = async (task) => {
+  // Restore asks first, like delete does — see ConfirmActionModal / runConfirmedAction.
+  const handleRestore = (task) => {
     setOpenMenuId(null);
-    try {
-      await restoreTask(task.id);
-      showSuccess('Task restored');
-      fetchTasks();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to restore task');
-    }
+    setConfirmAction({ action: 'restore', tasks: [task] });
   };
 
   // In-Loop member (a watcher who is neither the assigner nor a doer): read-only observer, so
@@ -442,19 +443,33 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
       showError('Client tasks are view only');
       return;
     }
-    try {
-      if (scope === 'deleted') {
-        await Promise.all(ids.map(id => restoreTask(id)));
-        showSuccess(`Restored ${ids.length} task(s)`);
-      } else {
-        await Promise.all(ids.map(id => softDeleteTask(id)));
-        showSuccess(`Deleted ${ids.length} task(s)`);
-      }
-      setSelected(new Set());
-      fetchTasks();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Bulk action failed');
+    const idSet = new Set(ids);
+    setConfirmAction({ action: scope === 'deleted' ? 'restore' : 'delete', tasks: tasks.filter(t => idSet.has(t.id)) });
+  };
+
+  // Runs only after the user said Yes in ConfirmActionModal. Every task is attempted even if
+  // one fails, and the message says exactly what happened: all done, or how many did not and why.
+  const runConfirmedAction = async () => {
+    if (!confirmAction) return;
+    const { action, tasks: chosen } = confirmAction;
+    const run = action === 'restore' ? restoreTask : softDeleteTask;
+    setConfirmBusy(true);
+    const results = await Promise.allSettled(chosen.map(t => run(t.id)));
+    setConfirmBusy(false);
+    const failed = results.filter(r => r.status === 'rejected');
+    const done = chosen.length - failed.length;
+    const total = chosen.length;
+    if (!failed.length) {
+      showSuccess(action === 'restore'
+        ? (total === 1 ? 'Task restored — it is back in its task list.' : `All ${total} tasks restored — they are back in their task lists.`)
+        : (total === 1 ? 'Task deleted — you can restore it from Deleted Tasks.' : `All ${total} tasks deleted — you can restore them from Deleted Tasks.`));
+    } else {
+      const reason = failed[0].reason?.response?.data?.detail || 'not allowed';
+      showError(`${action === 'restore' ? 'Restored' : 'Deleted'} ${done} of ${total}. ${failed.length} could not be ${action === 'restore' ? 'restored' : 'deleted'}: ${reason}`);
     }
+    setConfirmAction(null);
+    setSelected(new Set());
+    fetchTasks();
   };
 
   // Clicking a sortable column header: same column flips direction, a new column starts
@@ -560,6 +575,12 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               <button onClick={() => { setEditingTask(null); setModalOpen(true); }}
                 className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
                 <CirclePlus size={15} /> Assign Task
+              </button>
+            )}
+            {allowCreate && (
+              <button onClick={() => setBulkOpen(true)}
+                className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--bg-card)] text-[var(--text-main)] border border-[var(--border)] rounded-xl text-[11px] font-black uppercase tracking-widest hover:border-[var(--accent-indigo)] transition-all">
+                <FileSpreadsheet size={15} /> Bulk Import
               </button>
             )}
 
@@ -930,6 +951,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         </div>
       )}
 
+      <ConfirmActionModal action={confirmAction?.action} tasks={confirmAction?.tasks || []} busy={confirmBusy}
+        onConfirm={runConfirmedAction} onCancel={() => setConfirmAction(null)} />
+      <BulkImportTasksModal isOpen={bulkOpen} onClose={() => setBulkOpen(false)} onImported={fetchTasks} />
       <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} scope={scope} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}

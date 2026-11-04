@@ -16,7 +16,7 @@ import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, REASON_REQUIRED_STATUSES } from './statusConfig';
-import { getInitials, formatFrequencyLabel, formatDate, formatDateTime } from './taskDisplayUtils';
+import { getInitials, formatFrequencyLabel, formatDate, formatDateTime, isRecurringTask } from './taskDisplayUtils';
 import TaskFormModal from './TaskFormModal';
 import { describeReminder } from '../calendar/reminderFormat';
 import MiniDatePicker from './MiniDatePicker';
@@ -1303,6 +1303,13 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
 
           <div className="px-5 py-4 space-y-3">
             <p className="text-[12.5px] font-bold truncate">{task?.title}</p>
+            {task && isRecurringTask(task) && (
+              <p className="text-[12px] font-semibold text-[var(--text-muted)]">
+                This is a recurring task: only this occurrence{task.end ? ` (${formatDate(task.end)})` : ''} is
+                deleted — the rest of the series stays. To delete the whole series, select it in the
+                Recurring Tasks list and use Delete.
+              </p>
+            )}
             <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
               It moves to <b className="text-[var(--text-main)]">Deleted Tasks</b> and can be
               brought back from there.
