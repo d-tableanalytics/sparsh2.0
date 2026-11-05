@@ -294,16 +294,16 @@ async def main() -> int:
     check("an EXPLICITLY granted admin keeps payroll access",
           C.PAYROLL_READ in granted and C.EMPLOYEE_SALARY_READ in granted)
 
-    # -- §17's actual default: withheld unless granted ---------------------------------
+    # -- The default: the System Admin has every payroll capability ---------------------
     #
-    # "No AUTOMATIC entitlement" is a statement about the unconfigured case, so a company
-    # that has configured nothing must already be restricted. This is the assertion that
-    # makes that true rather than aspirational.
+    # Business decision (Nov 2026): the System Admin has access to all payroll modules and
+    # approves requests from any department, so an unconfigured company GRANTS them. §17's
+    # restriction remains available as an explicit opt-in (checked above).
     POL._set_cache_for_tests(ADMIN_CO, {})
     default = A.capabilities_for(admin)
-    check("§17 DEFAULT: an unconfigured company withholds payroll values from the admin",
-          not (default & POL.PAYROLL_SENSITIVE_CAPS),
-          sorted(c.value for c in (default & POL.PAYROLL_SENSITIVE_CAPS)))
+    check("DEFAULT: an unconfigured company gives the admin every payroll capability",
+          POL.PAYROLL_SENSITIVE_CAPS <= default,
+          sorted(c.value for c in (POL.PAYROLL_SENSITIVE_CAPS - default)))
     check("...while everything that is NOT payroll-sensitive is untouched",
           C.EMPLOYEE_READ in default and C.ATTENDANCE_READ in default, len(default))
 
@@ -315,8 +315,8 @@ async def main() -> int:
     check("a company that DELIBERATELY turns the restriction off gets payroll back",
           C.PAYROLL_READ in opted_out and C.EMPLOYEE_SALARY_READ in opted_out,
           len(opted_out & POL.PAYROLL_SENSITIVE_CAPS))
-    check("...which is a different state from never having configured it",
-          POL.ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT is True)
+    check("...and the default itself is unrestricted",
+          POL.ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT is False)
 
     print("\n" + "=" * 68)
     print(f"  {sum(results)}/{len(results)} checks passed")

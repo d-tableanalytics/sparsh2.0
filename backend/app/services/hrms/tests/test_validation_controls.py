@@ -154,8 +154,8 @@ async def main() -> int:
     POL._set_cache_for_tests("SPARSH", {})
     sa = A.capabilities_for({"_id": "sa-1", "role": "superadmin",
                              "_source_collection": "staff"})
-    check("...and §17 withholds them from the system admin too, by default",
-          M.Cap.EMPLOYEE_SALARY_READ not in sa)
+    check("...while the system admin has them by default (all payroll modules)",
+          M.Cap.EMPLOYEE_SALARY_READ in sa)
 
     # Checked across the WHOLE §17 ladder, not just one role: "restricted access" is a
     # claim about who is shut out, so the roles that must NOT see pay are the assertion

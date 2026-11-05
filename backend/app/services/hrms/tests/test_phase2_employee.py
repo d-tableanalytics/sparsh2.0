@@ -444,8 +444,8 @@ async def main() -> None:
         # on a capability §17 does not touch; the payroll side is
         # test_core_relationships_and_access's subject.
         check("superadmin sees everything (implicit ADMIN)", A.can(SUPER, M.Cap.EMPLOYEE_READ))
-        check("...but NOT payroll values by default (§17 System Admin)",
-              not A.can(SUPER, M.Cap.EMPLOYEE_SALARY_WRITE))
+        check("...including payroll values by default (System Admin has every payroll module)",
+              A.can(SUPER, M.Cap.EMPLOYEE_SALARY_WRITE))
 
         # =================================================================
         section("Masters -- create, normalise, duplicate")

@@ -2380,8 +2380,11 @@ def _may_act_on_stage(actor: dict, stage: dict) -> bool:
     if not roles:
         return True
     role = hrms_role(actor)
-    # No HRMS role at all is the Sparsh superuser, who `can()` already treats as such.
-    return role is None or getattr(role, "value", role) in roles
+    # No HRMS role at all is the Sparsh superuser, who `can()` already treats as such. The
+    # System Admin may act on any stage too -- they approve requests from every department --
+    # though maker-checker still applies to them in act_on_stage like to anyone else.
+    from app.models.hrms import HrmsRole
+    return role is None or role == HrmsRole.ADMIN or getattr(role, "value", role) in roles
 
 
 async def act_on_stage(actor: dict, company_id: str, period: str, payload: dict, *,

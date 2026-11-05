@@ -2,14 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CalendarDays, Plus, RefreshCw, Inbox, X, Clock, Building2, Tag, Users2,
   UserCog, CheckCircle2, Paperclip, Upload, FileText, RotateCcw, Trash2, Pencil, Pin,
-  Download, FileSpreadsheet, AlertTriangle, Ban,
+  Download, FileSpreadsheet, AlertTriangle, Ban, CheckSquare, Repeat,
 } from 'lucide-react';
 import { DashboardHero, HeroButton, KpiTile, FilterSelect } from '../common/dashboardKit';
 import ScheduleCalendarModal from '../../../components/calendar/ScheduleCalendarModal';
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import {
-  getSchedules, getActivities, getDepartments, deleteSchedule, updateSchedule, markLearnerDone, confirmCompletion,
+  getSchedules, getActivities, getDepartments, deleteSchedule, bulkDeleteSchedules,
+  updateSchedule, markLearnerDone, confirmCompletion,
   requestReschedule, getRescheduleRequests, decideRescheduleRequest,
   getScheduleUploads, uploadScheduleFile,
   exportTpms, importTpms, saveExportedWorkbook,
@@ -232,6 +233,15 @@ const TpmsCalendar = () => {
   const [confirmNote, setConfirmNote] = useState('');
   const [confirmBusy, setConfirmBusy] = useState(false);
 
+  // ── Select & delete many (admin) ──
+  // Select mode swaps the month grid for a checklist of the activities the filters show, so
+  // "filter to one company + one activity → Select all → Delete" is three clicks.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  // Delete dialog: { events, scope, count, counting, busy }. `count` is the server's dry-run
+  // answer for the chosen scope, because a repeating series reaches into other months.
+  const [bulkDel, setBulkDel] = useState(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -349,6 +359,57 @@ const TpmsCalendar = () => {
     if (m < 1) { m = 12; y -= 1; }
     if (m > 12) { m = 1; y += 1; }
     setMonth(m); setYear(y);
+    setSelected(new Set());
+  };
+
+  /* ── select & bulk delete ── */
+  // Only what the filters currently show can be deleted: narrowing the filters after ticking
+  // boxes drops the hidden ones from the delete instead of deleting things off-screen.
+  const selectedEvents = useMemo(() => filtered.filter((e) => selected.has(e.id)), [filtered, selected]);
+  const allShownSelected = filtered.length > 0 && selectedEvents.length === filtered.length;
+  // Shown activities grouped by activity name, for the "select every <activity>" chips.
+  const activityGroups = useMemo(() => {
+    const m = new Map();
+    filtered.forEach((e) => {
+      const k = e.activity || e.title || 'Untitled';
+      (m.get(k) || m.set(k, []).get(k)).push(e.id);
+    });
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [filtered]);
+
+  const toggleIds = (ids, on) => setSelected((prev) => {
+    const next = new Set(prev);
+    ids.forEach((id) => (on ? next.add(id) : next.delete(id)));
+    return next;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelected(new Set()); };
+
+  const previewBulkDelete = async (evs, scope) => {
+    setBulkDel({ events: evs, scope, count: null, counting: true, busy: false });
+    try {
+      const { data } = await bulkDeleteSchedules(evs.map((e) => e.id), scope, true);
+      setBulkDel((b) => (b && b.scope === scope ? { ...b, count: data.count, counting: false } : b));
+    } catch (e) {
+      setBulkDel((b) => (b && b.scope === scope ? { ...b, counting: false } : b));
+      showError(e.response?.data?.detail || 'Could not count the activities to delete');
+    }
+  };
+
+  const runBulkDelete = async () => {
+    if (!bulkDel || bulkDel.busy) return;
+    setBulkDel((b) => ({ ...b, busy: true }));
+    try {
+      const { data } = await bulkDeleteSchedules(bulkDel.events.map((e) => e.id), bulkDel.scope);
+      showSuccess(`${data.count} activit${data.count === 1 ? 'y' : 'ies'} deleted`);
+      setBulkDel(null);
+      setOpenDay(null);
+      setSelected(new Set());
+      await load();
+      await loadRequests();
+    } catch (e) {
+      showError(e.response?.data?.detail || 'Delete failed');
+      setBulkDel((b) => (b ? { ...b, busy: false } : b));
+    }
   };
 
   // Seeding the note here (rather than in the dialog) keeps a previous rejection's reason
@@ -465,8 +526,86 @@ const TpmsCalendar = () => {
               <RotateCcw size={13} /> Clear
             </button>
           )}
+          {isAdmin && (
+            <button onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-[12px] font-black transition-colors ${selectMode
+                ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo)] text-white'
+                : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--table-hover)]'}`}>
+              {selectMode ? <><CalendarDays size={13} /> Back to calendar</> : <><CheckSquare size={13} /> Select to delete</>}
+            </button>
+          )}
         </div>
 
+        {selectMode ? (
+          <div>
+            {/* toolbar: select all / by activity / delete */}
+            <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-[var(--border)] bg-[var(--table-header-bg)]">
+              <label className="inline-flex items-center gap-2 text-[12px] font-black text-[var(--text-main)] cursor-pointer">
+                <input type="checkbox" className="w-4 h-4 accent-[var(--accent-indigo)]"
+                  checked={allShownSelected} disabled={!filtered.length}
+                  ref={(el) => { if (el) el.indeterminate = selectedEvents.length > 0 && !allShownSelected; }}
+                  onChange={(ev) => toggleIds(filtered.map((e) => e.id), ev.target.checked)} />
+                Select all ({filtered.length})
+              </label>
+              <span className="text-[12px] font-bold text-[var(--text-muted)]">· {selectedEvents.length} selected</span>
+              <div className="flex-1" />
+              {selectedEvents.length > 0 && (
+                <button onClick={() => setSelected(new Set())}
+                  className="px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-black text-[var(--text-muted)] hover:bg-[var(--table-hover)]">
+                  Clear selection
+                </button>
+              )}
+              <button disabled={!selectedEvents.length}
+                onClick={() => previewBulkDelete(selectedEvents, 'selected')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[var(--accent-red)] text-white text-[12px] font-black hover:opacity-90 disabled:opacity-40 disabled:pointer-events-none">
+                <Trash2 size={13} /> Delete selected{selectedEvents.length ? ` (${selectedEvents.length})` : ''}
+              </button>
+            </div>
+            {activityGroups.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-4 py-2.5 border-b border-[var(--border)]">
+                <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)] mr-1">Select by activity</span>
+                {activityGroups.map(([name, ids]) => {
+                  const on = ids.every((id) => selected.has(id));
+                  return (
+                    <button key={name} onClick={() => toggleIds(ids, !on)}
+                      className={`px-2.5 py-1 rounded-full border text-[11px] font-bold transition-colors ${on
+                        ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]'
+                        : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--table-hover)]'}`}>
+                      {on ? '✓ ' : ''}{name} ({ids.length})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="max-h-[520px] overflow-y-auto divide-y divide-[var(--border)]">
+              {!filtered.length && (
+                <p className="px-5 py-8 text-center text-[12.5px] font-bold text-[var(--text-muted)]">
+                  No activities in {MONTHS[month - 1]} {year} match the filters.
+                </p>
+              )}
+              {filtered.map((e) => (
+                <label key={e.id}
+                  className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-[var(--table-hover)] ${selected.has(e.id) ? 'bg-[var(--accent-indigo-bg)]' : ''}`}>
+                  <input type="checkbox" className="w-4 h-4 shrink-0 accent-[var(--accent-indigo)]"
+                    checked={selected.has(e.id)} onChange={(ev) => toggleIds([e.id], ev.target.checked)} />
+                  <span className="w-[92px] shrink-0 text-[11.5px] font-black text-[var(--text-main)] tabular-nums">
+                    {e.date}{e.time ? <span className="block text-[10.5px] font-bold text-[var(--text-muted)]">{e.time}</span> : null}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="flex items-center gap-1.5 text-[12.5px] font-black text-[var(--text-main)] truncate">
+                      {e.batch_id && <Repeat size={11} className="shrink-0 text-[var(--accent-indigo)]" title="Repeating activity" />}
+                      <span className="truncate">{e.title}</span>
+                    </span>
+                    <span className="block text-[11px] font-semibold text-[var(--text-muted)] truncate">
+                      {[e.activity, e.company].filter(Boolean).join(' · ')}
+                    </span>
+                  </span>
+                  <Badge status={e.status} />
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : (
         <div className="grid grid-cols-7 gap-px bg-[var(--border)]">
           {DOW.map((d) => (
             <div key={d} className="bg-[var(--table-header-bg)] px-2 py-2 text-center text-[11px] font-black text-[var(--text-muted)]">{d}</div>
@@ -510,6 +649,7 @@ const TpmsCalendar = () => {
             );
           })}
         </div>
+        )}
         <StatusLegend />
         {loading && <div className="px-5 py-3 text-[12px] font-bold text-[var(--text-muted)]">Loading…</div>}
       </div>
@@ -586,7 +726,14 @@ const TpmsCalendar = () => {
                       run: () => act(() => updateSchedule(e.id, { status: 'Cancelled' }), 'Activity cancelled'),
                     })}><Ban size={12} /> Cancel</Btn>
                   )}
-                  {isAdmin && (
+                  {/* A repeating activity asks Google-Calendar style: this / this and
+                      following / all events. A one-time one keeps the plain confirmation. */}
+                  {isAdmin && e.batch_id && (
+                    <Btn danger ghost onClick={() => previewBulkDelete([e], 'selected')}>
+                      <Trash2 size={12} /> Delete
+                    </Btn>
+                  )}
+                  {isAdmin && !e.batch_id && (
                     <Btn danger ghost onClick={() => askConfirm({
                       title: 'Delete this activity?',
                       lead: e.title,
@@ -697,6 +844,57 @@ const TpmsCalendar = () => {
           </div>
         </Overlay>
       )}
+
+      {/* ── Delete one repeating activity, or many at once ── */}
+      {bulkDel && (() => {
+        const evs = bulkDel.events;
+        const one = evs.length === 1;
+        const repeating = evs.some((e) => e.batch_id);
+        const titles = [...new Set(evs.map((e) => e.title))];
+        const scopes = [
+          { id: 'selected', label: one ? 'This activity' : `Only the ${evs.length} selected` },
+          { id: 'following', label: one ? 'This and following activities' : 'Selected and the following ones in their series' },
+          { id: 'series', label: one ? 'All activities in this series' : 'All activities in their series (every month)' },
+        ];
+        const close = () => { if (!bulkDel.busy) setBulkDel(null); };
+        return (
+          <Overlay narrow title={one ? 'Delete repeating activity' : `Delete ${evs.length} activities?`} onClose={close}>
+            <ul className="max-h-28 overflow-y-auto mb-3 space-y-0.5">
+              {titles.slice(0, 6).map((t) => (
+                <li key={t} className="text-[12.5px] font-black text-[var(--text-main)] truncate">{t}</li>
+              ))}
+              {titles.length > 6 && (
+                <li className="text-[11.5px] font-bold text-[var(--text-muted)]">…and {titles.length - 6} more</li>
+              )}
+            </ul>
+            {repeating && (
+              <div className="space-y-1.5 mb-3">
+                {scopes.map((s) => (
+                  <label key={s.id} className="flex items-center gap-2.5 text-[12.5px] font-bold text-[var(--text-main)] cursor-pointer">
+                    <input type="radio" name="tpms-del-scope" className="accent-[var(--accent-red)]"
+                      checked={bulkDel.scope === s.id} disabled={bulkDel.busy}
+                      onChange={() => previewBulkDelete(evs, s.id)} />
+                    {s.label}
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="text-[12px] font-semibold text-[var(--text-muted)] mb-3 leading-relaxed">
+              {bulkDel.counting ? 'Counting…' : (
+                <><b className="text-[var(--text-main)]">{bulkDel.count ?? evs.length} activit{(bulkDel.count ?? evs.length) === 1 ? 'y' : 'ies'}</b> will
+                be deleted, with their pending reminders, tracker rows, action items and reschedule requests.
+                This cannot be undone — use Cancel on an activity instead to keep a record of it.</>
+              )}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Btn ghost disabled={bulkDel.busy} onClick={close}>Keep them</Btn>
+              <Btn danger disabled={bulkDel.busy || bulkDel.counting || bulkDel.count === 0} onClick={runBulkDelete}>
+                {bulkDel.busy ? 'Deleting…' : `Delete ${bulkDel.count ?? evs.length}`}
+              </Btn>
+            </div>
+          </Overlay>
+        );
+      })()}
 
       {/* ── Import result ──
           Shown after every import, success or not. A bulk load that silently half-worked is
