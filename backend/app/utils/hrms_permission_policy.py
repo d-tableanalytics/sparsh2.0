@@ -121,11 +121,12 @@ PAYROLL_SENSITIVE_CAPS = frozenset({
 })
 
 
-# FRD §17 System Admin: "no automatic entitlement to payroll-sensitive values unless
-# explicitly granted". The DEFAULT is therefore withheld, not granted -- administering the
-# system and reading what people are paid are different things, and a company should not
-# have to discover a toggle to get the posture the FRD describes.
-ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT = True
+# FRD §17 suggested withholding payroll values from the System Admin unless granted. The
+# business decided otherwise (Nov 2026): the System Admin has access to every payroll module
+# and can approve requests from any department, so the DEFAULT is now granted. A company that
+# wants §17's posture can still switch the restriction on (Roles & Permissions), and that
+# explicit choice is honoured -- see admin_payroll_withheld.
+ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT = False
 
 
 def admin_payroll_withheld(user: dict) -> bool:
@@ -133,7 +134,7 @@ def admin_payroll_withheld(user: dict) -> bool:
 
     Three states, not two, and the difference matters:
 
-      unset  -> withheld. A company that has configured nothing gets §17's posture.
+      unset  -> ADMIN_PAYROLL_RESTRICTED_BY_DEFAULT (allowed: full payroll access).
       True   -> withheld. The company said so explicitly.
       False  -> allowed. The company DELIBERATELY turned the restriction off, and that
                 choice outranks the default -- otherwise the toggle would do nothing.

@@ -676,3 +676,95 @@ async def delete_schedule(user: dict, event_id: str) -> dict:
         res = await get_collection(name).delete_many({"event_id": eid})
         deleted[name] = res.deleted_count
     return {"ok": True, "deleted": deleted}
+
+
+# ─────────────────────────────────────────────────────────────
+# Bulk delete — Google-Calendar style "this / this and following / all events"
+# ─────────────────────────────────────────────────────────────
+BULK_DELETE_SCOPES = ("selected", "following", "series")
+BULK_DELETE_MAX_IDS = 2000
+
+
+async def _cascade_delete(event_ids: List[str]) -> dict:
+    """Delete the rows derived from these occurrences (the same set delete_schedule clears)."""
+    from app.models.tpms import (COLL_ACTION_ITEMS as _AI, COLL_ESCALATIONS as _ESC,
+                                 COLL_RESCHEDULE_REQUESTS as _RR)
+    deleted = {}
+    for name in (COLL_ACTIVITY_TRACKER, _AI, _ESC, _RR):
+        res = await get_collection(name).delete_many({"event_id": {"$in": event_ids}})
+        deleted[name] = res.deleted_count
+    return deleted
+
+
+async def bulk_delete_schedules(user: dict, ids: List[str], scope: str = "selected",
+                                dry_run: bool = False) -> dict:
+    """Delete many TPMS occurrences at once. Admin-only, like delete_schedule.
+
+    scope:
+      • selected  — exactly the occurrences picked
+      • following — each picked occurrence plus the later ones in its repeating series
+      • series    — every occurrence of each picked occurrence's repeating series (all months)
+    A one-time activity (no tpms_batch_id) is just itself under every scope.
+    `dry_run` returns what would be deleted without deleting it, so the UI can show the
+    real count — a series reaches into months the calendar is not showing.
+    """
+    if (user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="No permission to delete")
+    if scope not in BULK_DELETE_SCOPES:
+        raise HTTPException(status_code=400, detail=f"scope must be one of {', '.join(BULK_DELETE_SCOPES)}")
+    ids = list(dict.fromkeys(str(i) for i in (ids or []) if i))
+    if not ids:
+        raise HTTPException(status_code=400, detail="Select at least one activity to delete")
+    if len(ids) > BULK_DELETE_MAX_IDS:
+        raise HTTPException(status_code=400, detail=f"At most {BULK_DELETE_MAX_IDS} activities per delete")
+    oids = []
+    for i in ids:
+        try:
+            oids.append(ObjectId(i))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid activity id: {i}")
+
+    # 1. The picked occurrences themselves.
+    picked = []
+    for coll in CAL_COLLECTIONS:
+        async for d in get_collection(coll).find({"_id": {"$in": oids}, "kind": TPMS_EVENT_KIND},
+                                                 {"tpms_batch_id": 1, "start": 1}):
+            picked.append(d)
+
+    # 2. Widen to the series where asked. For "following", the earliest picked occurrence
+    #    of a series is the cut-off, so picking two in one series never leaves a gap.
+    or_clauses = [{"_id": {"$in": [d["_id"] for d in picked]}}]
+    if scope != "selected":
+        cutoff = {}
+        for d in picked:
+            b = d.get("tpms_batch_id")
+            if not b:
+                continue
+            s = str(d.get("start") or "")
+            cutoff[b] = min(cutoff.get(b, s), s)
+        for b, s in cutoff.items():
+            clause = {"tpms_batch_id": b}
+            if scope == "following":
+                clause["start"] = {"$gte": s}
+            or_clauses.append(clause)
+    match = {"kind": TPMS_EVENT_KIND, "$or": or_clauses}
+
+    targets = {}   # collection -> [_id]
+    titles = set()
+    for coll in CAL_COLLECTIONS:
+        async for d in get_collection(coll).find(match, {"_id": 1, "title": 1}):
+            targets.setdefault(coll, []).append(d["_id"])
+            titles.add(d.get("title") or "")
+    total = sum(len(v) for v in targets.values())
+    result = {"ok": True, "scope": scope, "count": total, "not_found": len(ids) - len(picked),
+              "activities": sorted(t for t in titles if t)[:20]}
+    if dry_run or not total:
+        return {**result, "dry_run": dry_run}
+
+    for coll, id_list in targets.items():
+        await get_collection(coll).delete_many({"_id": {"$in": id_list}, "kind": TPMS_EVENT_KIND})
+    event_ids = [str(i) for v in targets.values() for i in v]
+    result["deleted"] = {"events": total, **await _cascade_delete(event_ids)}
+    logging.getLogger(__name__).info("TPMS bulk delete by %s: %d occurrence(s), scope=%s",
+                                     user.get("email") or user.get("_id"), total, scope)
+    return {**result, "dry_run": False}

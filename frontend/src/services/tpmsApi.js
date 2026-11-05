@@ -85,6 +85,9 @@ export const checkScheduleConflict = (payload) =>
 export const createSchedule = (payload) => api.post('/tpms/schedules', payload);
 export const updateSchedule = (id, payload) => api.patch(`/tpms/schedules/${id}`, payload);
 export const deleteSchedule = (id) => api.delete(`/tpms/schedules/${id}`);
+// Bulk delete: scope 'selected' | 'following' | 'series'; dryRun returns the count only.
+export const bulkDeleteSchedules = (ids, scope = 'selected', dryRun = false) =>
+  api.post('/tpms/schedules/bulk-delete', { ids, scope, dry_run: dryRun });
 
 // ── Lifecycle: two-step completion ──
 // The doer claims it…

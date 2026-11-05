@@ -38,7 +38,7 @@ from datetime import datetime
 from app.services.tpms_score_service import run_daily as run_score_daily, save_manual_score
 from app.services.tpms_schedule_service import (
     CAL_COLLECTIONS, check_schedule_conflict, create_schedule,
-    delete_schedule, update_schedule,
+    delete_schedule, update_schedule, bulk_delete_schedules,
 )
 from app.services.tpms_client_export_service import (
     ExportNotPermitted, build_client_report, export_client_workbook,
@@ -739,6 +739,9 @@ async def list_tpms_schedules(
                 "is_doer": is_doer,
                 "scheduled_by": e.get("scheduled_by_side") or "",       # M1 — internal | client
                 "scheduled_by_name": e.get("scheduled_by_name") or "",
+                # Occurrences expanded from one repeating schedule share this id — the
+                # calendar's "this and following / all events" delete keys on it.
+                "batch_id": e.get("tpms_batch_id") or "",
             })
     counts = await upload_counts([ev["id"] for ev in events if ev["upload_required"]])
     for ev in events:
@@ -805,6 +808,16 @@ async def update_tpms_schedule(
     """Edit one occurrence. Changing the date or time automatically flips the status to
     Rescheduled, bumps the counter and re-arms the reminders."""
     return await update_schedule(current_user, event_id, payload)
+
+
+@router.post("/schedules/bulk-delete")
+async def bulk_delete_tpms_schedules(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Admin-only. Delete many occurrences at once — `ids` with `scope` selected | following |
+    series (Google-Calendar style). `dry_run: true` returns the count without deleting."""
+    return await bulk_delete_schedules(
+        current_user, payload.get("ids") or [], str(payload.get("scope") or "selected"),
+        bool(payload.get("dry_run")),
+    )
 
 
 @router.delete("/schedules/{event_id}")

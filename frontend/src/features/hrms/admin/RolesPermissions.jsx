@@ -217,7 +217,7 @@ const AdminPayrollCard = ({ scope, people }) => {
             can always be granted back from this page.
             {!setting.configured && (
               <span className="block mt-1">
-                On by default (FRD §17). Untick it to give the superadmin payroll access.
+                Off by default: the System Admin has full payroll access and can approve any request. Tick it to withhold payroll values unless granted below.
               </span>
             )}
           </span>
