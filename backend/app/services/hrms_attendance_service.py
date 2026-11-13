@@ -113,12 +113,10 @@ async def _team_employee_codes(actor: dict, company_id: str) -> list:
     """A manager's own reports, by employee_code — the same directory relationship
     hrms_employee_service._manager_scope reads (`reporting_manager` on the user doc),
     resolved here to employee_code because this module addresses people that way."""
-    actor_id = str(actor.get("_id") or "")
-    reports = []
-    for coll in USER_COLLECTIONS:
-        rows = await get_collection(coll).find(
-            {"reporting_manager": actor_id}, {"_id": 1}).to_list(2000)
-        reports.extend(str(r["_id"]) for r in rows)
+    # The shared reporting-line rule (direct reports, or the approved hierarchy downline):
+    # the same people the Employee Directory shows this manager.
+    from app.services.hrms_reporting_scope import team_user_ids
+    reports = await team_user_ids(actor, company_id)
     if not reports:
         return []
     profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(

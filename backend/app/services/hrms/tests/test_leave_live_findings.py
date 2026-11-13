@@ -132,7 +132,22 @@ async def main() -> int:
     await LV.act_on_leave(MGR, CO, a["leave_no"], {"decision": "Manager Approved"})
     r = await attempt(LV.act_on_leave(MGR, CO, a["leave_no"], {"decision": "Approved"}))
     check("the manager who approved cannot also give the final approval",
-          isinstance(r, HTTPException) and r.status_code == 409)
+          isinstance(r, HTTPException) and r.status_code in (403, 409))
+    # Once manager-approved the request is HR's alone: a real HOD on the employee's team
+    # (not the one who approved) can no longer approve, reject or return it.
+    HOD = {"_id": "hod2", "role": "clientuser", "company_id": CO, "governance_role": "HOD"}
+    real_team = LV._team_employee_codes
+
+    async def _team(actor, company_id):
+        return [EMP] if actor is HOD else await real_team(actor, company_id)
+    LV._team_employee_codes = _team
+    try:
+        for decision in ("Approved", "Rejected", "Returned"):
+            r = await attempt(LV.act_on_leave(HOD, CO, a["leave_no"], {"decision": decision, "remarks": "x"}))
+            check(f"another HOD cannot {dict(Approved='approve', Rejected='reject', Returned='return')[decision]} it at the HR-final step",
+                  isinstance(r, HTTPException) and r.status_code == 403 and "only HR" in str(r.detail))
+    finally:
+        LV._team_employee_codes = real_team
     done = await LV.act_on_leave(HR, CO, a["leave_no"], {"decision": "Approved"})
     check("...someone else can", done["status"] == "Approved")
     check("CL 12 -> 10", await closing("CL") == 10)

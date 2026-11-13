@@ -169,12 +169,10 @@ async def _own_employee_code(actor: dict, company_id: str) -> Optional[str]:
 
 
 async def _team_employee_codes(actor: dict, company_id: str) -> list:
-    actor_id = str(actor.get("_id") or "")
-    reports = []
-    for coll in USER_COLLECTIONS:
-        rows = await get_collection(coll).find(
-            {"reporting_manager": actor_id}, {"_id": 1}).to_list(2000)
-        reports.extend(str(r["_id"]) for r in rows)
+    # The shared reporting-line rule (direct reports, or the approved hierarchy downline):
+    # the same people the Employee Directory shows this manager.
+    from app.services.hrms_reporting_scope import team_user_ids
+    reports = await team_user_ids(actor, company_id)
     if not reports:
         return []
     profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
@@ -457,6 +455,16 @@ async def act_on_leave(actor: dict, company_id: str, leave_no: str, payload: dic
     if doc["status"] not in (LeaveStatus.PENDING.value, LeaveStatus.MANAGER_APPROVED.value):
         raise HTTPException(status_code=409, detail=f"{leave_no} is already \"{doc['status']}\".")
     await _assert_may_decide(actor, company_id, doc["employee_code"], "leave")
+    # Employee applies → manager approves → HR gives the final decision. Once the manager
+    # step is done the request belongs to HR: a manager can no longer approve, reject or
+    # return it (before this, any other manager on the team could give the "HR" approval).
+    # Same role set as act_on_regularization's HR-final check.
+    from app.models.hrms import HrmsRole
+    if doc["status"] == LeaveStatus.MANAGER_APPROVED.value and             hrms_role(actor) not in (HrmsRole.HR, HrmsRole.MD, HrmsRole.ADMIN, None):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{leave_no} is already manager-approved and waiting for HR's final "
+                   f"approval — only HR can act on it now.")
 
     decision = payload.get("decision")
     now = datetime.now(timezone.utc)

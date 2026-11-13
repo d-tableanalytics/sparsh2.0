@@ -139,6 +139,31 @@ class SelfProfileUpdate(BaseModel):
     joining_date: Optional[str] = None
     level: Optional[str] = None
 
+# ─── Self-service (ESS) edit policy ───
+# Every field PATCH /users/me can write is HR-controlled: it is part of the employee record
+# HR maintains (identity, contact, role in the organisation). An employee sees it read-only.
+HR_CONTROLLED_SELF_FIELDS = tuple(SelfProfileUpdate.model_fields)
+
+# Fields an employee may change on their own. EMPTY BY DESIGN: a field goes here only once
+# the business has explicitly approved it for self-service AND the change runs through the
+# configured approval workflow (HR reviews before the record changes). Until both are true,
+# a direct write would bypass HR, so nothing is listed.
+ESS_APPROVED_SELF_EDIT_FIELDS: frozenset = frozenset()
+
+HR_MANAGED_MESSAGE = ("These details are managed by HR and cannot be edited from your profile. "
+                      "Please contact your HR team to update them.")
+
+
+def self_editable_fields(user: dict) -> list:
+    """The PATCH /users/me fields this user may write directly. Someone who maintains
+    employee records (see utils/ess_access) keeps editing their own profile; an employee
+    login gets only the explicitly approved ESS fields."""
+    from app.utils.ess_access import manages_employee_records
+    if manages_employee_records(user):
+        return list(HR_CONTROLLED_SELF_FIELDS)
+    return [f for f in HR_CONTROLLED_SELF_FIELDS if f in ESS_APPROVED_SELF_EDIT_FIELDS]
+
+
 # ─── Current User ───
 @router.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_active_user)):
@@ -195,6 +220,20 @@ async def find_user_by_id(user_id: str):
 # Any authenticated user can edit their own safe profile fields. Separate from
 # PUT /users/{id}, which restricts staff editing to superadmin and is meant for admins
 # managing *other* users. This never touches role/permissions/is_active/email.
+@router.get("/me/editable-fields")
+async def my_editable_fields(current_user: dict = Depends(get_current_active_user)):
+    """Which profile fields the caller may edit themselves — the profile screens render
+    everything else read-only. The server enforces the same rule on PATCH /users/me."""
+    fields = self_editable_fields(current_user)
+    hr_managed = len(fields) < len(HR_CONTROLLED_SELF_FIELDS)
+    # `employee_login`: an employee self-service (ESS) login — the screens show such a user
+    # only employee-relevant, approved functions (no Notification Settings page, no
+    # attendance-policy controls such as weekly offs). See utils/ess_access.
+    from app.utils.ess_access import is_employee_login
+    return {"fields": fields, "hr_managed": hr_managed, "employee_login": is_employee_login(current_user),
+            "message": HR_MANAGED_MESSAGE}
+
+
 @router.patch("/me")
 async def update_my_profile(updates: SelfProfileUpdate, current_user: dict = Depends(get_current_active_user)):
     user_id = str(current_user["_id"])
@@ -203,6 +242,17 @@ async def update_my_profile(updates: SelfProfileUpdate, current_user: dict = Dep
         raise HTTPException(status_code=404, detail="User not found")
 
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # HR-controlled fields are read-only for an employee login. A value that is unchanged is
+    # not an edit (a form may resend the whole section), so only real changes are refused.
+    allowed = set(self_editable_fields(current_user))
+    blocked = sorted(k for k, v in update_data.items()
+                     if k not in allowed and str(v) != str(user.get(k) or ""))
+    if blocked:
+        raise HTTPException(status_code=403, detail=HR_MANAGED_MESSAGE)
+    update_data = {k: v for k, v in update_data.items() if k in allowed}
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
@@ -242,6 +292,17 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
 
     user["_id"] = str(user["_id"])
     user.pop("password", None)
+    # Module permissions are administrative configuration. Only an authorised administrator
+    # (superadmin, users.read/update, or someone who maintains employee records) receives
+    # them; anyone else — including an employee opening their own record — gets the profile
+    # without the permission matrix. `permissions_visible` tells the screen which case it is.
+    from app.utils.ess_access import manages_employee_records
+    users_perm = permissions.get("users", {}) or {}
+    permissions_visible = (current_user.get("role") == "superadmin" or bool(users_perm.get("read"))
+                           or bool(users_perm.get("update")) or manages_employee_records(current_user))
+    if not permissions_visible:
+        user.pop("permissions", None)
+    user["permissions_visible"] = permissions_visible
     return user
 
 # ─── Update User ───

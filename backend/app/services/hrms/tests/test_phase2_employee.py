@@ -630,7 +630,9 @@ async def main() -> None:
         visible = {e["user_id"] for e in listing["employees"]}
         check("HOD sees their direct report", U_EMP in visible)
         check("HOD sees themselves", U_HOD in visible)
-        check("HOD sees a department peer", U_PEER in visible)
+        # Reporting-hierarchy scope (UAT finding): sharing a department is not a reporting
+        # line, so a department peer who does not report to the HOD stays out of view.
+        check("HOD does NOT see a department peer outside their reporting line", U_PEER not in visible)
         check("HOD does NOT see an unrelated colleague", U_HR not in visible)
         check("salary_visible false for HOD", listing["salary_visible"] is False)
         check("no salary key on any listed row",

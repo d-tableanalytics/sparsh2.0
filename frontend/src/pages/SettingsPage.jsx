@@ -10,6 +10,7 @@ import GeneralSection from '../components/settings/GeneralSection';
 import MetaListSection from '../components/settings/MetaListSection';
 import PasswordCard from '../components/settings/PasswordCard';
 import NotificationSettings from '../components/settings/NotificationSettings';
+import { getMyEditableFields } from '../services/settingsApi';
 
 const SettingsPage = () => {
     const { user } = useAuth();
@@ -31,12 +32,22 @@ const SettingsPage = () => {
     const canManageMeta = canManageTaskSettings(user);
     const isSuperadmin = user?.role === 'superadmin';
 
+    // Employee self-service login → Notifications is not an employee function (HR/Admin
+    // configure it, along with weekly offs and other attendance policy). Hidden until the
+    // server says otherwise, so an employee never sees it flash in.
+    const [employeeLogin, setEmployeeLogin] = useState(true);
+    useEffect(() => {
+        getMyEditableFields()
+            .then(({ data }) => setEmployeeLogin(data?.employee_login !== false))
+            .catch(() => setEmployeeLogin(true));
+    }, [user]);
+
     // Left-sidebar sections (role/permission filtered)
     const SECTIONS = [
         { key: 'general', label: 'General', icon: UserCircle2, visible: true },
-        // Personal alert preferences are for everyone; the admin template editor below is
-        // still permission-gated within the section itself.
-        { key: 'notifications', label: 'Notifications', icon: Mail, visible: true },
+        // Not shown to an employee login (approved Phase 1 ESS scope excludes it). The admin
+        // template editor below is still permission-gated within the section itself.
+        { key: 'notifications', label: 'Notifications', icon: Mail, visible: !employeeLogin },
         { key: 'security', label: 'Security', icon: ShieldCheck, visible: true },
         { key: 'categories', label: 'Categories', icon: FolderTree, visible: canAccessTasks },
         { key: 'tags', label: 'Tags', icon: Tag, visible: canAccessTasks },
@@ -129,7 +140,7 @@ const SettingsPage = () => {
 
             {/* Content */}
             <main className="flex-1 overflow-hidden flex flex-col">
-                {section === 'notifications' ? (
+                {section === 'notifications' && !employeeLogin ? (
                     <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-6">
                         {/* Personal alert preferences — shown to every user (matches the design). */}
                         <NotificationSettings />

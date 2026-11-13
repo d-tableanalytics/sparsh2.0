@@ -88,14 +88,15 @@ const UserDetails = () => {
             setUser(res.data);
             setEditForm({
                 ...res.data,
-                permissions: res.data.permissions || {
+                // Default matrix only for an administrator viewing a user with none stored.
+                permissions: res.data.permissions || (res.data.permissions_visible !== true ? undefined : {
                     batches: { create: false, read: true, update: false, delete: false },
                     calendar: { create: false, read: true, update: false, delete: false },
                     users: { create: false, read: true, update: false, delete: false },
                     companies: { create: false, read: true, update: false, delete: false },
                     logs: { create: false, read: true, update: false, delete: false },
                     templates: { create: false, read: true, update: false, delete: false }
-                }
+                })
             });
         } catch (err) {
             console.error("Fetch user error:", err);
@@ -259,7 +260,10 @@ const UserDetails = () => {
                         </div>
                     </div>
 
-                    {/* Access & Permissions Section */}
+                    {/* Access & Permissions Section — administrative configuration. Rendered only
+                        when the server sent the permissions (permissions_visible): an employee,
+                        even opening their own record, never sees the module matrix. */}
+                    {user?.permissions_visible === true && (
                     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm space-y-6">
                         <div className="flex items-center justify-between">
                             <h3 className="text-xl font-black text-[var(--text-main)] flex items-center gap-2"><Lock size={22} className="text-[var(--accent-orange)]"/> Access Management</h3>
@@ -319,6 +323,7 @@ const UserDetails = () => {
                             {isEditing ? "Defining explicit Create/Read/Update/Delete boundaries for this account." : "Access architecture is currently strictly enforced based on the matrix above."}
                         </p>
                     </div>
+                    )}
                 </div>
 
                 {/* Right Column: Metadata & Activity */}
