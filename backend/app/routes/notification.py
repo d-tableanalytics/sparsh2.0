@@ -47,6 +47,11 @@ async def get_notification_preferences(current_user: dict = Depends(get_current_
 
 @router.put("/preferences")
 async def update_notification_preferences(prefs: NotificationPreferences, current_user: dict = Depends(get_current_user)):
+    # Notification settings are not an employee self-service function: an employee login
+    # receives notifications as configured by authorised HR/Admin (see utils/ess_access).
+    from app.utils.ess_access import is_employee_login
+    if is_employee_login(current_user):
+        raise HTTPException(status_code=403, detail="Notification settings are managed by your HR/Admin team.")
     user_id = str(current_user["_id"])
     data = prefs.model_dump()
     data["updated_at"] = datetime.utcnow()

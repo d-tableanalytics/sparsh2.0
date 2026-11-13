@@ -29,6 +29,13 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
 
 const TABS = ['Leave Requests', 'Balances', 'Compensatory Off', 'Leave Policy'];
 
+// Employee applies → manager approves → HR gives the final decision. After the manager step
+// only these roles may act (the server enforces the same: hrms_access.sees_all_people), so a
+// manager who has already approved no longer sees Act on that request.
+const HR_FINAL_ROLES = ['hr', 'md', 'admin'];
+const mayActOnLeave = (r, can, role) => can(CAP.LEAVE_APPROVE) && (
+  r.status === 'Pending' || (r.status === 'Manager Approved' && HR_FINAL_ROLES.includes(role)));
+
 const EmployeePicker = ({ scope, value, onChange }) => {
   // An employee acts for themselves only (and cannot search the directory): lock to "You".
   const self = useSelfEmployee(value, onChange);
@@ -119,7 +126,7 @@ const useSubmit = (showSuccess, showError, onDone) => {
 };
 
 const LeaveBoard = () => {
-  const { scope, companyId, can } = useHrms();
+  const { scope, companyId, can, role } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [tab, setTab] = useState('Leave Requests');
 
@@ -136,7 +143,7 @@ const LeaveBoard = () => {
       <BoardTabs tabs={TABS} value={tab} onChange={setTab} label="Leave sections" />
 
       {tab === 'Leave Requests' && (
-        <LeaveTab scope={scope} companyId={companyId} can={can}
+        <LeaveTab scope={scope} companyId={companyId} can={can} role={role}
           showSuccess={showSuccess} showError={showError} />
       )}
       {tab === 'Balances' && <BalancesTab scope={scope} />}
@@ -153,7 +160,7 @@ const LeaveBoard = () => {
 };
 
 // ── Leave Requests tab ──
-const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
+const LeaveTab = ({ scope, companyId, can, role, showSuccess, showError }) => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -181,7 +188,7 @@ const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
       <>
         <span className="font-semibold text-[var(--text-main)]">{r.employee_name || r.employee_code}</span>
         <span className="block text-[11px] text-[var(--text-muted)]">{r.leave_no}</span>
-        <NextStep step={leaveNextStep(r, can(CAP.LEAVE_APPROVE))} className="mt-1.5" />
+        <NextStep step={leaveNextStep(r, mayActOnLeave(r, can, role))} className="mt-1.5" />
       </>
     ) },
     { key: 'type', label: 'Type', render: (r) => (
@@ -196,7 +203,7 @@ const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
       <div className="flex flex-col items-end gap-1.5">
         <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
         <div className="flex gap-1.5">
-          {can(CAP.LEAVE_APPROVE) && ['Pending', 'Manager Approved'].includes(r.status) && (
+          {mayActOnLeave(r, can, role) && (
             <Btn tone="ghost" onClick={() => setActing({ row: r, mode: 'act' })}>Act</Btn>
           )}
           {can(CAP.LEAVE_APPLY) && ['Pending', 'Manager Approved', 'Approved'].includes(r.status) && (
@@ -221,9 +228,9 @@ const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
         { label: 'Dates', value: `${day(r.start_date)} – ${day(r.end_date)} (${r.days_count}d)` },
         { label: 'Reason', value: r.reason },
       ]} />
-      <NextStep step={leaveNextStep(r, can(CAP.LEAVE_APPROVE))} />
+      <NextStep step={leaveNextStep(r, mayActOnLeave(r, can, role))} />
       <div className="flex gap-1.5">
-        {can(CAP.LEAVE_APPROVE) && ['Pending', 'Manager Approved'].includes(r.status) && (
+        {mayActOnLeave(r, can, role) && (
           <Btn tone="ghost" onClick={() => setActing({ row: r, mode: 'act' })}>Act</Btn>
         )}
         {can(CAP.LEAVE_APPLY) && ['Pending', 'Manager Approved', 'Approved'].includes(r.status) && (

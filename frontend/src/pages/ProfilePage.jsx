@@ -10,8 +10,9 @@ import {
 import NotificationSettings from '../components/settings/NotificationSettings';
 import { motion } from 'framer-motion';
 
-// Fields the self-service PATCH /users/me endpoint accepts (see backend SelfProfileUpdate).
-// Everything NOT in here is rendered read-only / disabled (no backend support yet).
+// Fields each section's PATCH /users/me save can carry (see backend SelfProfileUpdate).
+// Whether THIS user may edit them is the server's call (GET /users/me/editable-fields):
+// HR-controlled fields are read-only for an employee login.
 const EDITABLE = {
   general: ['first_name', 'last_name', 'mobile', 'emergency_mobile'],
   professional: ['designation', 'department', 'reporting_manager', 'joining_date'],
@@ -62,7 +63,7 @@ const Field = ({ icon: Icon, label, value, editing, onChange, kind = 'text', opt
   );
 };
 
-const SectionCard = ({ icon: Icon, title, subtitle, editKey, editing, onEdit, onSave, onCancel, saving, editable = true, children }) => (
+const SectionCard = ({ icon: Icon, title, subtitle, editKey, editing, onEdit, onSave, onCancel, saving, editable = true, hrNote, children }) => (
   <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm">
     <div className="flex items-start justify-between gap-3 mb-5">
       <div className="flex items-center gap-3">
@@ -95,8 +96,15 @@ const SectionCard = ({ icon: Icon, title, subtitle, editKey, editing, onEdit, on
       )}
     </div>
     {children}
+    {hrNote && (
+      <p className="mt-4 flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-muted)] italic">
+        <ShieldCheck size={13} className="shrink-0" /> {hrNote}
+      </p>
+    )}
   </div>
 );
+
+const HR_NOTE = 'Managed by HR. Please contact your HR team to update these details.';
 
 const QuickInfo = ({ icon: Icon, label, value }) => (
   <div className="flex items-center gap-3 p-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl shadow-sm">
@@ -125,6 +133,23 @@ const ProfilePage = () => {
   // manager-options endpoint (scope by company_id for client users, omit for internal staff).
   const [managers, setManagers] = useState([]);
 
+  // Fields the server lets this user edit. Empty (read-only) until it answers, and stays
+  // empty if the check fails — an employee must never get an Edit button for HR data.
+  const [allowed, setAllowed] = useState(() => new Set());
+  // Employee login → no Notification Settings (not an employee self-service function).
+  const [employeeLogin, setEmployeeLogin] = useState(true);
+  useEffect(() => {
+    if (!user) return;
+    api.get('/users/me/editable-fields')
+      .then((res) => {
+        setAllowed(new Set(res.data?.fields || []));
+        setEmployeeLogin(res.data?.employee_login !== false);
+      })
+      .catch(() => { setAllowed(new Set()); setEmployeeLogin(true); });
+  }, [user]);
+  const canEdit = (k) => allowed.has(k);
+  const canEditSection = (sec) => EDITABLE[sec].some(canEdit);
+
   useEffect(() => { if (user) setForm(hydrate(user)); }, [user]);
 
   useEffect(() => {
@@ -142,7 +167,7 @@ const ProfilePage = () => {
     setSaving(true);
     try {
       const payload = {};
-      EDITABLE[sec].forEach((k) => { payload[k] = form[k]; });
+      EDITABLE[sec].filter(canEdit).forEach((k) => { payload[k] = form[k]; });
       await api.patch('/users/me', payload); // only API-supported fields are ever sent
       await refreshUser();
       showSuccess('Profile updated successfully');
@@ -223,27 +248,29 @@ const ProfilePage = () => {
       <div className="lg:col-span-2 space-y-6">
         {/* Section 1 — General Information */}
         <SectionCard icon={User} title="General Information" subtitle="Your basic identity and contact details."
-          editKey="general" editing={editing} onEdit={setEditing} onSave={() => saveSection('general')} onCancel={cancelEdit} saving={saving}>
+          editKey="general" editing={editing} onEdit={setEditing} onSave={() => saveSection('general')} onCancel={cancelEdit} saving={saving}
+          editable={canEditSection('general')} hrNote={canEditSection('general') ? null : HR_NOTE}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field icon={User} label="First Name" value={isEditingGeneral ? form.first_name : user.first_name} editing={isEditingGeneral} onChange={(v) => setField('first_name', v)} />
-            <Field icon={User} label="Last Name" value={isEditingGeneral ? form.last_name : user.last_name} editing={isEditingGeneral} onChange={(v) => setField('last_name', v)} />
+            <Field icon={User} label="First Name" value={isEditingGeneral ? form.first_name : user.first_name} editing={isEditingGeneral} editable={canEdit('first_name')} onChange={(v) => setField('first_name', v)} />
+            <Field icon={User} label="Last Name" value={isEditingGeneral ? form.last_name : user.last_name} editing={isEditingGeneral} editable={canEdit('last_name')} onChange={(v) => setField('last_name', v)} />
             <Field icon={AtSign} label="Username" value={user.email} editable={false} />
             <Field icon={Mail} label="Email" value={user.email} editable={false} />
-            <Field icon={Phone} label="Mobile Number" value={isEditingGeneral ? form.mobile : user.mobile} editing={isEditingGeneral} onChange={(v) => setField('mobile', v)} />
-            <Field icon={PhoneCall} label="Alternate Mobile" value={isEditingGeneral ? form.emergency_mobile : user.emergency_mobile} editing={isEditingGeneral} onChange={(v) => setField('emergency_mobile', v)} />
+            <Field icon={Phone} label="Mobile Number" value={isEditingGeneral ? form.mobile : user.mobile} editing={isEditingGeneral} editable={canEdit('mobile')} onChange={(v) => setField('mobile', v)} />
+            <Field icon={PhoneCall} label="Alternate Mobile" value={isEditingGeneral ? form.emergency_mobile : user.emergency_mobile} editing={isEditingGeneral} editable={canEdit('emergency_mobile')} onChange={(v) => setField('emergency_mobile', v)} />
           </div>
         </SectionCard>
 
         {/* Section 2 — Professional Profile */}
         <SectionCard icon={Briefcase} title="Professional Profile" subtitle="Role, department and reporting details."
-          editKey="professional" editing={editing} onEdit={setEditing} onSave={() => saveSection('professional')} onCancel={cancelEdit} saving={saving}>
+          editKey="professional" editing={editing} onEdit={setEditing} onSave={() => saveSection('professional')} onCancel={cancelEdit} saving={saving}
+          editable={canEditSection('professional')} hrNote={canEditSection('professional') ? null : HR_NOTE}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field icon={Hash} label="Employee ID" value={user.employee_id} editable={false} />
             <Field icon={Shield} label="Role" value={user.role} editable={false} />
-            <Field icon={IdCard} label="Designation" value={isEditingPro ? form.designation : user.designation} editing={isEditingPro} onChange={(v) => setField('designation', v)} />
-            <Field icon={Briefcase} label="Department" value={isEditingPro ? form.department : user.department} editing={isEditingPro} onChange={(v) => setField('department', v)} />
+            <Field icon={IdCard} label="Designation" value={isEditingPro ? form.designation : user.designation} editing={isEditingPro} editable={canEdit('designation')} onChange={(v) => setField('designation', v)} />
+            <Field icon={Briefcase} label="Department" value={isEditingPro ? form.department : user.department} editing={isEditingPro} editable={canEdit('department')} onChange={(v) => setField('department', v)} />
             <Field icon={UsersIcon} label="Reporting Manager" value={reportingManagerName} editable={false} />
-            <Field icon={Calendar} label="Joining Date" kind="date" value={isEditingPro ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={isEditingPro} onChange={(v) => setField('joining_date', v)} />
+            <Field icon={Calendar} label="Joining Date" kind="date" value={isEditingPro ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={isEditingPro} editable={canEdit('joining_date')} onChange={(v) => setField('joining_date', v)} />
             <Field icon={MapPin} label="Office Location" value={user.office_location} editable={false} />
             <Field icon={Hash} label="Employee Code" value={user.employee_code} editable={false} />
           </div>
@@ -302,11 +329,13 @@ const ProfilePage = () => {
           </div>
         </SectionCard>
 
-        {/* Notification Settings (real per-user preferences via /notifications/preferences) */}
-        <NotificationSettings />
+        {/* Notification Settings — HR/Admin side only; not part of the employee screen. */}
+        {!employeeLogin && <NotificationSettings />}
 
-        {/* Section 6 — System Access (permissions, read-only) */}
-        {permissions && Object.keys(permissions).length > 0 && (
+        {/* Section 6 — System Access (permissions, read-only). Administrative permission
+            information: shown to authorised administrators only, never to an employee login,
+            who sees just their functional navigation. */}
+        {!employeeLogin && permissions && Object.keys(permissions).length > 0 && (
           <SectionCard icon={ShieldCheck} title="System Access" subtitle="Your module permissions (read-only)." editable={false}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {Object.entries(permissions).map(([mod, actions]) => (

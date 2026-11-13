@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Settings, User, Briefcase, Heart, MapPin, Mail, Lock, ChevronRight, ChevronDown,
   Pencil, Save, X, Loader2, Phone, PhoneCall, Calendar, Globe, Cake, AtSign,
-  Users as UsersIcon, IdCard, CheckSquare, CalendarClock,
+  Users as UsersIcon, IdCard, CheckSquare, CalendarClock, ShieldCheck,
 } from 'lucide-react';
-import { getMyProfile, updateMyProfile } from '../../services/settingsApi';
+import { getMyProfile, updateMyProfile, getMyEditableFields } from '../../services/settingsApi';
 import { getInitials } from '../tasks/taskDisplayUtils';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -107,6 +107,17 @@ const AccessRow = ({ icon: Icon, iconColor, title, subtitle, on }) => (
   </div>
 );
 
+// Shown under a section an employee cannot edit — says who owns the data and what to do.
+const HrManagedNote = ({ text }) => (
+  <p className="mt-4 flex items-center gap-1.5 text-[10px] font-semibold text-[var(--text-muted)] italic">
+    <ShieldCheck size={12} className="shrink-0" /> {text}
+  </p>
+);
+
+const GENERAL_FIELDS = ['first_name', 'last_name', 'mobile', 'emergency_mobile'];
+const PRO_FIELDS = ['designation', 'department', 'reporting_manager', 'joining_date'];
+const HR_NOTE = 'Managed by HR. Please contact your HR team to update these details.';
+
 const GeneralSection = ({ onNavigateSection }) => {
   const { user, refreshUser } = useAuth();
   const { showSuccess, showError } = useNotification();
@@ -120,6 +131,24 @@ const GeneralSection = ({ onNavigateSection }) => {
   const [editingPro, setEditingPro] = useState(false);
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [savingPro, setSavingPro] = useState(false);
+  // Fields the server lets this user edit. Starts empty (read-only) and stays empty if the
+  // check fails — an employee must never see an Edit button for HR-controlled data.
+  const [editable, setEditable] = useState(() => new Set());
+  // Employee login → no System Access (module permission) panel; hidden until known.
+  const [employeeLogin, setEmployeeLogin] = useState(true);
+
+  useEffect(() => {
+    getMyEditableFields()
+      .then(({ data }) => {
+        setEditable(new Set(data?.fields || []));
+        setEmployeeLogin(data?.employee_login !== false);
+      })
+      .catch(() => { setEditable(new Set()); setEmployeeLogin(true); });
+  }, []);
+  const canEdit = (k) => editable.has(k);
+  const pick = (keys) => Object.fromEntries(keys.filter(canEdit).map((k) => [k, form[k]]));
+  const canEditGeneral = GENERAL_FIELDS.some(canEdit);
+  const canEditPro = PRO_FIELDS.some(canEdit);
 
   const fetchProfile = useCallback(async () => {
     try {
@@ -139,13 +168,10 @@ const GeneralSection = ({ onNavigateSection }) => {
   const setField = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const saveGeneral = async () => {
-    if (!(form.first_name || '').trim()) return showError('First name is required');
+    if (canEdit('first_name') && !(form.first_name || '').trim()) return showError('First name is required');
     setSavingGeneral(true);
     try {
-      const res = await updateMyProfile({
-        first_name: form.first_name, last_name: form.last_name,
-        mobile: form.mobile, emergency_mobile: form.emergency_mobile,
-      });
+      const res = await updateMyProfile(pick(GENERAL_FIELDS));
       setProfile(res.data); setForm(res.data); setEditingGeneral(false);
       await refreshUser?.();
       showSuccess('Profile updated');
@@ -159,10 +185,7 @@ const GeneralSection = ({ onNavigateSection }) => {
   const savePro = async () => {
     setSavingPro(true);
     try {
-      const res = await updateMyProfile({
-        designation: form.designation, department: form.department,
-        reporting_manager: form.reporting_manager, joining_date: form.joining_date,
-      });
+      const res = await updateMyProfile(pick(PRO_FIELDS));
       setProfile(res.data); setForm(res.data); setEditingPro(false);
       await refreshUser?.();
       showSuccess('Professional profile updated');
@@ -258,7 +281,9 @@ const GeneralSection = ({ onNavigateSection }) => {
             </div>
           </div>
 
-          {/* System Access card */}
+          {/* System Access card — module permission info, for authorised administrators
+              only; an employee login is not shown permission configuration. */}
+          {!employeeLogin && (
           <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-5">
               <span className="w-8 h-8 rounded-full bg-[var(--accent-indigo)] flex items-center justify-center text-white shrink-0"><CheckSquare size={15} /></span>
@@ -270,34 +295,37 @@ const GeneralSection = ({ onNavigateSection }) => {
             </div>
             <p className="mt-4 text-[9px] font-medium text-[var(--text-muted)] italic">Module access is managed by your administrator.</p>
           </div>
+          )}
         </div>
 
         {/* ───────────── RIGHT column ───────────── */}
         <div className="lg:col-span-2 space-y-6">
-          {/* General Information (editable) */}
-          <SectionCard dotColor="var(--accent-orange)" icon={User} title="General Information" editable
+          {/* General Information — editable only for fields the server allows this user */}
+          <SectionCard dotColor="var(--accent-orange)" icon={User} title="General Information" editable={canEditGeneral}
             editing={editingGeneral} onEdit={() => setEditingGeneral(true)} onCancel={cancelGeneral} onSave={saveGeneral} saving={savingGeneral}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-              <Field label="First Name" icon={User} value={editingGeneral ? form.first_name : p.first_name} editing={editingGeneral} onChange={v => setField('first_name', v)} />
-              <Field label="Last Name" icon={User} value={editingGeneral ? form.last_name : p.last_name} editing={editingGeneral} onChange={v => setField('last_name', v)} />
-              <PhoneField label="Primary Mobile" icon={Phone} value={editingGeneral ? form.mobile : p.mobile} editing={editingGeneral} onChange={v => setField('mobile', v)} />
-              <PhoneField label="Emergency Mobile" icon={PhoneCall} value={editingGeneral ? form.emergency_mobile : p.emergency_mobile} editing={editingGeneral} onChange={v => setField('emergency_mobile', v)} />
+              <Field label="First Name" icon={User} value={editingGeneral ? form.first_name : p.first_name} editing={editingGeneral && canEdit('first_name')} onChange={v => setField('first_name', v)} />
+              <Field label="Last Name" icon={User} value={editingGeneral ? form.last_name : p.last_name} editing={editingGeneral && canEdit('last_name')} onChange={v => setField('last_name', v)} />
+              <PhoneField label="Primary Mobile" icon={Phone} value={editingGeneral ? form.mobile : p.mobile} editing={editingGeneral && canEdit('mobile')} onChange={v => setField('mobile', v)} />
+              <PhoneField label="Emergency Mobile" icon={PhoneCall} value={editingGeneral ? form.emergency_mobile : p.emergency_mobile} editing={editingGeneral && canEdit('emergency_mobile')} onChange={v => setField('emergency_mobile', v)} />
             </div>
+            {!canEditGeneral && <HrManagedNote text={HR_NOTE} />}
           </SectionCard>
 
-          {/* Professional Profile (editable) */}
-          <SectionCard dotColor="var(--accent-indigo)" icon={Briefcase} title="Professional Profile" editable
+          {/* Professional Profile — editable only for fields the server allows this user */}
+          <SectionCard dotColor="var(--accent-indigo)" icon={Briefcase} title="Professional Profile" editable={canEditPro}
             editing={editingPro} onEdit={() => setEditingPro(true)} onCancel={cancelPro} onSave={savePro} saving={savingPro}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-              <Field label="Designation" icon={IdCard} value={editingPro ? form.designation : p.designation} editing={editingPro} onChange={v => setField('designation', v)} />
-              {editingPro ? (
+              <Field label="Designation" icon={IdCard} value={editingPro ? form.designation : p.designation} editing={editingPro && canEdit('designation')} onChange={v => setField('designation', v)} />
+              {editingPro && canEdit('department') ? (
                 <Field label="Department" icon={Briefcase} value={form.department} editing options={DEPARTMENTS} placeholder="Select department..." onChange={v => setField('department', v)} />
               ) : (
                 <Field label="Department" icon={Briefcase} value={p.department} />
               )}
-              <Field label="Reporting Manager" icon={UsersIcon} value={editingPro ? form.reporting_manager : p.reporting_manager} editing={editingPro} onChange={v => setField('reporting_manager', v)} />
-              <Field label="Joining Date" icon={Calendar} type="date" value={editingPro ? (form.joining_date || '') : joiningValue} editing={editingPro} onChange={v => setField('joining_date', v)} placeholder="mm/dd/yyyy" />
+              <Field label="Reporting Manager" icon={UsersIcon} value={editingPro ? form.reporting_manager : p.reporting_manager} editing={editingPro && canEdit('reporting_manager')} onChange={v => setField('reporting_manager', v)} />
+              <Field label="Joining Date" icon={Calendar} type="date" value={editingPro ? (form.joining_date || '') : joiningValue} editing={editingPro && canEdit('joining_date')} onChange={v => setField('joining_date', v)} placeholder="mm/dd/yyyy" />
             </div>
+            {!canEditPro && <HrManagedNote text={HR_NOTE} />}
           </SectionCard>
 
           {/* Personal Details (read-only — managed by HR, no self-update endpoint) */}

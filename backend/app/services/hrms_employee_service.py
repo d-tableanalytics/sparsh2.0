@@ -478,30 +478,16 @@ async def _resolve_lookups(company_id: str, users: list, profiles: list = None) 
 # Row scoping
 # ─────────────────────────────────────────────────────────────
 async def _manager_scope(actor: dict, company_id: str) -> dict:
-    """Extra user-query clause restricting a MANAGER to their own corner of the directory.
+    """Extra user-query clause restricting a non-company-wide caller (a MANAGER above all) to
+    themselves and the people who report to them -- direct reports, or the whole downline
+    where the company approved hierarchy scope (see hrms_reporting_scope).
 
-    A hiring manager sees their direct reports plus anyone in their department. If they have
-    no HR profile (so no department), it degrades to direct reports only -- never to
-    "everyone", because a scoping gap must fail closed.
+    Department membership deliberately does NOT widen it any more: sharing a department is
+    not a reporting line, and it handed a manager every colleague in their department. A
+    manager with no reports sees only themselves -- a scoping gap fails closed.
     """
-    actor_id = str(actor.get("_id") or "")
-    clauses = [{"reporting_manager": actor_id}, {"_id": _oid(actor_id)}]
-
-    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one({"user_id": actor_id})
-    dept_id = (profile or {}).get("department_id")
-    if dept_id:
-        peers = await get_collection(COLL_EMPLOYEE_PROFILES).find(
-            {"company_id": str(company_id), "department_id": dept_id}, {"user_id": 1}
-        ).to_list(2000)
-        peer_oids = []
-        for p in peers:
-            try:
-                peer_oids.append(ObjectId(p["user_id"]))
-            except (InvalidId, TypeError, KeyError):
-                continue
-        if peer_oids:
-            clauses.append({"_id": {"$in": peer_oids}})
-    return {"$or": clauses}
+    from app.services.hrms_reporting_scope import visible_user_ids, to_oids
+    return {"_id": {"$in": to_oids(await visible_user_ids(actor, company_id))}}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -563,7 +549,10 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
                 alternatives.append({"_id": {"$in": hit_ids}})
         query["$and"] = [{"$or": alternatives}]
 
-    if hrms_role(actor) == HrmsRole.MANAGER:
+    from app.services.hrms_reporting_scope import sees_company_directory
+    if not sees_company_directory(actor):
+        # Company-wide visibility is for authorised HR/Admin (and payroll) roles only;
+        # everyone else sees their own reporting line.
         scope = await _manager_scope(actor, company_id)
         query.setdefault("$and", []).append(scope)
 
@@ -735,17 +724,15 @@ async def _profile_rows_visible(actor: dict, company_id: str, rows: list) -> lis
     ones to fix. A MANAGER sees only their own reports and their own department, and an
     EMPLOYEE sees none: fail closed, exactly as `_manager_scope` does.
     """
-    role = hrms_role(actor)
-    if role == HrmsRole.EMPLOYEE:
+    from app.services.hrms_reporting_scope import sees_company_directory, team_user_ids
+    if hrms_role(actor) == HrmsRole.EMPLOYEE:
         return []
-    if role != HrmsRole.MANAGER:
+    if sees_company_directory(actor):
         return rows
-    actor_id = str(actor.get("_id") or "")
-    own = await get_collection(COLL_EMPLOYEE_PROFILES).find_one({"user_id": actor_id})
-    dept = (own or {}).get("department_id")
-    return [r for r in rows
-            if r.get("reporting_manager_id") == actor_id
-            or (dept and r.get("department_id") == dept)]
+    # A profile reporting to the caller -- or, under approved hierarchy scope, to someone in
+    # the caller's downline. Never by department.
+    managers = {str(actor.get("_id") or "")} | set(await team_user_ids(actor, company_id))
+    return [r for r in rows if str(r.get("reporting_manager_id") or "") in managers]
 
 
 async def _orphaned_linked_profiles(company_id: str, matched_user_ids: set, *,
@@ -808,7 +795,8 @@ async def get_employee(actor: dict, user_id: str, *, company_id: str = None,
     if not is_self and not can(actor, Cap.EMPLOYEE_READ):
         raise HTTPException(status_code=403, detail="You may only view your own profile.")
 
-    if not is_self and hrms_role(actor) == HrmsRole.MANAGER:
+    from app.services.hrms_reporting_scope import sees_company_directory
+    if not is_self and not sees_company_directory(actor):
         # The collection the person was FOUND in: Sparsh Magic's own people are `staff`
         # (no company_id), a client's are `learners`. Checking learners only 404'd every
         # Sparsh manager opening their own direct report.
@@ -888,6 +876,17 @@ async def get_employee_by_code(actor: dict, company_id: str,
         return None
     if not can(actor, Cap.EMPLOYEE_READ):
         raise HTTPException(status_code=403, detail="You may only view your own profile.")
+    # Same reporting-line scope as the directory and get_employee: this path (Employee 360
+    # by code) used to skip it, so a manager could open anyone in the company by code.
+    from app.services.hrms_reporting_scope import sees_company_directory, team_user_ids
+    if not sees_company_directory(actor):
+        actor_id = str(actor.get("_id") or "")
+        team = set(await team_user_ids(actor, company_id))
+        uid = str(profile.get("user_id") or "")
+        mgr = str(profile.get("reporting_manager_id") or "")
+        if not (uid == actor_id or uid in team
+                or (not uid and mgr in team | {actor_id})):
+            raise HTTPException(status_code=404, detail="Employee not found.")
 
     user = None
     if profile.get("user_id"):
