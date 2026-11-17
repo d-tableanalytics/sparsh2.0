@@ -8,7 +8,7 @@ import { CAP } from '../access';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getDocumentChecklist, getDocumentTypes, uploadDocument, setDocumentStatus,
-  getDocumentUrl, getDocuments,
+  getDocumentUrl, getDocuments, updateDocumentType,
 } from '../../../services/hrmsApi';
 
 /**
@@ -67,6 +67,10 @@ const DocumentPanel = ({ ownerType, ownerId, ownerName }) => {
   const [uploading, setUploading] = useState(null);
   const [rejecting, setRejecting] = useState(null);
   const [remarks, setRemarks] = useState('');
+  // Mandatory / optional is set per DOCUMENT TYPE for the whole company (HR / Admin hold
+  // document.write), so flipping it here asks first: it changes every person's checklist.
+  const [requiring, setRequiring] = useState(null);   // { item, next }
+  const [requireBusy, setRequireBusy] = useState(false);
   const fileInput = useRef(null);
   const pendingType = useRef(null);
 
@@ -140,6 +144,21 @@ const DocumentPanel = ({ ownerType, ownerId, ownerName }) => {
     }
   };
 
+  const saveMandatory = async () => {
+    if (!requiring) return;
+    setRequireBusy(true);
+    try {
+      await updateDocumentType(requiring.item.type_id, { mandatory: requiring.next }, scope);
+      showSuccess(`${requiring.item.type_name} is now ${requiring.next ? 'mandatory' : 'optional'} for everyone in this company.`);
+      setRequiring(null);
+      load();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not change the requirement.');
+    } finally {
+      setRequireBusy(false);
+    }
+  };
+
   const open = async (docNo) => {
     try {
       const { data } = await getDocumentUrl(docNo, scope);
@@ -204,7 +223,19 @@ const DocumentPanel = ({ ownerType, ownerId, ownerName }) => {
                   <tr key={item.type_id} className="border-b border-[var(--border)] last:border-0">
                     <td className="px-4 py-2.5">
                       <span className="font-semibold text-[var(--text-main)]">{item.type_name}</span>
-                      {item.mandatory && (
+                      {canWrite ? (
+                        // HR / Admin: a switch. Click to make it mandatory or optional for the company.
+                        <button type="button" role="switch" aria-checked={!!item.mandatory}
+                          onClick={() => setRequiring({ item, next: !item.mandatory })}
+                          title={item.mandatory ? 'Mandatory for everyone — click to make optional'
+                            : 'Optional — click to make it mandatory for everyone'}
+                          className={`ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-bold uppercase tracking-wider transition-colors ${item.mandatory
+                            ? 'border-[var(--accent-red)] text-[var(--accent-red)] bg-[var(--accent-red-bg)]'
+                            : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
+                          <span className={`w-2 h-2 rounded-full ${item.mandatory ? 'bg-[var(--accent-red)]' : 'bg-[var(--border)]'}`} />
+                          {item.mandatory ? 'Mandatory' : 'Optional'}
+                        </button>
+                      ) : item.mandatory && (
                         <span className="ml-2 text-[10px] font-bold uppercase tracking-wider text-[var(--accent-red)]">
                           Required
                         </span>
@@ -299,6 +330,33 @@ const DocumentPanel = ({ ownerType, ownerId, ownerName }) => {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {requiring && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div role="alertdialog" aria-modal="true"
+            className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5 space-y-4">
+            <h2 className="text-[15px] font-bold text-[var(--text-main)]">
+              Make {requiring.item.type_name} {requiring.next ? 'mandatory' : 'optional'}?
+            </h2>
+            <p className="text-[12.5px] text-[var(--text-muted)]">
+              {requiring.next
+                ? 'Every employee in this company it applies to will need it: it shows as Required on their checklist and counts as outstanding until it is uploaded and verified.'
+                : "It stays on everyone's checklist but is no longer required, and stops counting as outstanding."}
+              {' '}This is a company-wide setting — it is not just for {ownerName || 'this person'}.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setRequiring(null)} disabled={requireBusy}
+                className="h-9 px-4 rounded-lg border border-[var(--border)] text-[13px] font-bold text-[var(--text-muted)] disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="button" onClick={saveMandatory} disabled={requireBusy}
+                className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold disabled:opacity-50">
+                {requireBusy ? 'Saving…' : requiring.next ? 'Yes, make it mandatory' : 'Yes, make it optional'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -3,6 +3,7 @@ import { Lock } from 'lucide-react';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
 import { SOURCE_LABEL, hoursLabel, payableLabel, shiftLabel, stamp } from './attendanceRules';
+import { PunchPlace } from './PunchLocation';
 import { getRegularisationEvidence } from '../../../services/hrmsApi';
 
 /**
@@ -158,6 +159,9 @@ export const DayDetailModal = ({ row: r, fieldDefs, onClose, scope }) => {
         { label: 'Early going', value: r.early_minutes ? `${r.early_minutes} min` : '—' },
         { label: 'Grace used', value: r.grace_applied_minutes ? `${r.grace_applied_minutes} min` : null },
         { label: 'Source', value: SOURCE_LABEL[r.source] || r.source },
+        // Self check-in only. Coordinates + accuracy + Map link reach HR / MD / Admin only.
+        { label: 'Check-in location', value: r.self_in ? <PunchPlace loc={r.self_in} detailed /> : null },
+        { label: 'Check-out location', value: r.self_out ? <PunchPlace loc={r.self_out} detailed /> : null },
         { label: 'Reference', value: r.source_reference },
         { label: 'Flexible timing', value: r.flexi_no },
         { label: 'Notes', value: r.notes },

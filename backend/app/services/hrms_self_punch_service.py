@@ -115,6 +115,16 @@ async def _own_code(actor: dict, company_id: str) -> str:
     from app.services.hrms_attendance_service import _own_employee_code
     code = await _own_employee_code(actor, company_id)
     if not code:
+        # HR / Admin check in like anyone else, but "ask HR" is no answer for HR: tell them
+        # where to add their own record instead.
+        from app.utils.hrms_access import can
+        from app.models.hrms import Cap
+        if can(actor, Cap.EMPLOYEE_WRITE):
+            raise HTTPException(
+                status_code=409,
+                detail="You have no employee record in this company yet, so there is nothing to "
+                       "check in to. Add yourself in Employee Directory (Add Employee, linked to "
+                       "your login), then check in here.")
         raise HTTPException(
             status_code=409,
             detail="You have no employee record here yet, so there is nothing to check in to. "
