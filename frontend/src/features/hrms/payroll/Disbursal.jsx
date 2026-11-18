@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Download, Landmark, RotateCcw, FileSpreadsheet, Scale,
+  AlertTriangle, Download, Landmark, RotateCcw, FileSpreadsheet, Scale, Upload,
 } from 'lucide-react';
 import { CAP } from '../access';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
@@ -14,7 +14,7 @@ import { FIELD, LABEL, TEXTAREA, money, day } from '../internal/internalKit';
 import { Btn, Chip, Modal } from '../internal/internalKit.jsx';
 import {
   PAYMENT_MODES, PAYMENT_STATUSES, paymentTone, errText, blobErrText, saveBlob, when,
-  parseBankResponse, useSubmit,
+  parseBankResponse, useSubmit, readBankResponseFile, BANK_RESPONSE_ACCEPT,
 } from './payrollKit';
 
 /**
@@ -328,6 +328,28 @@ const BatchModal = ({
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(null);
   const [paste, setPaste] = useState('');
+  // The bank's response FILE fills the same box a paste does, so it is reviewed (and can be
+  // corrected) before Import — nothing is imported just by picking a file.
+  const responseFile = useRef(null);
+  const [fileName, setFileName] = useState('');
+  const [fileError, setFileError] = useState('');
+  const onResponseFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';              // picking the same file again still fires
+    if (!file) return;
+    setFileError('');
+    try {
+      const text = await readBankResponseFile(file);
+      if (!parseBankResponse(text).length) {
+        setFileError(`${file.name} has no payment lines in the expected order (employee_code, status, utr, payment_date, failure_reason).`);
+        return;
+      }
+      setPaste(text);
+      setFileName(file.name);
+    } catch (err) {
+      setFileError(err?.message || 'That file could not be read.');
+    }
+  };
   const [importResult, setImportResult] = useState(null);
   const [importing, setImporting] = useState(false);
 
@@ -439,15 +461,31 @@ const BatchModal = ({
           {canPay && (
             <div className="rounded-xl border border-[var(--border)] p-3.5 space-y-2.5">
               <div>
-                <label className={LABEL} htmlFor="bank-paste">Paste bank response</label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className={LABEL} htmlFor="bank-paste">Upload or paste bank response</label>
+                  <input ref={responseFile} type="file" accept={BANK_RESPONSE_ACCEPT} className="hidden"
+                    onChange={onResponseFile} />
+                  <Btn onClick={() => responseFile.current?.click()} disabled={importing}>
+                    <Upload size={13} /> Upload bank response file
+                  </Btn>
+                </div>
+                {fileName && !fileError && (
+                  <p className="text-[11.5px] text-[var(--text-muted)]">
+                    Loaded <b>{fileName}</b> — check the lines below, then press Import.
+                  </p>
+                )}
+                {fileError && (
+                  <p className="text-[11.5px] font-semibold text-[var(--accent-red)]">{fileError}</p>
+                )}
                 <p className="text-[11.5px] text-[var(--text-muted)] mb-1.5">
+                  CSV, TXT or Excel file (first sheet; a header row is fine), or paste below.
                   One line per payment: <code>employee_code,status,utr,payment_date,failure_reason</code>.
                   Status is Processed, Failed, Rejected or Pending; dates as YYYY-MM-DD. A Processed
                   line needs its UTR and date, a Failed / Rejected line its reason.
                 </p>
                 <textarea id="bank-paste" rows={4} value={paste} className={`${TEXTAREA} font-mono text-[12px]`}
                   placeholder={'EMP001,Processed,UTR123456,2026-10-31,\nEMP002,Failed,,,Account closed'}
-                  onChange={(e) => setPaste(e.target.value)} />
+                  onChange={(e) => { setPaste(e.target.value); setFileName(''); }} />
               </div>
               <div className="flex justify-end">
                 <Btn tone="primary" disabled={importing || !paste.trim()} onClick={importPaste}>

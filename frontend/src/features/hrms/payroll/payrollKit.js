@@ -50,6 +50,16 @@ export const errText = (err, fallback) => {
   if (Array.isArray(detail) && detail.length) {
     return detail.map((d) => d?.msg || String(d)).join('; ');
   }
+  // No detail from the server: say WHICH kind of failure it was, so "could not load" is not
+  // the only clue. No response at all = the server was unreachable (down, restarting, or
+  // the network dropped); a 5xx without detail = the server hit an error (its log says what).
+  if (err && !err.response) {
+    return `${fallback} The server could not be reached — check the backend is running, then try again.`;
+  }
+  const code = err?.response?.status;
+  if (code >= 500) {
+    return `${fallback} The server hit an error (${code}) — often a brief database timeout; try again, and if it repeats check the backend log.`;
+  }
   return fallback;
 };
 
@@ -115,15 +125,69 @@ export const parseBankResponse = (text) => String(text || '')
   .map((line) => line.trim())
   .filter(Boolean)
   .map((line) => line.split(',').map((cell) => cell.trim().replace(/^"(.*)"$/, '$1').trim()))
-  .filter((cells) => cells[0] && cells[0].toLowerCase() !== 'employee_code')
+  // A header row ("employee_code", "Employee Code", "EMPLOYEE CODE") is skipped, so a bank
+  // file opened in Excel can be used as-is.
+  .filter((cells) => cells[0] && cells[0].toLowerCase().replace(/[\s_]/g, '') !== 'employeecode')
   .map(([code, status, utr, paymentDate, ...reason]) => ({
     employee_code: code,
     status: status || undefined,
     utr: utr || undefined,
     payment_date: paymentDate || undefined,
-    // A failure reason may itself contain commas — everything after the date is the reason.
-    failure_reason: reason.join(', ').trim() || undefined,
+    // A failure reason may itself contain commas — everything after the date is the reason
+    // (a CSV writer quotes such a field, so the quotes around the rejoined reason go too).
+    failure_reason: reason.join(', ').trim().replace(/^"(.*)"$/, '$1').trim() || undefined,
   }));
+
+// An Excel cell as text for the bank-response line: a real date cell as YYYY-MM-DD (the
+// format the import requires), whatever date format the bank's sheet happened to display.
+// Dates are decoded from the cell's serial number with SSF.parse_date_code, which is
+// timezone-free -- going through a JS Date shifted them a day in UTC+ timezones (IST).
+const excelCellText = (XLSX, cell) => {
+  if (!cell || cell.v == null) return '';
+  if (cell.t === 'n' && cell.z && XLSX.SSF.is_date(cell.z)) {
+    const d = XLSX.SSF.parse_date_code(cell.v);
+    if (d) {
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.y}-${p(d.m)}-${p(d.d)}`;
+    }
+  }
+  return String(cell.v).trim();
+};
+
+/**
+ * Read a bank-response FILE into the same text the paste box takes (one CSV line per
+ * payment), so an uploaded file goes through exactly the same parsing and review as a paste.
+ * CSV / TXT are read as text; Excel (.xlsx / .xls) uses its FIRST sheet, with dates written as
+ * YYYY-MM-DD. xlsx is loaded only when an Excel file is actually picked.
+ */
+export const BANK_RESPONSE_ACCEPT = '.csv,.txt,.xlsx,.xls';
+export const readBankResponseFile = async (file) => {
+  if (!file) return '';
+  if (file.size > 5 * 1024 * 1024) throw new Error('That file is larger than 5 MB.');
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+    const XLSX = await import('xlsx');
+    // cellNF keeps each cell's number format, which is how a date cell is recognised.
+    const book = XLSX.read(await file.arrayBuffer(), { type: 'array', cellNF: true });
+    const sheet = book.Sheets[book.SheetNames[0]];
+    if (!sheet || !sheet['!ref']) throw new Error('That workbook has no data on its first sheet.');
+    // Cells are joined unquoted: only the LAST field (the reason) may hold commas, and the
+    // parser already treats everything after the date as the reason.
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+    const lines = [];
+    for (let r = range.s.r; r <= range.e.r; r += 1) {
+      const cells = [];
+      for (let c = range.s.c; c <= range.e.c; c += 1) {
+        cells.push(excelCellText(XLSX, sheet[XLSX.utils.encode_cell({ r, c })]));
+      }
+      const line = cells.join(',').replace(/,+$/, '');
+      if (line.trim()) lines.push(line);
+    }
+    return lines.join('\n');
+  }
+  if (name.endsWith('.csv') || name.endsWith('.txt') || !name.includes('.')) return file.text();
+  throw new Error('Upload a .csv, .txt or Excel (.xlsx / .xls) file.');
+};
 
 // ── Salary component master (FRD §24) ──
 export const COMPONENT_TYPES = [
