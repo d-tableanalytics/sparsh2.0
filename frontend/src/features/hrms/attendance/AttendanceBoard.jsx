@@ -26,6 +26,7 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
 import { ShiftsTab, WeeklyOffEditor } from './ShiftMaster';
 import HolidayCalendar from './HolidayCalendar';
 import { DayDetailModal, CustomFieldInputs } from './AttendanceDayDetail';
+import PunchLocation, { PunchPlace } from './PunchLocation';
 import {
   ATTENDANCE_SOURCES, SOURCE_LABEL, describeWeeklyOff, errorDetail, hoursLabel, payableLabel,
   shiftLabel, stamp,
@@ -560,6 +561,9 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
         )}
       </div>
     ) },
+    // Where the employee checked in / out from (self check-in only). HR / MD / Admin also
+    // get a Map link to the exact point; others see the office and distance.
+    { key: 'where', label: 'Check-in / out location', render: (r) => <PunchLocation row={r} /> },
     { key: 'hours', label: 'Worked / Payable', render: (r) => (
       <span className="text-[var(--text-main)]">
         {hoursLabel(r.worked_minutes)}
@@ -628,6 +632,8 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
         { label: 'Payable', value: payableLabel(r) },
         { label: 'Late / Early', value: lateEarly(r) },
         { label: 'Shift', value: shiftLabel(r) },
+        { label: 'Check-in location', value: r.self_in ? <PunchPlace loc={r.self_in} /> : null },
+        { label: 'Check-out location', value: r.self_out ? <PunchPlace loc={r.self_out} /> : null },
       ]} />
       {viewBtn(r)}
     </div>

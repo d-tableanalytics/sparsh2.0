@@ -561,7 +561,32 @@ async def list_attendance(actor: dict, company_id: str, *, employee_code: Option
     query = await _scope_query(actor, company_id, query)
     rows = await get_collection(COLL_ATTENDANCE).find(query).sort(
         "work_date", -1).to_list(min(limit, MAX_ATTENDANCE_LIST_PAGE))
-    return await _with_identity(company_id, [_out(r) for r in rows])
+    rows = [_out(r) for r in rows]
+    _shape_punch_locations(actor, rows)
+    return await _with_identity(company_id, rows)
+
+
+def _shape_punch_locations(actor: dict, rows: list) -> None:
+    """Where each self check-in / check-out was made (hrms_self_punch_service keeps it on the
+    day record as `self_in` / `self_out`).
+
+    Everyone who can see the row sees the office it was matched to and the distance from it.
+    The exact coordinates and GPS accuracy -- the raw position of a person's device -- are for
+    HR / MD / Admin only, who review where attendance was marked from; a manager or the
+    employee gets the office name, never the pin.
+    """
+    exact = sees_all_people(actor)
+    for r in rows:
+        for key in ("self_in", "self_out"):
+            loc = r.get(key)
+            if not isinstance(loc, dict):
+                continue
+            shaped = {"office": loc.get("office"), "distance_m": loc.get("distance_m"),
+                      "at": loc.get("at")}
+            if exact:
+                shaped.update({"lat": loc.get("lat"), "lng": loc.get("lng"),
+                               "accuracy_m": loc.get("accuracy_m")})
+            r[key] = shaped
 
 
 async def _with_identity(company_id: str, rows: list) -> list:
