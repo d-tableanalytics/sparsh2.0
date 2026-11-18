@@ -50,6 +50,16 @@ export const errText = (err, fallback) => {
   if (Array.isArray(detail) && detail.length) {
     return detail.map((d) => d?.msg || String(d)).join('; ');
   }
+  // No detail from the server: say WHICH kind of failure it was, so "could not load" is not
+  // the only clue. No response at all = the server was unreachable (down, restarting, or
+  // the network dropped); a 5xx without detail = the server hit an error (its log says what).
+  if (err && !err.response) {
+    return `${fallback} The server could not be reached — check the backend is running, then try again.`;
+  }
+  const code = err?.response?.status;
+  if (code >= 500) {
+    return `${fallback} The server hit an error (${code}) — often a brief database timeout; try again, and if it repeats check the backend log.`;
+  }
   return fallback;
 };
 
