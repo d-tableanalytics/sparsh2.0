@@ -33,7 +33,7 @@ from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_ACTIVITY_TRACKER, COLL_REMINDER_RULES,
     RECURRENCE_ONE_TIME, RECURRENCE_DAILY, RECURRENCE_MONTHLY, RECURRENCE_WEEKLY, RECURRENCE_PERIODICALLY,
-    SCOPE_HOD, STATUS_CANCELLED, STATUS_RESCHEDULED, STATUS_SCHEDULED, TPMS_EVENT_KIND,
+    SCOPE_HOD, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_RESCHEDULED, STATUS_SCHEDULED, TPMS_EVENT_KIND,
     DEFAULT_REMIND_TIME, OFFSET_UNIT_SECONDS,
     CHANNEL_EMAIL, CHANNEL_WHATSAPP, CHANNEL_BOTH,
     erp_status_for, is_once_per_month, period_from_date,
@@ -621,6 +621,11 @@ async def update_schedule(user: dict, event_id: str, payload: dict) -> dict:
         updates["reminders"] = [{**r, "sent": False} for r in (doc.get("reminders") or [])]
     elif payload.get("status"):
         requested = str(payload["status"])
+        if requested == STATUS_COMPLETED and doc.get("tpms_status") != STATUS_COMPLETED:
+            # Editing the status to Completed must not bypass the calendar form validation
+            # that Mark Done / Confirm Complete enforce.
+            from app.services.tpms_form_link_service import assert_forms_submitted
+            await assert_forms_submitted(doc, "marked Completed")
         updates["tpms_status"] = requested
         updates["status"] = erp_status_for(requested)
         # Re-activating an activity clears the escalation ladder (spec §5: esc_stage resets on

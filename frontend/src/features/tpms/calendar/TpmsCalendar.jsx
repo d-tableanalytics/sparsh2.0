@@ -694,6 +694,24 @@ const TpmsCalendar = () => {
                   </div>
                 )}
 
+                {/* Calendar form validation: a form activity can be marked Done / Completed only
+                    once every assigned respondent has submitted every one of its forms. */}
+                {e.forms_total > 0 && (() => {
+                  const allIn = e.forms_submitted >= e.forms_total;
+                  return (
+                    <div className="mt-2 rounded-lg px-2.5 py-1.5 text-[11px] font-bold"
+                      title={!allIn && e.forms_pending?.length ? `Pending: ${e.forms_pending.join(', ')}` : undefined}
+                      style={allIn
+                        ? { color: 'var(--accent-green)', background: 'var(--accent-green-bg)' }
+                        : { color: 'var(--accent-orange)', background: 'var(--accent-yellow-bg)' }}>
+                      📝 Forms: {e.forms_submitted}/{e.forms_total} submitted
+                      {allIn
+                        ? ' — ready to mark Done'
+                        : ` — can be marked Done once all are in${e.forms_pending?.length ? ` (pending: ${e.forms_pending.slice(0, 3).join(', ')}${e.forms_pending.length > 3 ? '…' : ''})` : ''}`}
+                    </div>
+                  );
+                })()}
+
                 {e.upload_required && <UploadBlock eventId={e.id} canUpload={canAct} />}
 
                 <div className="flex flex-wrap gap-2 mt-3">

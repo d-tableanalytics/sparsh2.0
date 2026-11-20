@@ -176,6 +176,9 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
+            # The company the user is logged in to, by name — client screens show it (e.g. the
+            # TPMS Review Report heading) so a user always sees which company they are in.
+            current_user["company_name"] = (company or {}).get("name") or None
             # TPMS is opt-in: absent flag means OFF, so an un-migrated company stays dark.
             current_user["tpms_enabled"] = bool(company.get("tpms_enabled", False)) if company else False
             # Task Management (Delegation) is opt-in too: absent flag means OFF. Gates the

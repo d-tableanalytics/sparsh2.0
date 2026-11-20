@@ -746,6 +746,24 @@ async def list_tpms_schedules(
     counts = await upload_counts([ev["id"] for ev in events if ev["upload_required"]])
     for ev in events:
         ev["upload_count"] = counts.get(ev["id"], 0)
+
+    # Calendar form validation: for a form activity, how many of its form links are submitted
+    # (one per form × assigned respondent) — the day view shows it next to Mark Done, which is
+    # refused until every one is in. Resolved once per company + month + activity.
+    from app.models.forms import ACTIVITY_FORM_MAP
+    from app.services.tpms_form_link_service import form_submission_status
+    form_cache: dict = {}
+    for ev in events:
+        if ev["activity"] not in ACTIVITY_FORM_MAP:
+            continue
+        key = (ev["company_id"], ev["date"][:7], ev["activity"])
+        if key not in form_cache:
+            form_cache[key] = await form_submission_status(
+                {"activity": ev["activity"], "company_id": ev["company_id"], "start": ev["date"]})
+        fs = form_cache[key]
+        ev["forms_total"] = fs["total"]
+        ev["forms_submitted"] = fs["submitted"]
+        ev["forms_pending"] = [p["name"] for p in fs["pending"]][:10]
     events.sort(key=lambda x: (x["date"], x["time"]))
     return {"events": events}
 

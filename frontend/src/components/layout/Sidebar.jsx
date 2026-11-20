@@ -90,6 +90,7 @@ import { HIRING_WORKSPACE, ONBOARDING_WORKSPACE, workspacePaths }
   from '../../features/hrms/common/hrmsWorkspaces';
 import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
 import { canOpenNotificationTemplates } from '../../utils/notifyTemplateAccess';
+import { getMyFormAssignments } from '../../services/tpmsFormsApi';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -126,6 +127,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
   // the page itself will refuse.
   const canManageLeadership = canManageLeadershipCycle(user);
+  // My Forms badge: how many emailed form links this client user still has to fill. Fetched
+  // once per login (and when the user switches); a failure just leaves the badge off.
+  const [myFormsPending, setMyFormsPending] = useState(0);
+  useEffect(() => {
+    if (!isTpmsClientUser || !user?._id) { setMyFormsPending(0); return undefined; }
+    let alive = true;
+    getMyFormAssignments()
+      .then(({ data }) => { if (alive) setMyFormsPending(Number(data?.pending) || 0); })
+      .catch(() => { if (alive) setMyFormsPending(0); });
+    return () => { alive = false; };
+  }, [isTpmsClientUser, user?._id]);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -139,6 +151,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+    // Every form link emailed to this user — the way back in when the email is missed. The
+    // badge is the number still waiting to be filled.
+    { name: 'My Forms', path: '/tpms/smops/my-forms', icon: ClipboardCheck,
+      badge: myFormsPending || null },
     // Leadership Score — every client-side user gets the result view; the page itself
     // scopes what they see (HR: all leaders, manager: direct reports, leader: their own).
     //
@@ -712,6 +728,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
                           >
                             <sub.icon size={15} />
                             <span className="tracking-tight font-medium">{sub.name}</span>
+                            {/* Optional count (e.g. My Forms: forms still to fill). Items
+                                without a badge render exactly as before. */}
+                            {sub.badge ? (
+                              <span className="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--accent-red)] text-white text-[10px] font-black flex items-center justify-center">
+                                {sub.badge}
+                              </span>
+                            ) : null}
                           </NavLink>
                         );
                       })}

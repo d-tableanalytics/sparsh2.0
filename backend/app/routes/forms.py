@@ -46,7 +46,7 @@ from app.models.forms import (
     QUESTION_COLLECTION,
     definition_items,
 )
-from app.models.tpms import period_parts, period_tokens, TPMS_EVENT_KIND
+from app.models.tpms import period_display, period_parts, period_tokens, TPMS_EVENT_KIND
 
 async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
     """Router-wide guard — see the twin in routes/tpms.py. The TPMS forms module is part of
@@ -1343,6 +1343,51 @@ async def list_form_assignments(
     # look as though it had produced nothing at all.
     out.sort(key=lambda r: _sort_ts(r["last_sent"]), reverse=True)
     return {"assignments": out}
+
+
+@router.get("/my-assignments")
+async def my_form_assignments(current_user: dict = Depends(get_current_user)):
+    """Every form link sent to the logged-in user — the "My Forms" page.
+
+    The links are otherwise only in the email; when that email is missed or lost, the person
+    has no way back to their form. This returns the SAME links (the in-app `/f/<token>` path
+    and the full URL), newest first, with each link's status. Only the caller's own rows are
+    ever returned — a link is addressed to one respondent.
+    """
+    from app.services.tpms_form_link_service import (
+        ASSIGNMENT_COLLECTION, STATUS_EXPIRED, STATUS_SUBMITTED, configured_base_url,
+        effective_status, link_on,
+    )
+    uid = str(current_user.get("_id") or "")
+    if not uid:
+        return {"forms": [], "pending": 0}
+    docs = await get_collection(ASSIGNMENT_COLLECTION).find({"respondent_id": uid}).to_list(500)
+    now = datetime.now(timezone.utc)
+    base = await configured_base_url()
+    out = []
+    for d in docs:
+        status = effective_status(d, now)
+        token = d.get("token")
+        out.append({
+            "id": str(d["_id"]),
+            "form_type": d.get("form_type"),
+            "form_title": d.get("form_title") or (FORM_DEFINITIONS.get(d.get("form_type") or "") or {}).get("title")
+            or d.get("form_type"),
+            "activity": d.get("activity"),
+            "period": d.get("period"),
+            "period_label": period_display(d.get("period")) if d.get("period") else "",
+            "company_name": d.get("company_name"),
+            "status": status,
+            "can_open": bool(token) and status not in (STATUS_SUBMITTED, STATUS_EXPIRED),
+            "path": f"/f/{token}" if token else None,
+            "link": link_on(base, token) if token else d.get("link"),
+            "sent_at": _as_utc(_last_sent(d) or d.get("created_at")),
+            "submitted_at": _as_utc(d.get("submitted_at")),
+        })
+    # Newest month first, then the most recently sent within it.
+    out.sort(key=lambda r: (str(r["period"] or ""), _sort_ts(r["sent_at"])), reverse=True)
+    pending = sum(1 for r in out if r["can_open"])
+    return {"forms": out, "pending": pending}
 
 
 @router.post("/assignments/{assignment_id}/resend")

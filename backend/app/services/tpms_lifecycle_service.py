@@ -103,6 +103,10 @@ async def mark_learner_done(user: dict, event_id: str) -> dict:
     if str(doc.get("company_id") or "") != str(user.get("company_id") or ""):
         raise HTTPException(status_code=403, detail="Not your company activity.")
     _assert_actionable(doc)
+    # Calendar form validation: a form activity is Done only once every assigned respondent
+    # has submitted every one of its forms.
+    from app.services.tpms_form_link_service import assert_forms_submitted
+    await assert_forms_submitted(doc, "marked Done")
 
     await get_collection(coll).update_one({"_id": doc["_id"]}, {"$set": {
         "learner_done": True,
@@ -130,6 +134,9 @@ async def confirm_completion(user: dict, event_id: str) -> dict:
     if not _is_staff_side(user):
         raise HTTPException(status_code=403, detail="Only internal staff can confirm completion.")
     doc, coll = await find_tpms_event(event_id)
+    # Same form check as Mark Done — staff cannot complete a form activity with forms missing.
+    from app.services.tpms_form_link_service import assert_forms_submitted
+    await assert_forms_submitted(doc, "marked Completed")
 
     completed_at = datetime.utcnow()
     await get_collection(coll).update_one({"_id": doc["_id"]}, {"$set": {

@@ -154,6 +154,9 @@ class UserResponse(UserBase):
     # stripped it, so Client Hiring was invisible to the very people it is for. The
     # regression guard in test_phase1_foundation.py asserts all of them stay declared.
     governance_role: Optional[str] = None
+    # Name of the company the user belongs to (set by GET /users/me from the company record).
+    # Declared here for the same reason as the flags above: undeclared, it would be stripped.
+    company_name: Optional[str] = None
 
     class Config:
         populate_by_name = True

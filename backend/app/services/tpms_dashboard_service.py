@@ -1498,8 +1498,9 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
             answered = sum(len(e["ratings"]) for e in employees)
             all_entries.append({
                 "respondent_id": rid, "name": rname, "company": company, "period": per,
+                "company_id": str(d.get("company_id") or ""),
                 "period_label": period_display(per) if per else "",
-                "matrix": True,
+                "matrix": True, "submitted": True,
                 "questions": [{"id": c["code"], "text": c.get("title") or c["code"]} for c in criteria],
                 "employees": employees,
                 "avg": round(grand / answered, 2) if answered else "",
@@ -1529,6 +1530,84 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
         wanted = set(period_tokens(scope["period"])) | {str(scope["period"])}
         entries = [e for e in all_entries if str(e.get("period") or "") in wanted]
 
+    # ── Who was ASSIGNED but not rated (export completeness) ──
+    # An HOD's assignment is not stored as a member list: the form resolves it live as their
+    # direct reports, through the form's level gate (routes/forms._reporting_team +
+    # eligible_by_level). The same rule is used here, so "assigned" means exactly the people
+    # the form asked this HOD to rate. Only the month in view is resolved (one lookup per HOD),
+    # and the result is ADDED alongside the existing data: `employees`, the cards, totals and
+    # the trend are unchanged, so a pending person never drags an average down to 0.
+    pending_respondents: List[dict] = []
+    if not is_yesno:
+        from app.models.forms import eligible_by_level
+        from app.routes.forms import _reporting_team, _user_display_name
+        team_cache: Dict[tuple, List[dict]] = {}
+
+        async def assigned_team(cid: str, hod: str) -> List[dict]:
+            key = (cid, hod)
+            if key not in team_cache:
+                pool = eligible_by_level(await _reporting_team(cid, hod), ft) if cid and hod else []
+                team_cache[key] = [{
+                    "id": str(u["_id"]), "name": _user_display_name(u),
+                    "employee_id": u.get("employee_id") or u.get("emp_id") or u.get("emp_code") or "",
+                } for u in pool if str(u["_id"]) != hod]
+            return team_cache[key]
+
+        n_criteria = len(criteria)
+        for e in entries:
+            team = await assigned_team(e.get("company_id") or "", e["respondent_id"])
+            by_id = {m["id"]: m for m in team}
+            rated = set()
+            for emp in e.get("employees") or []:
+                rated.add(emp["id"])
+                emp["employee_id"] = (by_id.get(emp["id"]) or {}).get("employee_id") or ""
+                emp["status"] = ("Completed" if n_criteria and len(emp.get("ratings") or {}) >= n_criteria
+                                 else "Partial")
+            e["pending_members"] = sorted((m for m in team if m["id"] not in rated),
+                                          key=lambda m: m["name"].lower())
+            e["assigned_count"] = len(rated | set(by_id))
+            e["rated_count"] = len(rated)
+
+        # HODs who were sent the form for the month but have not submitted it at all.
+        from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION
+        aq: dict = {"form_type": ft}
+        if allowed is not None:
+            aq["company_id"] = {"$in": allowed}
+        if scope.get("period"):
+            from app.models.tpms import period_tokens
+            aq["period"] = {"$in": list(set(period_tokens(scope["period"])) | {str(scope["period"])})}
+        assigns = await get_collection(ASSIGNMENT_COLLECTION).find(
+            aq, {"company_id": 1, "company_name": 1, "respondent_id": 1, "respondent_name": 1,
+                 "period": 1}).to_list(5000)
+        submitted_keys = {(e.get("company_id") or "", e["respondent_id"], e["period"])
+                          for e in all_entries}
+        seen = set()
+        for a in assigns:
+            cid = str(a.get("company_id") or "")
+            rid = str(a.get("respondent_id") or "")
+            per = str(a.get("period") or "")
+            key = (cid, rid, per)
+            if not rid or key in submitted_keys or key in seen:
+                continue
+            # Same visibility rules as the submissions above.
+            if role in CLIENT_ROLES and not sees_all and rid != str(user.get("_id")):
+                continue
+            if scope.get("respondent_id") and rid != str(scope["respondent_id"]):
+                continue
+            seen.add(key)
+            team = await assigned_team(cid, rid)
+            pending_respondents.append({
+                "respondent_id": rid,
+                "name": a.get("respondent_name") or (people.get(rid) or {}).get("name") or rid,
+                "company": a.get("company_name") or (companies.get(cid) or {}).get("name") or "",
+                "company_id": cid, "period": per,
+                "period_label": period_display(per) if per else "",
+                "matrix": True, "submitted": False, "employees": [],
+                "pending_members": sorted(team, key=lambda m: m["name"].lower()),
+                "assigned_count": len(team), "rated_count": 0,
+            })
+        pending_respondents.sort(key=lambda e: (e["period"], e["name"].lower()), reverse=True)
+
     # Totals describe what the table shows, so they come from the filtered entries.
     # Matrix: Σratings ÷ count → avg rating. Checklist: yes ÷ answered → yes %.
     respondents = {e["respondent_id"]: e["name"] for e in entries}
@@ -1554,6 +1633,8 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
             "yes_pct": _pct(total_yes, total_answers) if total_answers else "",
         },
         "entries": entries,
+        # Assigned the form for the month, not submitted yet — export only (see above).
+        "pending_respondents": pending_respondents,
         "trend": {
             "periods": [{"id": p, "name": period_display(p) if p else ""} for p in ordered],
             "people": sorted(trend_people.values(), key=lambda t: t["name"].lower()),

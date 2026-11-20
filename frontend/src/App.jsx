@@ -66,6 +66,7 @@ import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import FormLinks from './features/tpms/admin/pages/FormLinks';
 import ReviewReport from './features/tpms/common/ReviewReport';
+import MyForms from './features/tpms/common/MyForms';
 // TPMS ▸ Leadership Score (additive — no existing TPMS route is changed).
 import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
 import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
@@ -355,6 +356,8 @@ const AppRoutes = () => {
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+        {/* Every form link emailed to the signed-in user, so a missed email never strands them. */}
+        <Route path="my-forms"      element={<MyForms />} />
         {/* Leadership Score for the client/SMOPS side. The report is self-scoping: HR sees
             every enrolled leader, a manager their direct reports, a leader only their own. */}
         <Route path="leadership"           element={<LeadershipReport />} />
