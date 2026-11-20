@@ -217,7 +217,7 @@ const ClientDashboard = () => {
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0"><LayoutDashboard size={20} /></div>
             <div className="min-w-0">
-              <h1 className="text-[16px] sm:text-[18px] font-black tracking-tight truncate">Client Dashboard</h1>
+              <h1 className="text-[16px] sm:text-[18px] font-black tracking-tight truncate">Dashboard</h1>
               <p className="text-[11px] font-semibold text-white/80 truncate">
                 {co?.name || user?.company_name || 'Your Company'} · {user?.full_name || user?.email}
               </p>
