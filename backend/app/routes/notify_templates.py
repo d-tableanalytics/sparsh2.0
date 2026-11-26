@@ -125,10 +125,14 @@ async def list_modules(current_user: dict = Depends(get_current_user)):
 
     def _with_builtin(mod: dict, trigger: dict) -> dict:
         fallback = mod.get("send_rule") == SEND_BUILTIN_FALLBACK
+        builtin = {ch: fallback and f"{trigger['slug']}_{ch}" in DEFAULT_TEMPLATES for ch in CHANNELS}
         return {
             **trigger,
-            "builtin": {ch: fallback and f"{trigger['slug']}_{ch}" in DEFAULT_TEMPLATES
-                        for ch in CHANNELS},
+            "builtin": builtin,
+            # The built-in wording itself, so "Create" opens the editor pre-filled with it.
+            "builtin_template": {ch: {"subject": DEFAULT_TEMPLATES[f"{trigger['slug']}_{ch}"].get("subject", ""),
+                                      "body": DEFAULT_TEMPLATES[f"{trigger['slug']}_{ch}"].get("body", "")}
+                                 for ch in CHANNELS if builtin[ch]},
         }
 
     return {

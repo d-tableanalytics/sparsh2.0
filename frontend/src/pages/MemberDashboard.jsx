@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import MasterDepartmentSelect from '../components/common/MasterDepartmentSelect';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import {  AnimatePresence , motion } from 'framer-motion';
@@ -438,8 +439,10 @@ const MemberDashboard = () => {
                 <select value={editData.session_type || ''} onChange={e => setEditData({ ...editData, session_type: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
                   <option value="Core">Core</option><option value="Support">Support</option><option value="Both">Both</option><option value="None">None</option>
                 </select></div>
-              <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
-                <select value={editData.department || ''} onChange={e => setEditData({ ...editData, department: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
+              {/* Formerly "Department": saved as before (TPMS reads it to tell HODs/MDs apart);
+                  picking one also fills the Designation field. Same as the Add Member form. */}
+              <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Designation</label>
+                <select value={editData.department || ''} onChange={e => setEditData({ ...editData, department: e.target.value, designation: e.target.value || editData.designation })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
                   <option value="HOD">HOD</option><option value="Manager">Manager</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
                 </select></div>
               {/* Leadership Score eligibility — L4 and above. Explicit, never derived
@@ -457,6 +460,13 @@ const MemberDashboard = () => {
                   <option value="">— None —</option>
                   {managers.map(mgr => <option key={mgr._id} value={mgr._id}>{mgr.full_name}{mgr.designation ? ` · ${mgr.designation}` : ''}</option>)}
                 </select></div>
+              {/* The master department (HRMS ▸ Departments), with "Add Department" — same as Add Member. */}
+              <MasterDepartmentSelect
+                companyId={member?.company_id}
+                value={editData.department_id || ''}
+                onChange={(id) => setEditData((d) => ({ ...d, department_id: id }))}
+                labelClassName="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest"
+                selectClassName="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" />
             </div>
             <div className="flex gap-3 mt-6">
               <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2"><Save size={14} /> Save</button>
@@ -501,7 +511,7 @@ const MemberDashboard = () => {
                 <InfoCard icon={Phone} label="Mobile" value={member.mobile} color="green" />
                 <InfoCard icon={Shield} label="Role" value={member.role} color="indigo" />
                 <InfoCard icon={Briefcase} label="Designation" value={member.designation} color="yellow" />
-                <InfoCard icon={Building2} label="Department" value={member.department} color="green" />
+                <InfoCard icon={Building2} label="Department" value={member.department_name || '—'} color="green" />
                 <InfoCard icon={BookOpen} label="Session Type" value={member.session_type} color="orange" />
                 <InfoCard icon={Shield} label="Level" value={member.level} color="indigo" />
                 <InfoCard icon={User} label="Reporting Manager" value={(member.reporting_manager && (managers.find(mg => mg._id === member.reporting_manager || mg.email === member.reporting_manager)?.full_name || member.reporting_manager)) || '—'} color="indigo" />

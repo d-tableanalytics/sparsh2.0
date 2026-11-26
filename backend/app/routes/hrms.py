@@ -259,6 +259,15 @@ def _require_any(user: dict, *capabilities: Cap) -> None:
         raise HTTPException(status_code=403, detail=permission_denied_message(*capabilities))
 
 
+def _require_superadmin_master(user: dict, label: str) -> None:
+    """Departments and Designations are maintained by the Sparsh Super Admin only. Everyone
+    else still READS them (every dropdown does), and a member form's "+ Add Department" goes
+    through its own endpoint in routes/company.py -- only this management screen is closed."""
+    if (user or {}).get("role") != "superadmin":
+        raise HTTPException(status_code=403,
+                            detail=f"Only the Super Admin can add, rename or remove {label}.")
+
+
 def _company(user: dict, requested: str = None) -> str:
     """The company this request operates on, with tenant pinning applied.
 
@@ -415,6 +424,7 @@ async def create_department(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DEPARTMENT_WRITE)
+    _require_superadmin_master(current_user, "departments")
     return await masters.create_master(
         "department", _company(current_user, company_id), body.model_dump(), current_user)
 
@@ -427,6 +437,7 @@ async def update_department(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DEPARTMENT_WRITE)
+    _require_superadmin_master(current_user, "departments")
     return await masters.update_master(
         "department", _company(current_user, company_id), department_id,
         body.model_dump(exclude_unset=True), current_user)
@@ -439,6 +450,7 @@ async def delete_department(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DEPARTMENT_WRITE)
+    _require_superadmin_master(current_user, "departments")
     return await masters.delete_master(
         "department", _company(current_user, company_id), department_id, current_user)
 
@@ -464,6 +476,7 @@ async def create_designation(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DESIGNATION_WRITE)
+    _require_superadmin_master(current_user, "designations")
     return await masters.create_master(
         "designation", _company(current_user, company_id), body.model_dump(), current_user)
 
@@ -476,6 +489,7 @@ async def update_designation(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DESIGNATION_WRITE)
+    _require_superadmin_master(current_user, "designations")
     return await masters.update_master(
         "designation", _company(current_user, company_id), designation_id,
         body.model_dump(exclude_unset=True), current_user)
@@ -488,6 +502,7 @@ async def delete_designation(
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.DESIGNATION_WRITE)
+    _require_superadmin_master(current_user, "designations")
     return await masters.delete_master(
         "designation", _company(current_user, company_id), designation_id, current_user)
 

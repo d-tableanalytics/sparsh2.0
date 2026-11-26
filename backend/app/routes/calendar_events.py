@@ -929,6 +929,12 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     if not existing:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # Inter-Departmental Feedback activities complete ONLY through a stored submission
+    # (client requirement §4C) — no manual status change, reschedule or edit here.
+    from app.services.idf_service import is_locked_event, LOCK_MESSAGE
+    if is_locked_event(existing):
+        raise HTTPException(status_code=403, detail=LOCK_MESSAGE)
+
     # Block anyone without Task & Delegation access from editing a task (or turning an event
     # into a task) via this shared endpoint.
     is_task_update = existing.get("type") == "task" or updates.get("type") == "task"
@@ -1600,6 +1606,11 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks,
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
 
+    # Inter-Departmental Feedback activities stay until submission (or HR cancels the cycle).
+    from app.services.idf_service import is_locked_event, LOCK_MESSAGE
+    if is_locked_event(existing):
+        raise HTTPException(status_code=403, detail=LOCK_MESSAGE)
+
     is_admin = current_user.get("role") == "superadmin"
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
@@ -1954,6 +1965,11 @@ Structure your response clearly. Use markdown.
 async def complete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
+
+    # An Inter-Departmental Feedback activity cannot be marked Completed by hand (§4C).
+    from app.services.idf_service import is_locked_event, LOCK_MESSAGE
+    if is_locked_event(event):
+        raise HTTPException(status_code=403, detail=LOCK_MESSAGE)
 
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")

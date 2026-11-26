@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests, forms, tpms, leadership, irm, meta_templates, notify_templates, hrms, hrms_public, local_files
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests, forms, tpms, leadership, irm, meta_templates, notify_templates, hrms, hrms_public, local_files, idf
 from app.assistant.router import router as assistant_router
 
 from app.services.reminder_scheduler import start_reminder_scheduler
@@ -66,6 +66,8 @@ app.include_router(orm_sheet.router, prefix="/api")
 app.include_router(orm_requests.router, prefix="/api")
 app.include_router(forms.router, prefix="/api")
 app.include_router(tpms.router, prefix="/api")
+# Inter-Department Feedback — feedback content readable by the company MD only.
+app.include_router(idf.router, prefix="/api")
 app.include_router(hrms.router, prefix="/api")
 # PUBLIC (unauthenticated) HRMS routes - candidate-facing. See routes/hrms_public.py for
 # the rules that apply to anything mounted here.

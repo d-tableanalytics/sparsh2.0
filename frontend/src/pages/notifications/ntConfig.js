@@ -6,7 +6,7 @@
    ───────────────────────────────────────────────────────────── */
 import {
   ListChecks, Repeat, CalendarDays, PlayCircle, Hourglass, ListTodo, UserCog,
-  LayoutGrid, Award, Briefcase, Mail, MessageCircle,
+  LayoutGrid, Award, Briefcase, Mail, MessageCircle, MessagesSquare,
 } from 'lucide-react';
 
 export const inputCls =
@@ -30,7 +30,7 @@ export const TONE = {
 /* The order modules appear in, everywhere. */
 export const MODULE_ORDER = [
   'delegation', 'checklist', 'event', 'session', 'upcoming', 'todo', 'system',
-  'tpms', 'leadership', 'hrms',
+  'tpms', 'leadership', 'hrms', 'idf',
 ];
 
 export const MODULE_ICON = {
@@ -44,6 +44,7 @@ export const MODULE_ICON = {
   tpms: LayoutGrid,
   leadership: Award,
   hrms: Briefcase,
+  idf: MessagesSquare,
 };
 
 /* TPMS keys a notification by (activity × side × event). The event is the trigger; activity
@@ -118,6 +119,14 @@ const SAMPLE = {
   meeting_url: 'https://meet.google.com/abc-defg-hij', batch_name: 'Batch A', quarter: 'Q3',
   email: 'priya@example.com', password: 'Temp@1234', login_url: 'https://sparsh.app/login',
   new_role: 'Manager', role: 'Manager', company_name: 'Acme Industries',
+  // Inter-Departmental Feedback
+  cycle_month: 'November 2026', department: 'HR', score: '72%', band: 'Amber',
+  form_links: '<ul><li><b>HR</b> (from Sales) — <a href="#">Open feedback form</a></li></ul>',
+  results_meeting_date: '01 Dec 2026', changes: '<ul><li>Leave queries answered within 24 hours — by <b>15 Jan 2027</b></li></ul>',
+  note: 'Thank you for the honest feedback.', raised_by: 'Rahul Verma', about_department: 'Operations',
+  suggestion: 'Share a dispatch freeze 3 days ahead', rule: 'monthly for the first two cycles, then quarterly',
+  relationships: '<ul><li>HR → Sales (40%)</li></ul>', action_type: 'Strengthen', target_date: '10 Dec 2026',
+  status: 'Open', review_cadence: 'fortnightly', review_date: '08 Dec 2026',
 };
 
 export const sampleFor = (field) => (field in SAMPLE

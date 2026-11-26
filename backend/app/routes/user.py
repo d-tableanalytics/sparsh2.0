@@ -100,6 +100,11 @@ class UserEditRequest(BaseModel):
     session_type: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    # The MASTER department (HRMS ▸ Departments) — validated against the user's own company.
+    # "" clears it. See app/utils/master_department.py.
+    department_id: Optional[str] = None
+    # The MASTER designation (HRMS ▸ Designations); "" clears it. Its name goes to `designation`.
+    designation_id: Optional[str] = None
     reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
     level: Optional[str] = None
     leadership_level: Optional[str] = None  # "L4" | "L5" | "L6" | "L7"; gates Leadership Score enrolment
@@ -343,7 +348,24 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
     update_data = updates.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    
+
+    # ─── Master department: must belong to THIS user's company (staff → the internal one) ───
+    if "department_id" in update_data or "designation_id" in update_data:
+        from app.utils.master_department import resolve_department, resolve_designation
+        user_company = str(user.get("company_id") or "")
+        if not user_company:
+            from app.utils.hrms_access import internal_company_id
+            user_company = await internal_company_id() or ""
+        if "department_id" in update_data:
+            update_data["department_id"], update_data["department_name"] = await resolve_department(
+                user_company, update_data.get("department_id"))
+        if "designation_id" in update_data:
+            desig_id, desig_name = await resolve_designation(
+                user_company, update_data.get("designation_id"))
+            update_data["designation_id"] = desig_id
+            if desig_name:
+                update_data["designation"] = desig_name
+
     # ─── Recalculate full_name if first_name/last_name changed ───
     if "first_name" in update_data or "last_name" in update_data:
         # Use existing values if not being updated

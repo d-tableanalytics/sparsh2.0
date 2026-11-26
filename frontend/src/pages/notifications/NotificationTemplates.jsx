@@ -366,6 +366,7 @@ const NotificationTemplates = ({ view: requestedView = 'email' }) => {
           <TemplateEditor key={`${editor.slug}-${editor.channel}-${viewingCompany || 'default'}-${editorRow?._id || 'new'}`}
             module={editorModule} trigger={editorTrigger} channel={editor.channel}
             row={editorRow} scopeLabel={scopeLabel} approved={editorApproved}
+            seedFrom={editorRow ? undefined : editorTrigger?.builtin_template?.[editor.channel]}
             scheduleText={scheduleText(editorTrigger)}
             canSave={editorRow ? !!access.can_update : !!access.can_create}
             canDelete={!!access.can_delete} canTest={admin}

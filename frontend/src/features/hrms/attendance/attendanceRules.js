@@ -47,14 +47,19 @@ export const hoursLabel = (minutes) => {
 };
 
 /** A timestamp with its time of day, for audit lines (`day()` drops the time). */
+// The server stores UTC but sends it without a zone ("2026-11-19T05:04:00"), which the
+// browser would read as local time — so a zone-less date-time is taken as UTC, and the
+// result is always shown in India time (IST), whatever the viewer's machine is set to.
 export const stamp = (value) => {
   if (!value) return '—';
-  const parsed = new Date(value);
+  const s = String(value);
+  const parsed = new Date(/T/.test(s) && !/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? `${s}Z` : s);
   return Number.isNaN(parsed.getTime())
     ? '—'
-    : parsed.toLocaleString(undefined, {
+    : `${parsed.toLocaleString('en-IN', {
       day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
-    });
+      hour12: true, timeZone: 'Asia/Kolkata',
+    })} IST`;
 };
 
 /**

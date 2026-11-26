@@ -353,6 +353,9 @@ DEFAULT_TEMPLATES = {
         "body": OTP_HTML_TEMPLATE
     }
 }
+# Inter-Departmental Feedback's built-in emails (editable under Notification Templates).
+from app.services.idf_templates import IDF_DEFAULT_TEMPLATES  # noqa: E402
+DEFAULT_TEMPLATES.update(IDF_DEFAULT_TEMPLATES)
 
 async def fetch_template(slug: str, company_id: str = None):
     """Resolve the notification template that should be used for `slug`.

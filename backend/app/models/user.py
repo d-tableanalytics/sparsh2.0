@@ -39,7 +39,12 @@ class UserBase(BaseModel):
     # Business specific fields
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
-    department: Optional[str] = "Other" # HOD, Manager, Implementor, EA, MD, HR, Other
+    department: Optional[str] = "Other" # HOD, Manager, Implementor, EA, MD, HR, Other (role-like; TPMS reads it)
+    # The person's MASTER department (HRMS ▸ Departments) — see app/utils/master_department.py.
+    department_id: Optional[str] = None
+    department_name: Optional[str] = None
+    # The MASTER designation (HRMS ▸ Designations); its name is mirrored into `designation`.
+    designation_id: Optional[str] = None
     # Leadership Score eligibility. "Applicable from L4 (Asst Managers) and above."
     #
     # Explicit, and deliberately NOT derived from `designation`: that field is free text,

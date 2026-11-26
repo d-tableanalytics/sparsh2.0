@@ -3,12 +3,12 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {  AnimatePresence , motion } from 'framer-motion';
 import {
   Archive,
-  LayoutDashboard, Users, Briefcase, CheckSquare,
+  LayoutDashboard, Users, CheckSquare,
   Settings, Building2,
   MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, KeyRound, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
-  Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
+  Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert, Megaphone,
   // ── Post-review Gap 7 ── the §27/§29 governance screens. GitPullRequest for the
   // approval inbox (a change awaiting a decision is exactly that shape) and History for
   // the audit; SlidersHorizontal is reused for the policy designer, as it already means
@@ -45,6 +45,8 @@ import {
   Radar,
   // ── Phase 1 FRD ── Employee Master Setup (dropdown lists + configurable fields).
   ListTree,
+  // Inter-Department Feedback.
+  ShieldCheck, MessagesSquare,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -91,6 +93,7 @@ import { HIRING_WORKSPACE, ONBOARDING_WORKSPACE, workspacePaths }
 import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
 import { canOpenNotificationTemplates } from '../../utils/notifyTemplateAccess';
 import { getMyFormAssignments } from '../../services/tpmsFormsApi';
+import { getIdfAccess } from '../../services/idfApi';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -138,6 +141,38 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       .catch(() => { if (alive) setMyFormsPending(0); });
     return () => { alive = false; };
   }, [isTpmsClientUser, user?._id]);
+
+  // Inter-Department Feedback: which entries this user gets (HOD forms / MD feedback / setup).
+  // The server decides; until it answers — or if it fails — nothing is shown.
+  const NO_IDF = { is_hod: false, is_md: false, can_manage: false, has_actions: false, is_coordinator: false };
+  const [idfAccess, setIdfAccess] = useState(NO_IDF);
+  useEffect(() => {
+    if (!user?._id) return undefined;
+    let alive = true;
+    getIdfAccess()
+      .then(({ data }) => { if (alive) setIdfAccess({ ...NO_IDF, ...(data || {}) }); })
+      .catch(() => { if (alive) setIdfAccess(NO_IDF); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?._id]);
+  // Role-based entries (client document §11): HOD → forms; MD → dashboard;
+  // HR/Admin → cycles, links, setup; action owners → My Actions; everyone → Raise an Issue.
+  const idfSubmodules = [
+    ...(idfAccess.is_hod ? [{ name: 'My Feedback Forms', path: '/idf/forms', icon: ClipboardCheck }] : []),
+    // Dashboard: the company MD, and the Sparsh Super Admin / Admin (any company, picked on the page).
+    ...(idfAccess.is_md || idfAccess.is_coordinator ? [{ name: 'Dashboard', path: '/idf/dashboard', icon: ShieldCheck }] : []),
+    // Action plans: the MD and the TPS Coordinator see all; an action owner sees their own.
+    ...(idfAccess.is_md || idfAccess.is_coordinator
+      ? [{ name: 'Action Plans', path: '/idf/actions', icon: ListChecks }]
+      : idfAccess.has_actions ? [{ name: 'My Actions', path: '/idf/actions', icon: ListChecks }] : []),
+    // The open feedback channel: anyone raises an issue; HR / Admin / MD see them all.
+    ...(idfAccess.can_raise ? [{ name: idfAccess.can_manage ? 'Raised Issues' : 'Raise an Issue', path: '/idf/issues', icon: Megaphone }] : []),
+    ...(idfAccess.can_manage ? [
+      { name: 'Feedback Cycles', path: '/idf/cycles', icon: CalendarDays },
+      { name: 'Form Links', path: '/idf/form-links', icon: Link2 },
+      { name: 'Setup', path: '/idf/setup', icon: SlidersHorizontal },
+    ] : []),
+  ];
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -413,8 +448,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     ] : []),
     ...(isHrmsAdminUser ? [
       { section: 'Setup' },
-      { name: 'Departments', path: '/hrms/departments', icon: Building2 },
-      { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+      // No Departments / Designations entries: they are universal, maintained from the
+      // user forms (Staff Management / company members) with their inline "Add" buttons.
       { name: 'Employee Master Setup', path: '/hrms/employee-master-setup', icon: ListTree },
       // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
       // Companies section. A second master here is the duplication this replaced.
@@ -464,6 +499,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Scores', path: '/irm', icon: Gauge, end: true },
         { name: 'Setup', path: '/irm/setup', icon: SlidersHorizontal, roles: ['superadmin', 'admin'] },
       ],
+    },
+    {
+      // Inter-Department Feedback — shown only to a department HOD, the company MD, or whoever
+      // may set it up (MD / Sparsh Admin). Feedback content itself is served to the MD only.
+      name: 'Inter-Department Feedback', path: '/idf', icon: MessagesSquare,
+      roles: [], visibleFn: () => idfSubmodules.length > 0,
+      submodules: idfSubmodules,
     },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },

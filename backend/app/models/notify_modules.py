@@ -37,6 +37,7 @@ MODULE_SESSION = "session"
 MODULE_UPCOMING = "upcoming"
 MODULE_TODO = "todo"
 MODULE_SYSTEM = "system"
+MODULE_IDF = "idf"
 
 SEND_TEMPLATE_ONLY = "template_only"
 SEND_BUILTIN_FALLBACK = "builtin_fallback"
@@ -58,6 +59,10 @@ SCHEDULE_DAILY_SWEEP = "daily_sweep"
 # ─────────────────────────────────────────────────────────────
 CHECKLIST_OCCURRENCE_CREATED = "checklist_occurrence_created"
 CHECKLIST_SERIES_COMPLETED = "checklist_series_completed"
+
+
+# Inter-Departmental Feedback placeholders, per trigger (kept with its built-in templates).
+from app.services.idf_templates import IDF_TRIGGER_VARIABLES as _IDF_VARS  # noqa: E402
 
 
 def _trigger(slug: str, label: str, description: str, channels=BOTH, group: str = "",
@@ -338,6 +343,59 @@ NOTIFY_MODULES: Dict[str, dict] = {
             _trigger("company_registration", "Company Registered",
                      "A new client company is onboarded. Goes to its admin with their login.",
                      channels=EMAIL_ONLY),
+        ],
+    },
+    # Inter-Departmental Feedback. Every email has a built-in default (services/idf_templates.py)
+    # that is used until an admin saves their own version here; switching a row Inactive stops it.
+    MODULE_IDF: {
+        "key": MODULE_IDF,
+        "label": "Inter-Departmental Feedback",
+        "description": "Feedback forms, reminders, the MD's report, \"you said, we did\", raised issues and action plans.",
+        "send_rule": SEND_BUILTIN_FALLBACK,
+        "variables": sorted({v for vs in _IDF_VARS.values() for v in vs}),
+        "triggers": [
+            _trigger("idf_cycle_started", "Feedback Requested",
+                     "A feedback cycle starts (or departments are added). Goes to each rating HOD with their personal form links.",
+                     channels=EMAIL_ONLY, group="Feedback forms", variables=_IDF_VARS["idf_cycle_started"]),
+            _trigger("idf_due_soon", "Due Soon Reminder",
+                     "The deadline is near (days set in IDF Setup). Goes to HODs who have not submitted.",
+                     channels=EMAIL_ONLY, group="Feedback forms", variables=_IDF_VARS["idf_due_soon"]),
+            _trigger("idf_overdue", "Overdue Reminder",
+                     "Daily after the deadline until submitted. Goes to HODs who have not submitted.",
+                     channels=EMAIL_ONLY, group="Feedback forms", variables=_IDF_VARS["idf_overdue"]),
+            _trigger("idf_link_resend", "Form Link Resent",
+                     "HR presses Resend on Form Links. Goes to that HOD.",
+                     channels=EMAIL_ONLY, group="Feedback forms", variables=_IDF_VARS["idf_link_resend"]),
+            _trigger("idf_md_report", "Final Report to MD",
+                     "The last feedback is in. Goes to the MD only, with the Excel and PDF reports attached.",
+                     channels=EMAIL_ONLY, group="Results", variables=_IDF_VARS["idf_md_report"]),
+            _trigger("idf_you_said_request", "You Said, We Did — Request",
+                     "Results are out. Goes to each rated department's HOD to answer within 15 days.",
+                     channels=EMAIL_ONLY, group="Results", variables=_IDF_VARS["idf_you_said_request"]),
+            _trigger("idf_you_said_shared", "You Said, We Did — Answer",
+                     "An HOD sends their answer. Goes to the HODs of the departments that rated them.",
+                     channels=EMAIL_ONLY, group="Results", variables=_IDF_VARS["idf_you_said_shared"]),
+            _trigger("idf_you_said_overdue", "You Said, We Did — Overdue",
+                     "The 15 days have passed with no answer. Goes to the HOD, every 3 days.",
+                     channels=EMAIL_ONLY, group="Results", variables=_IDF_VARS["idf_you_said_overdue"]),
+            _trigger("idf_issue_raised", "Issue Raised",
+                     "Someone raises an inter-department issue. Goes to HR.",
+                     channels=EMAIL_ONLY, group="Open feedback channel", variables=_IDF_VARS["idf_issue_raised"]),
+            _trigger("idf_issue_resolved", "Issue Resolved",
+                     "HR marks an issue Resolved. Goes to the person who raised it.",
+                     channels=EMAIL_ONLY, group="Open feedback channel", variables=_IDF_VARS["idf_issue_resolved"]),
+            _trigger("idf_cycle_due", "Next Cycle Due",
+                     "The next cycle is due (monthly ×2, then quarterly). Goes to HR.",
+                     channels=EMAIL_ONLY, group="Cycle rhythm", variables=_IDF_VARS["idf_cycle_due"]),
+            _trigger("idf_pulse_due", "Pulse Re-score Due",
+                     "30 days after a cycle with relationships below 60%. Goes to HR.",
+                     channels=EMAIL_ONLY, group="Cycle rhythm", variables=_IDF_VARS["idf_pulse_due"]),
+            _trigger("idf_action_overdue", "Action Overdue",
+                     "An improvement action passes its target date. Goes to its owner, at most every 3 days.",
+                     channels=EMAIL_ONLY, group="Action plans", variables=_IDF_VARS["idf_action_overdue"]),
+            _trigger("idf_action_review_due", "Action Review Due",
+                     "An action's weekly / fortnightly review comes round. Goes to its owner.",
+                     channels=EMAIL_ONLY, group="Action plans", variables=_IDF_VARS["idf_action_review_due"]),
         ],
     },
 }
