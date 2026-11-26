@@ -164,7 +164,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // Action plans: the MD and the TPS Coordinator see all; an action owner sees their own.
     ...(idfAccess.is_md || idfAccess.is_coordinator
       ? [{ name: 'Action Plans', path: '/idf/actions', icon: ListChecks }]
-      : idfAccess.has_actions ? [{ name: 'My Actions', path: '/idf/actions', icon: ListChecks }] : []),
+      : idfAccess.has_actions || idfAccess.is_hod ? [{ name: 'My Actions', path: '/idf/actions', icon: ListChecks }] : []),
     // The open feedback channel: anyone raises an issue; HR / Admin / MD see them all.
     ...(idfAccess.can_raise ? [{ name: idfAccess.can_manage ? 'Raised Issues' : 'Raise an Issue', path: '/idf/issues', icon: Megaphone }] : []),
     ...(idfAccess.can_manage ? [
