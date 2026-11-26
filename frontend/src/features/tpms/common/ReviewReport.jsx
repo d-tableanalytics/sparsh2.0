@@ -359,7 +359,15 @@ const ChartTooltip = ({ active, payload, label }) => {
 };
 
 const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedback responses across teams' }) => {
-  useAuth(); // ensure an authenticated context; server scopes results by role.
+  const { user } = useAuth(); // server scopes results by role.
+  // Client-side logins (Client Admin / Client User) see the company they are logged in to as
+  // the heading, e.g. "People to Process"; the page name moves to the subtitle. Staff keep
+  // the page's own title. Falls back to the normal title if the name is not known.
+  const isClientUser = ['clientadmin', 'clientuser'].includes((user?.role || '').toLowerCase());
+  const heading = isClientUser && user?.company_name ? user.company_name : title;
+  const subheading = isClientUser && user?.company_name
+    ? 'Review Report · Detailed evaluation and feedback'
+    : subtitle;
 
   const periods = useMemo(() => monthOptions(), []);
 
@@ -497,6 +505,32 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
 
   const overallPct = isYesno ? agg.yesPct : agg.scorePct;
 
+  // HODs who were sent the form for the month but have not submitted it — same Respondent +
+  // Search filters as `rows`. Shared by the Assigned card and the export so they agree.
+  const notSubmittedRows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return (data?.pending_respondents || []).filter((e) => {
+      if (respondentId && String(e.respondent_id) !== String(respondentId)) return false;
+      if (!needle) return true;
+      return `${e.name} ${e.company} ${(e.pending_members || []).map((m) => m.name).join(' ')}`
+        .toLowerCase().includes(needle);
+    });
+  }, [data, respondentId, q]);
+
+  // People the HODs in view were assigned to rate (their direct reports, by the form's level
+  // rule — resolved server-side), split into rated and still pending. Counts HODs who have not
+  // submitted too, so it shows the full workload, not just what has come in.
+  const assigned = useMemo(() => {
+    let total = 0;
+    let rated = 0;
+    [...rows, ...notSubmittedRows].forEach((r) => {
+      const done = (r.employees || []).length;
+      rated += done;
+      total += done + (r.pending_members || []).length;
+    });
+    return { total, rated, pending: total - rated };
+  }, [rows, notSubmittedRows]);
+
   const kpis = [
     {
       value: agg.responses, label: 'Responses',
@@ -511,6 +545,12 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     isYesno
       ? { value: agg.yesPct == null ? '—' : `${agg.yesPct}%`, label: 'Yes Rate', sub: `${agg.yes} of ${agg.answered} answered`, tone: 'yellow', icon: Star }
       : { value: nOrDash(agg.avgRating), label: 'Avg Rating', sub: `Out of ${SCALE_MAX}`, tone: 'yellow', icon: Star },
+    // Rating forms only: the Yes/No checklist has no people to rate.
+    ...(isYesno ? [] : [{
+      value: assigned.total, label: 'Assigned People',
+      sub: `${assigned.rated} rated · ${assigned.pending} pending`,
+      tone: assigned.pending > 0 ? 'red' : 'green', icon: UserCheck,
+    }]),
   ];
 
   // ── Grand Total ───────────────────────────────────────────────
@@ -561,20 +601,55 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     };
     const lastHeader = isYesno ? 'Yes %' : 'Avg Rating';
     const countHeader = isYesno ? 'Answered' : 'Rated';
-    const header = ['Respondent', 'Company', 'Period', countHeader, 'Score %', lastHeader];
-    const body = rows.map((r) => {
-      const last = isYesno
-        ? (r.total ? Math.round(((r.yes || 0) / r.total) * 100) : (r.score_pct ?? ''))
-        : (r.avg ?? '');
-      const count = isYesno ? (r.total ?? 0) : (r.employees || []).length;
-      return [r.name ?? '', r.company ?? '', r.period_label || r.period || '', count, r.score_pct ?? '', last];
-    });
-    // Trailing Grand Total row — the same figures the on-screen summary shows.
-    const totalRow = isYesno
-      ? ['GRAND TOTAL', `${agg.respondents} respondents`, `${agg.responses} responses`,
-        agg.answered, agg.yesPct ?? '', agg.yesPct ?? '']
-      : ['GRAND TOTAL', `${agg.respondents} respondents`, `${agg.responses} responses`,
-        agg.employees, agg.scorePct ?? '', agg.avgRating ?? ''];
+    let header;
+    let body;
+    let totalRow;
+    if (isYesno) {
+      header = ['Respondent', 'Company', 'Period', countHeader, 'Score %', lastHeader];
+      body = rows.map((r) => {
+        const last = r.total ? Math.round(((r.yes || 0) / r.total) * 100) : (r.score_pct ?? '');
+        return [r.name ?? '', r.company ?? '', r.period_label || r.period || '', r.total ?? 0, r.score_pct ?? '', last];
+      });
+      // Trailing Grand Total row — the same figures the on-screen summary shows.
+      totalRow = ['GRAND TOTAL', `${agg.respondents} respondents`, `${agg.responses} responses`,
+        agg.answered, agg.yesPct ?? '', agg.yesPct ?? ''];
+    } else {
+      // Rating forms: ONE ROW PER PERSON the HOD was assigned to rate, not one per HOD — so an
+      // HOD with 8 people who rated 5 shows all 8: the 5 with their rating (Completed, or
+      // Partial if not every question was rated) and the 3 unrated at 0 (Pending). HODs who
+      // were sent the form but never submitted it come from `pending_respondents`, every
+      // assigned person Pending. Respondent + search filters apply to them as they do above.
+      const notSubmitted = notSubmittedRows;
+      header = ['Respondent (HOD)', 'Company', 'Period', 'Form status', 'Person', 'Employee ID',
+        'Avg Rating (of 5)', 'Score %', 'Status'];
+      const counts = { assigned: 0, completed: 0, partial: 0, pending: 0 };
+      body = [];
+      [...rows, ...notSubmitted].forEach((r) => {
+        const head = [r.name ?? '', r.company ?? '', r.period_label || r.period || '',
+          r.submitted === false ? 'Not submitted' : 'Submitted'];
+        (r.employees || []).forEach((emp) => {
+          const n = Object.keys(emp.ratings || {}).length;
+          const status = emp.status || 'Completed';
+          counts[status === 'Partial' ? 'partial' : 'completed'] += 1;
+          body.push([...head, emp.name ?? '', emp.employee_id ?? '',
+            n ? Math.round(((emp.grand_total || 0) / n) * 100) / 100 : 0, emp.score_pct ?? 0, status]);
+        });
+        (r.pending_members || []).forEach((m) => {
+          counts.pending += 1;
+          body.push([...head, m.name ?? '', m.employee_id ?? '', 0, 0, 'Pending']);
+        });
+        // An HOD who did not submit AND has nobody mapped under them would otherwise leave no
+        // row at all — and vanish from the export. One row keeps them visible.
+        if (r.submitted === false && !(r.pending_members || []).length) {
+          body.push([...head, '(no team mapped)', '', 0, 0, 'Pending']);
+        }
+      });
+      counts.assigned = counts.completed + counts.partial + counts.pending;
+      totalRow = ['GRAND TOTAL', `${agg.respondents + notSubmitted.length} respondents`, '',
+        `${rows.length} submitted · ${notSubmitted.length} not submitted`,
+        `${counts.assigned} assigned`, '', agg.avgRating ?? '', agg.scorePct ?? '',
+        `${counts.completed} completed · ${counts.partial} partial · ${counts.pending} pending`];
+    }
     const csv = [header, ...body, totalRow].map((row) => row.map(cell).join(',')).join('\r\n');
     const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -586,12 +661,12 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [rows, isYesno, source, agg]);
+  }, [rows, isYesno, source, agg, notSubmittedRows]);
 
   return (
     <div className="space-y-5">
       {/* Hero */}
-      <DashboardHero icon={ClipboardCheck} title={title} subtitle={subtitle}>
+      <DashboardHero icon={ClipboardCheck} title={heading} subtitle={subheading}>
         <div className="flex items-center gap-1 bg-white/20 p-1 rounded-lg">
           {[{ k: 'cards', label: 'Cards', icon: LayoutGrid }, { k: 'trend', label: 'Monthly Trend', icon: LineIcon }].map((v) => (
             <button key={v.k} onClick={() => setView(v.k)}
@@ -605,7 +680,7 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
       </DashboardHero>
 
       {/* KPI tiles */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className={`grid gap-3 ${kpis.length === 4 ? 'grid-cols-2 xl:grid-cols-4' : 'grid-cols-3'}`}>
         {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
       </div>
 

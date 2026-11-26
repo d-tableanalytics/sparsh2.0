@@ -9,7 +9,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getDepartments, createDepartment, updateDepartment, deleteDepartment,
   getDesignations, createDesignation, updateDesignation, deleteDesignation,
-  getMasterSuggestions,
+  getMasterSuggestions, getEmployees,
 } from '../../../services/hrmsApi';
 
 /**
@@ -72,6 +72,30 @@ const MasterManager = ({ kind = 'department' }) => {
   const [showSuggestions, setShowSuggestions] = useState(false);
 
   const canWrite = can(kind === 'department' ? CAP.DEPARTMENT_WRITE : CAP.DESIGNATION_WRITE);
+
+  // Department Head (HOD) — the master record every module reads (e.g. Inter-Department
+  // Feedback: the HOD fills the department's forms). Only people with a login can be HOD.
+  const [heads, setHeads] = useState([]);
+  useEffect(() => {
+    if (kind !== 'department' || !companyId) { setHeads([]); return; }
+    getEmployees({ ...scope, limit: 500 })
+      .then(({ data }) => setHeads((data?.employees || [])
+        .filter((e) => e.user_id)
+        .map((e) => ({ id: String(e.user_id), name: e.name }))
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''))))
+      .catch(() => setHeads([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, kind]);
+
+  const setHead = async (row, userId) => {
+    try {
+      await cfg.update(row.id, { head_user_id: userId || '' }, scope);
+      showSuccess(userId ? `HOD set for ${row.name}` : `HOD removed from ${row.name}`);
+      await load();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not set the HOD.');
+    }
+  };
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -253,6 +277,11 @@ const MasterManager = ({ kind = 'department' }) => {
                     Seniority
                   </th>
                 )}
+                {kind === 'department' && (
+                  <th className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest w-64">
+                    Head (HOD)
+                  </th>
+                )}
                 <th className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest w-28">Status</th>
                 {canWrite && <th className="px-4 py-2.5 w-28" />}
               </tr>
@@ -275,6 +304,22 @@ const MasterManager = ({ kind = 'department' }) => {
                       <span className="font-semibold text-[var(--text-main)]">{r.name}</span>
                     )}
                   </td>
+                  {kind === 'department' && (
+                    <td className="px-4 py-2.5">
+                      <select
+                        value={r.head_user_id || ''} disabled={!canWrite}
+                        onChange={(e) => setHead(r, e.target.value)}
+                        aria-label={`Head (HOD) of ${r.name}`}
+                        className="h-8 px-2 w-full rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12.5px] text-[var(--text-main)] disabled:opacity-60"
+                      >
+                        <option value="">— No HOD set —</option>
+                        {r.head_user_id && !heads.some((h) => h.id === String(r.head_user_id)) && (
+                          <option value={r.head_user_id}>Current HOD (not in directory)</option>
+                        )}
+                        {heads.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                      </select>
+                    </td>
+                  )}
                   {kind === 'designation' && (
                     <td className="px-4 py-2.5">
                       <select

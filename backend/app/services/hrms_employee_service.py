@@ -59,7 +59,7 @@ _USER_PROJECTION = {
     "first_name": 1, "last_name": 1, "full_name": 1, "email": 1, "mobile": 1,
     "role": 1, "governance_role": 1, "company_id": 1, "is_active": 1,
     "reporting_manager": 1, "designation": 1, "department": 1, "joining_date": 1,
-    "emergency_mobile": 1,
+    "emergency_mobile": 1, "department_id": 1, "designation_id": 1,
 }
 
 
@@ -934,6 +934,13 @@ async def create_profile(actor: dict, company_id: str, payload: dict, *,
     if payload.get("base_salary") is not None and not can(actor, Cap.EMPLOYEE_SALARY_WRITE):
         raise HTTPException(status_code=403, detail="You may not set salary.")
 
+    # Department and designation are owned by the USER record (set on the Staff / member
+    # form, from the same masters). The profile starts from them rather than asking again.
+    payload = dict(payload)
+    for field in ("department_id", "designation_id"):
+        if not payload.get(field) and user.get(field):
+            payload[field] = user[field]
+
     clean = await _validate_profile(payload, company_id, partial=False)
     _check_date_order(clean.get("joined_on"), clean.get("resigned_on"))
 
@@ -985,6 +992,10 @@ async def create_profile(actor: dict, company_id: str, payload: dict, *,
 
     if reporting_manager:
         await master.set_user_reporting_manager(user_id, reporting_manager)
+    from app.utils.master_department import sync_user_org_field
+    for field in ("department_id", "designation_id"):
+        if doc.get(field) and doc.get(field) != user.get(field):
+            await sync_user_org_field(company_id, user_id, field, doc[field])
     # The starting values are the first history rows, so the timeline begins at joining.
     initial = {f: (None, doc.get(f)) for f in EMPLOYEE_TRACKED_FIELDS
                if doc.get(f) not in (None, "", [])}
@@ -1111,6 +1122,10 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
         )
     if "reporting_manager_id" in clean and "reporting_manager_id" in tracked:
         await master.set_user_reporting_manager(str(user_id), clean["reporting_manager_id"])
+    from app.utils.master_department import sync_user_org_field
+    for field in ("department_id", "designation_id"):
+        if field in clean and field in tracked:
+            await sync_user_org_field(company_id, str(user_id), field, clean[field])
 
     saved = await profiles.find_one({"user_id": str(user_id)}) or {"user_id": str(user_id)}
     await master.record_changes(actor, company_id, saved, tracked,

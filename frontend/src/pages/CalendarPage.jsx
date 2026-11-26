@@ -19,7 +19,7 @@ import {
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
     Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle,
-    ShieldCheck
+    ShieldCheck, MessageSquareText, ArrowUpRight
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
 import MiniDatePicker from '../components/tasks/MiniDatePicker';
@@ -365,6 +365,29 @@ const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
     );
 };
 
+// ─── Inter-Departmental Feedback activities (backend idf_service.EVENT_KIND) ───
+const FEEDBACK_KIND = 'idf_feedback';
+// The results meeting of the MD and all HODs, scheduled automatically when a cycle completes.
+const FEEDBACK_MEETING = 'idf_results_meeting';
+// Scheduled (created) -> Pending (the HOD opened the form) -> Overdue (deadline passed) ->
+// Completed (submitted and stored). Past the deadline an unsubmitted one reads Overdue.
+const feedbackStatus = (p = {}) => {
+    const st = p.idf_status || 'Pending';
+    if (st !== 'Pending' && st !== 'Scheduled') return st;
+    const due = String(p.start || '').slice(0, 10);
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    return due && due < today ? 'Overdue' : 'Pending';
+};
+const feedbackColor = (p) => (p?.kind === FEEDBACK_MEETING ? '#6366f1'
+    : ({ Completed: '#10b981', Overdue: '#e11d48', Cancelled: '#94a3b8' }[feedbackStatus(p)] || '#0d9488'));
+// The deadline is a DATE (stored as that day's local time), so show the date only.
+const feedbackDueLabel = (start) => {
+    const key = String(start || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return '—';
+    const [y, m, d] = key.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+};
+
 const CalendarPage = () => {
     const calendarRef = useRef(null);
     // The card the grid is drawn inside. Watched for width changes — see the observer below.
@@ -696,6 +719,15 @@ const CalendarPage = () => {
     // start/end/allDay, so genuine multi-day rendering is untouched.
     const mapApiEvents = (rows) => (rows || []).map(e => {
         const todo = isTodoRow(e);
+        // An Inter-Departmental Feedback activity is a reminder to fill a form, not a session:
+        // it gets its own type, so it is never listed or counted as a session.
+        if (e.extendedProps?.kind === FEEDBACK_KIND || e.extendedProps?.kind === FEEDBACK_MEETING) {
+            return {
+                id: e.id, title: e.title, start: e.start, end: e.end, allDay: e.allDay,
+                backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
+                extendedProps: { ...e.extendedProps, id: e.id, type: 'feedback', dotColor: feedbackColor(e.extendedProps) },
+            };
+        }
         return {
             id: e.id, title: e.title,
             start: todo ? dayKey(anchorOf(e)) : anchorOf(e),
@@ -792,6 +824,8 @@ const CalendarPage = () => {
         () => dayEvents.filter(e => e.extendedProps?.type === 'todo' && e.extendedProps?.isCreator !== false),
         [dayEvents]
     );
+
+    const dayFeedback = useMemo(() => dayEvents.filter(e => e.extendedProps?.type === 'feedback'), [dayEvents]);
 
     const activeFilter = statFilter;
     const filteredEvents = useMemo(() => {
@@ -1024,6 +1058,79 @@ const CalendarPage = () => {
             newMemberIds = [...new Set([...newMemberIds, ...membersToAdd])];
         }
         setEventForm({ ...eventForm, assigned_departments: newDepts, assigned_member_ids: newMemberIds });
+    };
+
+    // Feedback activity tile: status from the feedback itself (it completes only when the
+    // form is submitted), the submission date, and a way to the form. No Complete / Edit /
+    // Delete — the activity is managed by the feedback cycle.
+    const renderFeedbackTile = (ev) => {
+        if (ev.extendedProps.kind === FEEDBACK_MEETING) {
+            // The results meeting: who, when and what it is for — an ordinary meeting, not a session.
+            const people = (ev.extendedProps.assigned_member_ids || []).length;
+            const canSeeResults = (user?.governance_role || '').trim().toUpperCase() === 'MD'
+                || ['superadmin', 'admin'].includes(user?.role);
+            return (
+                <div key={ev.id} className="relative rounded-[24px] border p-4 overflow-hidden"
+                    style={{ background: 'rgba(99, 102, 241, 0.04)', borderColor: 'rgba(99, 102, 241, 0.25)' }}>
+                    <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: '#6366f1' }} />
+                    <div className="flex items-center gap-2 text-[10px] font-black text-indigo-600 uppercase tracking-widest">
+                        <MessageSquareText size={11} /> Feedback results meeting
+                        <span className="px-2 py-0.5 rounded-md text-[8px] border bg-indigo-50 text-indigo-600 border-indigo-100">Meeting</span>
+                    </div>
+                    <h4 className="mt-1.5 pr-6 text-[14px] font-black text-[var(--text-main)] leading-tight">{ev.title}</h4>
+                    <p className="mt-1 pr-6 text-[11px] text-[var(--text-muted)] leading-snug">
+                        The MD and all HODs review the Inter-Departmental Feedback results together. The MD opens with
+                        "no retaliation"; the Red / Amber / Green bands decide the next steps; within 15 days each HOD
+                        tells their raters "you said, we did".
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-[var(--border)] pt-3">
+                        <span className="flex items-center gap-3 text-[10px] font-bold text-[var(--text-muted)]">
+                            <span className="flex items-center gap-1"><Clock size={11} /> <b className="text-[var(--text-main)]">{formatShortIST(ev.start)}</b></span>
+                            {!!people && <span>{people} invited (MD + HODs)</span>}
+                        </span>
+                        {canSeeResults && (
+                            <button type="button" onClick={() => navigate('/idf/dashboard')}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90">
+                                View results <ArrowUpRight size={11} />
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+        const st = feedbackStatus(ev.extendedProps);
+        const chip = {
+            Completed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+            Overdue: 'bg-rose-100 text-rose-700 border-rose-200',
+            Cancelled: 'bg-slate-100 text-slate-600 border-slate-200',
+            Pending: 'bg-amber-50 text-amber-700 border-amber-200',
+            Scheduled: 'bg-indigo-50 text-indigo-600 border-indigo-100',
+        }[st];
+        return (
+            <div key={ev.id} className={`relative rounded-[24px] border p-4 overflow-hidden ${st === 'Completed' || st === 'Cancelled' ? 'opacity-60' : ''}`}
+                style={{ background: 'rgba(13, 148, 136, 0.03)', borderColor: 'rgba(13, 148, 136, 0.25)' }}>
+                <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: feedbackColor(ev.extendedProps) }} />
+                <div className="flex items-center gap-2 text-[10px] font-black text-teal-700 uppercase tracking-widest">
+                    <MessageSquareText size={11} /> Feedback activity
+                    <span className={`px-2 py-0.5 rounded-md text-[8px] border ${chip}`}>{st}</span>
+                </div>
+                <h4 className="mt-1.5 pr-6 text-[14px] font-black text-[var(--text-main)] leading-tight">{ev.title}</h4>
+                {ev.extendedProps.description && (
+                    <p className="mt-1 pr-6 text-[11px] text-[var(--text-muted)] leading-snug">{ev.extendedProps.description}</p>
+                )}
+                <div className="mt-3 flex items-center justify-between gap-2 border-t border-dashed border-[var(--border)] pt-3">
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-[var(--text-muted)]">
+                        <Clock size={11} /> Submit by: <b className="text-[var(--text-main)]">{feedbackDueLabel(ev.start)}</b>
+                    </span>
+                    {(st === 'Scheduled' || st === 'Pending' || st === 'Overdue') && ev.extendedProps.isAssigned && (
+                        <button type="button" onClick={() => navigate('/idf/forms')}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-teal-600 text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90">
+                            Open feedback form <ArrowUpRight size={11} />
+                        </button>
+                    )}
+                </div>
+            </div>
+        );
     };
 
     const renderEventTile = (ev) => {
@@ -1277,12 +1384,15 @@ const CalendarPage = () => {
                         const isTask = type === 'task';
                         const isORM = type === 'orm_reminder';
                         const isTodo = type === 'todo';
+                        const isFeedback = type === 'feedback';
 
                         return (
                             <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
                                  style={{ 
                                      background: isORM
                                         ? 'rgba(245, 158, 11, 0.1)'
+                                        : isFeedback
+                                           ? 'rgba(13, 148, 136, 0.1)'
                                         : isTodo
                                            ? 'rgba(139, 92, 246, 0.08)'
                                            : (isCreator
@@ -1293,7 +1403,7 @@ const CalendarPage = () => {
                                  }}>
                                 <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: isORM ? '#f59e0b' : dotColor }}></div>
                                 {isORM && <span className="px-1.5 py-0.5 bg-amber-500 text-white rounded text-[7px] font-black uppercase tracking-tighter shrink-0">ORM</span>}
-                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : isTodo ? 'text-violet-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
+                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : isFeedback ? 'text-teal-700' : isTodo ? 'text-violet-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
                                     {info.event.title}
                                 </span>
                             </div>
@@ -1345,6 +1455,18 @@ const CalendarPage = () => {
                                         )}
                                     </div>
                                 </div>
+
+                                {/* ─── Feedback activities (Inter-Departmental Feedback) ─── */}
+                                {dayFeedback.length > 0 && (
+                                    <div className="space-y-4">
+                                        <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
+                                            <h3 className="text-[11px] font-black text-teal-600 uppercase tracking-[0.2em] flex items-center gap-1.5"> <MessageSquareText size={14} /> Feedback activities ({dayFeedback.length}) </h3>
+                                        </div>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {dayFeedback.map(ev => renderFeedbackTile(ev))}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* ─── Section 2: Personal Todos ─── */}
                                 {/* Todos only — the user's own private planning list. The backend

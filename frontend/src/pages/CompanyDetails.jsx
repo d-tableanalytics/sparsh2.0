@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import MasterDepartmentSelect from '../components/common/MasterDepartmentSelect';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -257,7 +258,7 @@ const CompanyDetails = () => {
   const [newUser, setNewUser] = useState({
     email: '', password: '', first_name: '', last_name: '', mobile: '',
     role: 'clientuser', session_type: 'None', designation: '', department: 'Other',
-    reporting_manager: '', level: ''
+    department_id: '', reporting_manager: '', level: ''
   });
   // Reporting-manager dropdown options (active users of THIS company)
   const [managerOptions, setManagerOptions] = useState([]);
@@ -452,7 +453,7 @@ const CompanyDetails = () => {
       await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
       setShowAddUser(false);
       showSuccess('User added successfully');
-      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', reporting_manager: '', level: '' });
+      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', department_id: '', reporting_manager: '', level: '' });
       fetchData();
     } catch (err) { showError(err.response?.data?.detail || 'Failed to create user'); }
   };
@@ -977,7 +978,7 @@ const CompanyDetails = () => {
                           <td className="px-5 py-2.5">
                             <span className="px-2 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)] rounded-md text-[10px] font-bold uppercase">{u.role}</span>
                           </td>
-                          <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{u.department || '—'}</td>
+                          <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{u.department_name || '—'}</td>
                           <td className="px-5 py-2.5 text-[12px] text-[var(--accent-orange)] font-bold">{u.session_type || '—'}</td>
                           <td className="px-5 py-2.5">
                             <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${u.is_active !== false ? 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]' : 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'}`}>
@@ -1297,8 +1298,10 @@ const CompanyDetails = () => {
               <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.session_type} onChange={e => setNewUser({...newUser, session_type: e.target.value})}>
                 <option value="Core">Core</option><option value="Support">Support</option><option value="Both">Both</option><option value="None">None</option>
               </select></div>
-            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
-              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value})}>
+            {/* Formerly "Department": saved as before (TPMS reads it to tell HODs/MDs apart);
+                picking one also fills the Designation field. */}
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Designation</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value, designation: e.target.value || newUser.designation})}>
                 <option value="HOD">HOD</option><option value="Manager">Manager</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
               </select></div>
           </div>
@@ -1310,6 +1313,14 @@ const CompanyDetails = () => {
               <input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" placeholder="e.g. L1, L2, Manager" value={newUser.level} onChange={e => setNewUser({...newUser, level: e.target.value})} />
             </div>
           </div>
+          {/* The master department (HRMS ▸ Departments) — the one list all modules use —
+              with an inline "Add Department" that creates one in that master. */}
+          <MasterDepartmentSelect
+            companyId={companyId}
+            value={newUser.department_id}
+            onChange={(id) => setNewUser((u) => ({ ...u, department_id: id }))}
+            labelClassName="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest"
+            selectClassName="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" />
           <div className="flex gap-3 mt-6">
             <button type="submit" className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create User</button>
           </div>

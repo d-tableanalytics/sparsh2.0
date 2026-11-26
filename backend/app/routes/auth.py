@@ -220,6 +220,20 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
     ln = user.last_name or ""
     user_dict["full_name"] = f"{fn} {ln}".strip()
     user_dict["created_at"] = datetime.utcnow()
+
+    # ─── Universal department / designation: checked against the company's masters
+    # (HRMS ▸ Departments / Designations). Staff carry no company_id → the internal company. ───
+    if user_dict.get("department_id") or user_dict.get("designation_id"):
+        from app.utils.master_department import (
+            resolve_department, resolve_designation, resolve_company_ref)
+        org_company = str(user_dict.get("company_id") or "") or await resolve_company_ref("internal")
+        user_dict["department_id"], user_dict["department_name"] = await resolve_department(
+            org_company, user_dict.get("department_id"))
+        desig_id, desig_name = await resolve_designation(org_company, user_dict.get("designation_id"))
+        user_dict["designation_id"] = desig_id
+        if desig_name:
+            user_dict["designation"] = desig_name
+
     # Issued here rather than asked for: the number has to be the next free one in that
     # company, which only the server can know.
     await assign_username(user_dict, user_dict.get("company_id"))

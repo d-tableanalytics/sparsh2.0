@@ -390,6 +390,9 @@ async def _apply_field(company_id: str, profile: dict, field: str, value) -> Non
         {"$set": {field: value, "updated_at": datetime.now(timezone.utc)}})
     if field == "reporting_manager_id" and profile.get("user_id"):
         await set_user_reporting_manager(profile["user_id"], value)
+    if field in ("department_id", "designation_id") and profile.get("user_id"):
+        from app.utils.master_department import sync_user_org_field
+        await sync_user_org_field(company_id, profile["user_id"], field, value)
 
 
 async def set_user_reporting_manager(user_id: str, manager_id: Optional[str]) -> None:

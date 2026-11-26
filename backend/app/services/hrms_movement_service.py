@@ -243,6 +243,12 @@ async def _apply_one(company_id: str, movement: dict) -> dict:
         await get_collection(COLL_EMPLOYEE_PROFILES).update_one(
             {"company_id": str(company_id), "employee_code": employee_code},
             {"$set": {"designation_id": to_value, "updated_at": now}})
+        # Keep the universal user record in step with the promotion.
+        prof = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+            {"company_id": str(company_id), "employee_code": employee_code}, {"user_id": 1})
+        if prof and prof.get("user_id"):
+            from app.utils.master_department import sync_user_org_field
+            await sync_user_org_field(company_id, prof["user_id"], "designation_id", to_value)
     elif movement_type == MovementType.COMPENSATION_CHANGE.value:
         try:
             new_salary = float(to_value)

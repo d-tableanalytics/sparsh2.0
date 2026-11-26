@@ -388,6 +388,128 @@ async def delete_company(company_id: str, current_user: dict = Depends(get_curre
     
     return {"message": "Company and associated users deleted"}
 
+# ─── Master department list (HRMS ▸ Departments) ───
+@router.get("/{company_id}/departments")
+async def get_company_departments(company_id: str, current_user: dict = Depends(get_current_user)):
+    """The company's departments from the master list — feeds the "Department" dropdown on
+    the member forms. Same access as the company's user list."""
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    if not (current_user.get("role") in ("superadmin", "admin") or can_read
+            or current_user.get("company_id") == company_id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    from app.utils.master_department import company_departments, resolve_company_ref
+    return {"departments": await company_departments(await resolve_company_ref(company_id))}
+
+
+@router.post("/{company_id}/departments", status_code=201)
+async def add_company_department(company_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Create a department in the MASTER list (HRMS ▸ Departments) from the member form's
+    "Add Department" button. Same people who may add members may add a department; the name
+    clean-up and the case-insensitive duplicate check are the master's own (create_master)."""
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    if not (current_user.get("role") in ("superadmin", "admin", "clientadmin") or can_update):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this company")
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a department name.")
+    from app.services.hrms_masters_service import create_master
+    from app.utils.master_department import company_departments, resolve_company_ref
+    company_id = await resolve_company_ref(company_id)
+    created = await create_master("department", company_id, {"name": name, "active": True}, current_user)
+    created_id = str(created.get("id") or created.get("_id") or "")
+    return {"department": {"id": created_id, "name": created.get("name") or name},
+            "departments": await company_departments(company_id)}
+
+
+# ─── Master designation list (HRMS ▸ Designations) — same rules as departments above ───
+@router.get("/{company_id}/designations")
+async def get_company_designations(company_id: str, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    if not (current_user.get("role") in ("superadmin", "admin") or can_read
+            or current_user.get("company_id") == company_id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    from app.utils.master_department import company_designations, resolve_company_ref
+    return {"designations": await company_designations(await resolve_company_ref(company_id))}
+
+
+@router.post("/{company_id}/designations", status_code=201)
+async def add_company_designation(company_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    if not (current_user.get("role") in ("superadmin", "admin", "clientadmin") or can_update):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this company")
+    name = str((payload or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a designation name.")
+    from app.services.hrms_masters_service import create_master
+    from app.utils.master_department import company_designations, resolve_company_ref
+    company_id = await resolve_company_ref(company_id)
+    created = await create_master("designation", company_id, {"name": name, "active": True}, current_user)
+    created_id = str(created.get("id") or created.get("_id") or "")
+    return {"designation": {"id": created_id, "name": created.get("name") or name},
+            "designations": await company_designations(company_id)}
+
+
+# ─── Delete from the member form ("Delete" next to the Department / Designation picker) ───
+_MASTER_KINDS = {"departments": ("department", "department_id"),
+                 "designations": ("designation", "designation_id")}
+
+
+@router.delete("/{company_id}/departments/{master_id}")
+async def delete_company_department(company_id: str, master_id: str,
+                                    current_user: dict = Depends(get_current_user)):
+    return await _delete_company_master(company_id, "departments", master_id, current_user)
+
+
+@router.delete("/{company_id}/designations/{master_id}")
+async def delete_company_designation(company_id: str, master_id: str,
+                                     current_user: dict = Depends(get_current_user)):
+    return await _delete_company_master(company_id, "designations", master_id, current_user)
+
+
+async def _delete_company_master(company_id: str, kind: str, master_id: str, current_user: dict):
+    """Delete a department / designation from the master list. Refused (409) while any user
+    or HRMS employee profile still points at it — reassign them first.
+
+    Only the Super Admin, an Admin, or an MD may delete — an MD only in their own company
+    (Sparsh Magic's own MD: the internal company)."""
+    from app.utils.master_department import resolve_company_ref
+    target_company = await resolve_company_ref(company_id)
+    is_platform_admin = current_user.get("role") in ("superadmin", "admin")
+    is_md = str(current_user.get("governance_role") or "").strip().upper() == "MD"
+    if not (is_platform_admin or is_md):
+        raise HTTPException(status_code=403,
+                            detail="Only the Super Admin, an Admin or the MD can delete this.")
+    if not is_platform_admin:
+        own_company = str(current_user.get("company_id") or "") or await resolve_company_ref("internal")
+        if own_company != target_company:
+            raise HTTPException(status_code=403, detail="Not authorized for this company")
+    master_kind, user_field = _MASTER_KINDS[kind]
+    label = master_kind.capitalize()
+
+    used_by = 0
+    for coll in ("staff", "learners"):
+        used_by += await get_collection(coll).count_documents({user_field: master_id})
+    if used_by:
+        raise HTTPException(status_code=409,
+                            detail=f"This {master_kind} is assigned to {used_by} user(s). "
+                                   f"Change them to another {master_kind} first.")
+
+    from app.services.hrms_masters_service import delete_master
+    from app.utils.master_department import company_departments, company_designations
+    company_id = target_company
+    await delete_master(master_kind, company_id, master_id, current_user)
+    items = await (company_departments if kind == "departments" else company_designations)(company_id)
+    return {"deleted": True, kind: items, "message": f"{label} deleted"}
+
+
 # ─── Get Company Users ───
 @router.get("/{company_id}/users")
 async def get_company_users(company_id: str, active_only: bool = False, current_user: dict = Depends(get_current_user)):
@@ -449,7 +571,12 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
             fn = user_dict.get("first_name") or ""
             ln = user_dict.get("last_name") or ""
             user_dict["full_name"] = f"{fn} {ln}".strip()
-        
+
+        # Master department (HRMS ▸ Departments): validated against THIS company's list.
+        from app.utils.master_department import resolve_department
+        user_dict["department_id"], user_dict["department_name"] = await resolve_department(
+            company_id, user_dict.get("department_id"))
+
         await assign_username(user_dict, company_id)
         res = await users_collection.insert_one(user_dict)
         user_dict["_id"] = str(res.inserted_id)
@@ -500,8 +627,11 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     
     headers = [
         "Work Email *", "Temp Password *", "First Name", "Last Name", 
-        "Mobile Number", "Designation", "Session Type", "Department", 
-        "Level", "Reporting Manager"
+        "Mobile Number", "Designation", "Session Type", "Department",
+        "Level", "Reporting Manager",
+        # The person's master department, by name, from HRMS ▸ Departments. Added LAST so
+        # files built from the older template keep their column positions.
+        "Department (master)",
     ]
     ws.append(headers)
     
@@ -532,11 +662,12 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
                 u.get("session_type", "Both"),
                 u.get("department", "Other"),
                 u.get("level", ""),
-                mgr_display
+                mgr_display,
+                u.get("department_name") or "",
             ])
     else:
         # Sample row if company has no users yet
-        ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "Manager", "Both", "HOD", "L1", "manager@example.com"])
+        ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "Manager", "Both", "HOD", "L1", "manager@example.com", ""])
     
     # Style header
     from openpyxl.styles import Font, PatternFill
@@ -625,6 +756,16 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
         session_type = row_data.get("Session Type") or row_data.get("session_type") or "Both"
         department = row_data.get("Department") or row_data.get("department") or "Other"
         level = row_data.get("Level") or row_data.get("level")
+        # Master department by name (HRMS ▸ Departments). A name not in the company's list is
+        # reported and left unset rather than guessed.
+        master_dept_name = str(row_data.get("Department (master)") or "").strip()
+        master_dept_id = master_dept_label = None
+        if master_dept_name:
+            from app.utils.master_department import department_by_name
+            master_dept_id, master_dept_label = await department_by_name(company_id, master_dept_name)
+            if not master_dept_id:
+                errors.append(f"Row {row_idx}: Department '{master_dept_name}' is not in this company's "
+                              f"department list (HRMS ▸ Departments) — left unset.")
         mgr_input = row_data.get("Reporting Manager") or row_data.get("reporting_manager")
 
         if not email:
@@ -657,7 +798,10 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
                 update_data["level"] = str(level).strip()
             if reporting_manager_id is not None:
                 update_data["reporting_manager"] = reporting_manager_id
-            
+            if master_dept_id:
+                update_data["department_id"] = master_dept_id
+                update_data["department_name"] = master_dept_label
+
             if password is not None and str(password).strip() and str(password).strip() != "***":
                 update_data["password"] = get_password_hash(str(password).strip())
             
@@ -683,6 +827,8 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
                 "department": str(department) if department else "Other",
                 "level": str(level).strip() if level else None,
                 "reporting_manager": reporting_manager_id,
+                "department_id": master_dept_id,
+                "department_name": master_dept_label,
                 "company_id": company_id,
                 "is_active": True,
                 "created_at": datetime.now(timezone.utc)

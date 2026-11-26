@@ -413,3 +413,78 @@ async def mark_submitted(doc: dict) -> None:
         {"_id": doc["_id"]},
         {"$set": {"status": STATUS_SUBMITTED, "submitted_at": now, "updated_at": now}},
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Calendar form validation — may this activity be marked Done / Completed yet?
+# ─────────────────────────────────────────────────────────────
+async def form_submission_status(event: dict) -> dict:
+    """Have ALL the forms this activity requires been submitted, by EVERY assigned respondent?
+
+    A form activity (ACTIVITY_FORM_MAP) is one calendar event per company, but each eligible
+    respondent (e.g. 6 HODs) gets their own link per form. The activity may be marked Done /
+    Completed only when every one of those links is submitted.
+
+    Links are matched by company + form + month (the event's start month), not by event id:
+    rescheduling the same activity deliberately does NOT mint new links (create_assignment), so
+    a link can still carry the activity's original event id. When no links were ever issued
+    for the month (the schedule mail never ran), it falls back to the submissions themselves:
+    at least one recorded submission per form for that company and month.
+
+    Returns {"required", "total", "submitted", "pending": [{"name", "forms": [...]}]}.
+    """
+    from app.models.forms import ACTIVITY_FORM_MAP, FORM_DEFINITIONS, submission_collection
+
+    forms = ACTIVITY_FORM_MAP.get(event.get("activity") or "") or []
+    if not forms:
+        return {"required": False, "total": 0, "submitted": 0, "pending": []}
+
+    company_id = str(event.get("company_id") or "")
+    period = str(event.get("start") or "")[:7]
+    title = {f: (FORM_DEFINITIONS.get(f) or {}).get("title") or f.replace("_", " ").title()
+             for f in forms}
+    links = await get_collection(ASSIGNMENT_COLLECTION).find(
+        {"company_id": company_id, "period": period, "form_type": {"$in": forms}},
+        {"form_type": 1, "respondent_id": 1, "respondent_name": 1, "status": 1}).to_list(1000)
+
+    if links:
+        pending: dict = {}
+        done = 0
+        for link in links:
+            if link.get("status") == STATUS_SUBMITTED:
+                done += 1
+                continue
+            who = link.get("respondent_name") or str(link.get("respondent_id") or "Unknown")
+            pending.setdefault(who, []).append(title[link["form_type"]])
+        return {"required": True, "total": len(links), "submitted": done,
+                "pending": [{"name": n, "forms": f} for n, f in sorted(pending.items())]}
+
+    # No links issued for this month: judge by what has actually been submitted.
+    missing = []
+    for f in forms:
+        coll = submission_collection(f)
+        found = bool(coll) and bool(await get_collection(coll).find_one(
+            {"company_id": company_id, "period": period}, {"_id": 1}))
+        if not found:
+            missing.append(title[f])
+    return {"required": True, "total": len(forms), "submitted": len(forms) - len(missing),
+            "pending": [{"name": "No one has submitted", "forms": missing}] if missing else []}
+
+
+def form_gap_message(status: dict, what: str) -> str:
+    """The refusal shown when an activity's forms are not all in yet."""
+    parts = [f"{p['name']} ({', '.join(p['forms'])})" for p in status["pending"][:8]]
+    more = len(status["pending"]) - 8
+    if more > 0:
+        parts.append(f"and {more} more")
+    return (f"This activity's form must be submitted before it can be {what}. "
+            f"{status['submitted']} of {status['total']} submitted — still pending: "
+            f"{'; '.join(parts)}.")
+
+
+async def assert_forms_submitted(event: dict, what: str) -> None:
+    """Raise 409 unless every form this activity requires has been submitted."""
+    from fastapi import HTTPException
+    status = await form_submission_status(event)
+    if status["required"] and status["pending"]:
+        raise HTTPException(status_code=409, detail=form_gap_message(status, what))

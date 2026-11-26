@@ -176,7 +176,7 @@ const ClientView = () => {
   return (
     <div className="space-y-5">
       {/* Hero */}
-      <DashboardHero icon={Building2} title="Client Dashboard" highlight={data?.company || undefined} subtitle="Activity scorecard & success measures for the selected client">
+      <DashboardHero icon={Building2} title="Dashboard" highlight={data?.company || undefined} subtitle="Activity scorecard & success measures for the selected client">
         <HeaderSelect value={company} onChange={setCompany} options={companies} />
         <HeaderSelect value={period} onChange={setPeriod} options={months} searchable={false} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>

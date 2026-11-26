@@ -39,7 +39,12 @@ class UserBase(BaseModel):
     # Business specific fields
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
-    department: Optional[str] = "Other" # HOD, Manager, Implementor, EA, MD, HR, Other
+    department: Optional[str] = "Other" # HOD, Manager, Implementor, EA, MD, HR, Other (role-like; TPMS reads it)
+    # The person's MASTER department (HRMS ▸ Departments) — see app/utils/master_department.py.
+    department_id: Optional[str] = None
+    department_name: Optional[str] = None
+    # The MASTER designation (HRMS ▸ Designations); its name is mirrored into `designation`.
+    designation_id: Optional[str] = None
     # Leadership Score eligibility. "Applicable from L4 (Asst Managers) and above."
     #
     # Explicit, and deliberately NOT derived from `designation`: that field is free text,
@@ -154,6 +159,9 @@ class UserResponse(UserBase):
     # stripped it, so Client Hiring was invisible to the very people it is for. The
     # regression guard in test_phase1_foundation.py asserts all of them stay declared.
     governance_role: Optional[str] = None
+    # Name of the company the user belongs to (set by GET /users/me from the company record).
+    # Declared here for the same reason as the flags above: undeclared, it would be stripped.
+    company_name: Optional[str] = None
 
     class Config:
         populate_by_name = True

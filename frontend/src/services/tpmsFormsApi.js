@@ -12,6 +12,10 @@ export const getFormDefinitions = () => api.get('/forms/definitions');
 // Schedule-driven "My Forms": the forms this respondent must fill, by period + status.
 export const getMyForms = () => api.get('/forms/my-forms');
 
+// Every form LINK emailed to the logged-in user (same links as the email), with status —
+// the "My Forms" page, so a missed or lost email never strands a respondent.
+export const getMyFormAssignments = () => api.get('/forms/my-assignments');
+
 // Companies for the selector (reuses the existing companies endpoint).
 export const getCompanies = () => api.get('/companies');
 

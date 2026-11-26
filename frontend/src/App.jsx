@@ -36,6 +36,14 @@ import ORMSetup from './pages/ORM/ORMSetup';
 import ORMSheet from './pages/ORM/ORMSheet';
 import IRMPage from './pages/IRM/IRMPage';
 import IRMSetup from './pages/IRM/IRMSetup';
+import IdfForms from './features/idf/IdfForms';
+import IdfDashboard from './features/idf/IdfDashboard';
+import IdfCycles from './features/idf/IdfCycles';
+import IdfSetup from './features/idf/IdfSetup';
+import IdfActions from './features/idf/IdfActions';
+import IdfIssues from './features/idf/IdfIssues';
+import IdfLinkForm from './features/idf/IdfLinkForm';
+import IdfFormLinks from './features/idf/IdfFormLinks';
 import MediaLibrary from './pages/MediaLibrary';
 import TaskDashboard from './pages/TaskDashboard';
 import MyTasks from './pages/MyTasks';
@@ -66,6 +74,7 @@ import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import FormLinks from './features/tpms/admin/pages/FormLinks';
 import ReviewReport from './features/tpms/common/ReviewReport';
+import MyForms from './features/tpms/common/MyForms';
 // TPMS ▸ Leadership Score (additive — no existing TPMS route is changed).
 import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
 import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
@@ -192,6 +201,13 @@ const OrmGuard = ({ children }) => {
   return children;
 };
 
+// HRMS › Departments / Designations are maintained by the Super Admin only (the API refuses
+// anyone else's changes); others pick departments in forms and add one via "+ Add Department".
+const SuperAdminOnly = ({ children }) => {
+  const { user } = useAuth();
+  return user?.role === 'superadmin' ? children : <Navigate to="/hrms" replace />;
+};
+
 // The /tpms/smops Dashboard is shared: client-side users get the real ClientDashboard
 // (their own company's Success-Measure scorecard); internal users keep the SMOPS view.
 const TpmsDashboardIndex = () => {
@@ -297,6 +313,18 @@ const AppRoutes = () => {
       {/* IRM — Individual Result Matrix. Scores are per person; the weightage setup is
           role-guarded inside the page (staff + clientadmin). */}
       <Route path="/irm" element={<PrivateRoute><IRMPage /></PrivateRoute>} />
+      {/* Inter-Department Feedback. Every page is guarded by the API itself: forms for the
+          department's HOD, feedback content for the company MD only, setup for MD / Sparsh Admin. */}
+      <Route path="/idf/forms" element={<PrivateRoute><IdfForms /></PrivateRoute>} />
+      {/* The personal link emailed to each HOD — log in if needed, then straight to that form. */}
+      <Route path="/idf/f/:token" element={<PrivateRoute hideLayout><IdfLinkForm /></PrivateRoute>} />
+      <Route path="/idf/dashboard" element={<PrivateRoute><IdfDashboard /></PrivateRoute>} />
+      <Route path="/idf/feedback" element={<Navigate to="/idf/dashboard" replace />} />
+      <Route path="/idf/cycles" element={<PrivateRoute><IdfCycles /></PrivateRoute>} />
+      <Route path="/idf/form-links" element={<PrivateRoute><IdfFormLinks /></PrivateRoute>} />
+      <Route path="/idf/setup" element={<PrivateRoute><IdfSetup /></PrivateRoute>} />
+      <Route path="/idf/actions" element={<PrivateRoute><IdfActions /></PrivateRoute>} />
+      <Route path="/idf/issues" element={<PrivateRoute><IdfIssues /></PrivateRoute>} />
       <Route path="/irm/setup" element={<PrivateRoute><IRMSetup /></PrivateRoute>} />
 
 
@@ -355,6 +383,8 @@ const AppRoutes = () => {
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+        {/* Every form link emailed to the signed-in user, so a missed email never strands them. */}
+        <Route path="my-forms"      element={<MyForms />} />
         {/* Leadership Score for the client/SMOPS side. The report is self-scoping: HR sees
             every enrolled leader, a manager their direct reports, a leader only their own. */}
         <Route path="leadership"           element={<LeadershipReport />} />
@@ -382,8 +412,8 @@ const AppRoutes = () => {
         {/* Phase 360-1 — Employee 360° (§6): nested under the same profile route so the
             workspace's own nav stays lit. */}
         <Route path="employees/:userId/360" element={<Employee360 />} />
-        <Route path="departments"        element={<MasterManager kind="department" />} />
-        <Route path="designations"       element={<MasterManager kind="designation" />} />
+        <Route path="departments"        element={<SuperAdminOnly><MasterManager kind="department" /></SuperAdminOnly>} />
+        <Route path="designations"       element={<SuperAdminOnly><MasterManager kind="designation" /></SuperAdminOnly>} />
         <Route path="employee-master-setup" element={<EmployeeMasterSetup />} />
         {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
         {/* The generic "both tracks" requisition list is superseded by the internal

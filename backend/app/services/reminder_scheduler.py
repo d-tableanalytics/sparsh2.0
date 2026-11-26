@@ -135,6 +135,7 @@ async def start_reminder_scheduler():
     # deploy. This dict is only a cache in front of that ledger, so the ticks after a job
     # has already run today cost no database read.
     hrms_last_run: dict = {}
+    idf_state: dict = {}
     while True:
         try:
             await check_and_trigger_reminders()
@@ -190,6 +191,20 @@ async def start_reminder_scheduler():
             # TPMS scheduled sweeps, each at its own hour. Isolated so a TPMS failure can
             # never stop the reminder loop the rest of the ERP depends on.
             await run_tpms_scheduled_jobs(tpms_last_run)
+
+            # Inter-Departmental Feedback: once a day from 10:00 IST — pre-deadline reminder,
+            # daily overdue reminders until submission (calendar activity turns Overdue), and
+            # overdue action-plan alerts. Claimed through the durable job ledger so a restart
+            # never re-sends; isolated so a failure can never stop this loop.
+            try:
+                ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+                if ist_now.hour >= 10 and idf_state.get("day") != today:
+                    from app.services.idf_service import run_daily_reminders
+                    await _run_job(idf_state, "idf_reminders", today,
+                                   "inter-departmental feedback reminders", run_daily_reminders)
+                    idf_state["day"] = today
+            except Exception as e:
+                logger.error(f"Error in Inter-Departmental Feedback reminders: {e}")
 
             # HRMS governance sweeps — the SLA breach detector, probation and pre-boarding
             # reminders, the policy review notice and the retention purge PROPOSAL. Each

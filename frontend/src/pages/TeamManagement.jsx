@@ -11,6 +11,7 @@ import { useNotification } from '../context/NotificationContext';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import MasterDepartmentSelect from '../components/common/MasterDepartmentSelect';
 
 const TeamManagement = () => {
     const navigate = useNavigate();
@@ -27,9 +28,10 @@ const TeamManagement = () => {
     const initialMemberForm = {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'clientuser', is_active: true,
-        designation: '', department: '', session_type: 'Both', level: ''
+        designation: '', department: '', department_id: '', session_type: 'Both', level: ''
     };
     const [memberForm, setMemberForm] = useState(initialMemberForm);
+
 
     const fetchData = async () => {
         if (!currentUser?.company_id) return;
@@ -185,7 +187,7 @@ const TeamManagement = () => {
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="px-2 py-0.5 bg-gray-50 text-[var(--text-muted)] border border-gray-100 rounded text-[8px] font-black uppercase tracking-widest">{u.department || 'General'}</span>
+                                    <span className="px-2 py-0.5 bg-gray-50 text-[var(--text-muted)] border border-gray-100 rounded text-[8px] font-black uppercase tracking-widest">{u.department_name || 'General'}</span>
                                     <span className="px-2 py-0.5 bg-indigo-50 text-[var(--accent-indigo)] border border-indigo-100 rounded text-[8px] font-black uppercase tracking-widest">{u.session_type || 'Both'}</span>
                                     <span className="px-2 py-0.5 bg-purple-50 text-purple-600 border border-purple-100 rounded text-[8px] font-black uppercase tracking-widest">{u.level ? `L: ${u.level}` : 'L: —'}</span>
                                 </div>
@@ -283,9 +285,11 @@ const TeamManagement = () => {
                                          </select>
                                      </div>
                                      <div className="space-y-1.5">
-                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Department</label>
-                                         <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.department} onChange={e => setMemberForm({...memberForm, department: e.target.value})}>
-                                             <option value="">Select Department</option>
+                                         {/* Saved as before (TPMS reads it to tell HODs/MDs apart); picking one also
+                                             fills the Designation field above. */}
+                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Designation</label>
+                                         <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.department} onChange={e => setMemberForm({...memberForm, department: e.target.value, designation: e.target.value || memberForm.designation})}>
+                                             <option value="">Select Designation</option>
                                              <option value="HOD">HOD</option>
                                              <option value="Manager">Manager</option>
                                              <option value="Implementor">Implementor</option>
@@ -297,9 +301,19 @@ const TeamManagement = () => {
                                      </div>
                                  </div>
 
-                                 <div className="space-y-1.5">
-                                     <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Level</label>
-                                     <input className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. L1, L2, Manager" value={memberForm.level} onChange={e => setMemberForm({...memberForm, level: e.target.value})} />
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                     {/* The master department (HRMS ▸ Departments), used across all modules,
+                                         with an inline "Add Department" that creates one in that master. */}
+                                     <MasterDepartmentSelect
+                                         companyId={currentUser?.company_id}
+                                         value={memberForm.department_id}
+                                         onChange={(id) => setMemberForm((f) => ({ ...f, department_id: id }))}
+                                         labelClassName="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest"
+                                         selectClassName="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" />
+                                     <div className="space-y-1.5">
+                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Level</label>
+                                         <input className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. L1, L2, Manager" value={memberForm.level} onChange={e => setMemberForm({...memberForm, level: e.target.value})} />
+                                     </div>
                                  </div>
 
                                  <div className="flex items-center justify-between pt-6 border-t border-[var(--border)]">

@@ -41,7 +41,7 @@ const LISTS = [
   ['employee_category', 'employee_categories', 'Employee category'],
 ];
 
-const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => {
+const AddEmployeeModal = ({ onClose, onCreated }) => {
   const { scope, can } = useHrms();
   const { showSuccess, showError } = useNotification();
 
@@ -53,7 +53,7 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
-    user_id: '', department_id: '', designation_id: '',
+    user_id: '',
     employment_status: 'Active', employment_type: 'Full-time',
     joined_on: '', base_salary: '',
     official_email: '', personal_mobile: '', work_location: '', grade: '',
@@ -119,7 +119,7 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
       const payload = { user_id: form.user_id };
       // Send only what was filled — an empty string is not "clear this field", it is
       // "untouched", and the server treats a present key as an instruction.
-      ['department_id', 'designation_id', 'employment_status', 'employment_type', 'joined_on',
+      ['employment_status', 'employment_type', 'joined_on',
         'official_email', 'personal_mobile', 'legal_entity', 'work_location', 'grade', 'level',
         'employee_category', 'reporting_manager_id']
         .forEach((k) => { if (form[k]) payload[k] = typeof form[k] === 'string' ? form[k].trim() : form[k]; });
@@ -177,21 +177,13 @@ const AddEmployeeModal = ({ departments, designations, onClose, onCreated }) => 
             </p>
           </div>
 
+          {/* Department and designation are set once, on the user (Staff Management / company
+              member form), and the profile takes them from there. */}
+          <p className="text-[11px] text-[var(--text-muted)]">
+            Department and designation come from the user record (set in User Management).
+          </p>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className={label} htmlFor="emp-dept">Department</label>
-              <select id="emp-dept" value={form.department_id} onChange={set('department_id')} className={field}>
-                <option value="">—</option>
-                {departments.filter((d) => d.active).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={label} htmlFor="emp-desig">Designation</label>
-              <select id="emp-desig" value={form.designation_id} onChange={set('designation_id')} className={field}>
-                <option value="">—</option>
-                {designations.filter((d) => d.active).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-            </div>
             <div>
               <label className={label} htmlFor="emp-status">Status</label>
               <select id="emp-status" value={form.employment_status} onChange={set('employment_status')} className={field}>
