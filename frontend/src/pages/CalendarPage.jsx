@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
@@ -7,6 +8,7 @@ import multiMonthPlugin from '@fullcalendar/multimonth';
 import interactionPlugin from '@fullcalendar/interaction';
 import {  AnimatePresence , motion } from 'framer-motion';
 import api from '../services/api';
+import ResultsMeetingCard from '../features/idf/IdfMeeting';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
@@ -410,6 +412,7 @@ const CalendarPage = () => {
     const [_gptProjects, setGptProjects] = useState([]);
 
     const [showSummary, setShowSummary] = useState(false);
+    const [meetingView, setMeetingView] = useState(null);   // the results meeting opened with View
     const [summaryDate, setSummaryDate] = useState(null);
     const [dayEvents, setDayEvents] = useState([]);
     const [currentViewDate, setCurrentViewDate] = useState(new Date());
@@ -1063,37 +1066,77 @@ const CalendarPage = () => {
     // Feedback activity tile: status from the feedback itself (it completes only when the
     // form is submitted), the submission date, and a way to the form. No Complete / Edit /
     // Delete — the activity is managed by the feedback cycle.
+    // The results meeting's details (View): purpose, link / venue, invitees and replies, RSVP,
+    // Reschedule. A portal, so it sits above the Day Summary modal.
+    const meetingDialog = meetingView && createPortal(
+        <div className="fixed inset-0 z-[300] bg-black/40 flex items-center justify-center p-4" onClick={() => setMeetingView(null)}>
+            <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true"
+                className="w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl bg-[var(--bg-card)] shadow-2xl">
+                <div className="flex items-start gap-3 px-5 py-4 border-b border-[var(--border)]">
+                    <div className="flex-1 min-w-0">
+                        <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Feedback results meeting</p>
+                        <h3 className="text-[15px] font-black text-[var(--text-main)] leading-tight">{meetingView.title}</h3>
+                    </div>
+                    <button type="button" onClick={() => setMeetingView(null)} aria-label="Close"
+                        className="p-1 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]"><X size={17} /></button>
+                </div>
+                <div className="px-5 py-4 space-y-3">
+                    <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
+                        The MD and all HODs review the Inter-Departmental Feedback results together. The MD opens with
+                        "no retaliation"; the Red / Amber / Green bands decide the next steps; within 15 days each HOD
+                        tells their raters "you said, we did".
+                    </p>
+                    {meetingView.extendedProps.idf_cycle_id && (
+                        <ResultsMeetingCard compact cycleId={meetingView.extendedProps.idf_cycle_id}
+                            companyId={meetingView.extendedProps.company_id} />
+                    )}
+                    {((user?.governance_role || '').trim().toUpperCase() === 'MD' || ['superadmin', 'admin'].includes(user?.role)) && (
+                        <button type="button" onClick={() => navigate('/idf/dashboard')}
+                            className="inline-flex items-center gap-1 text-[12px] font-bold text-indigo-600 hover:underline">
+                            View the results on the Dashboard <ArrowUpRight size={12} />
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>, document.body);
+
     const renderFeedbackTile = (ev) => {
         if (ev.extendedProps.kind === FEEDBACK_MEETING) {
-            // The results meeting: who, when and what it is for — an ordinary meeting, not a session.
-            const people = (ev.extendedProps.assigned_member_ids || []).length;
-            const canSeeResults = (user?.governance_role || '').trim().toUpperCase() === 'MD'
-                || ['superadmin', 'admin'].includes(user?.role);
+            // The results meeting — compact: when, Join, your reply, View. Everything else (purpose,
+            // invitees and their replies, Attending / Can't attend, Reschedule) is inside View.
+            const p = ev.extendedProps;
+            const people = (p.assigned_member_ids || []).length;
+            const uid = String(user?._id || user?.id || '');
+            const mine = (p.rsvp || {})[uid]?.response;
+            const invited = (p.assigned_member_ids || []).includes(uid);
+            const reply = { attending: ['Attending', 'bg-emerald-50 text-emerald-700 border-emerald-200'],
+                declined: ["Can't attend", 'bg-rose-50 text-rose-700 border-rose-200'] }[mine]
+                || ['Reply pending', 'bg-amber-50 text-amber-700 border-amber-200'];
             return (
                 <div key={ev.id} className="relative rounded-[24px] border p-4 overflow-hidden"
                     style={{ background: 'rgba(99, 102, 241, 0.04)', borderColor: 'rgba(99, 102, 241, 0.25)' }}>
                     <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: '#6366f1' }} />
                     <div className="flex items-center gap-2 text-[10px] font-black text-indigo-600 uppercase tracking-widest">
                         <MessageSquareText size={11} /> Feedback results meeting
-                        <span className="px-2 py-0.5 rounded-md text-[8px] border bg-indigo-50 text-indigo-600 border-indigo-100">Meeting</span>
                     </div>
                     <h4 className="mt-1.5 pr-6 text-[14px] font-black text-[var(--text-main)] leading-tight">{ev.title}</h4>
-                    <p className="mt-1 pr-6 text-[11px] text-[var(--text-muted)] leading-snug">
-                        The MD and all HODs review the Inter-Departmental Feedback results together. The MD opens with
-                        "no retaliation"; the Red / Amber / Green bands decide the next steps; within 15 days each HOD
-                        tells their raters "you said, we did".
-                    </p>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-[var(--border)] pt-3">
-                        <span className="flex items-center gap-3 text-[10px] font-bold text-[var(--text-muted)]">
-                            <span className="flex items-center gap-1"><Clock size={11} /> <b className="text-[var(--text-main)]">{formatShortIST(ev.start)}</b></span>
-                            {!!people && <span>{people} invited (MD + HODs)</span>}
-                        </span>
-                        {canSeeResults && (
-                            <button type="button" onClick={() => navigate('/idf/dashboard')}
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] font-bold text-[var(--text-muted)]">
+                        <span className="flex items-center gap-1"><Clock size={11} /> <b className="text-[var(--text-main)]">{formatShortIST(ev.start)}</b></span>
+                        {!!people && <span>{people} invited</span>}
+                        {p.location && <span className="truncate">· {p.location}</span>}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-dashed border-[var(--border)] pt-3">
+                        {p.meeting_link && (
+                            <a href={p.meeting_link} target="_blank" rel="noopener noreferrer"
                                 className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90">
-                                View results <ArrowUpRight size={11} />
-                            </button>
+                                <Video size={11} /> Join
+                            </a>
                         )}
+                        {invited && <span className={`px-2 py-0.5 rounded-md text-[9px] font-black border ${reply[1]}`}>{reply[0]}</span>}
+                        <button type="button" onClick={() => setMeetingView(ev)}
+                            className="ml-auto flex items-center gap-1 px-3 py-1.5 rounded-lg border border-indigo-200 text-indigo-600 text-[9px] font-black uppercase tracking-widest hover:bg-indigo-50">
+                            <Eye size={11} /> View
+                        </button>
                     </div>
                 </div>
             );
@@ -1412,6 +1455,7 @@ const CalendarPage = () => {
                 />
             </div>
 
+            {meetingDialog}
             {/* ─── Day Summary Modal (Tile View) ─── */}
             <AnimatePresence>
                 {showSummary && (

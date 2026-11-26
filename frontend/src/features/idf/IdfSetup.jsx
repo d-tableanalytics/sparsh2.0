@@ -25,6 +25,7 @@ const IdfSetup = () => {
   const [deadlineDays, setDeadlineDays] = useState(7);
   const [beforeDays, setBeforeDays] = useState(2);
   const [needComment, setNeedComment] = useState([1, 2, 5]);
+  const [meeting, setMeeting] = useState({ time: '11:00', duration: 60, days_after: 3, mode: 'online', link: '', venue: '' });
   const [labels, setLabels] = useState(['Poor', 'Below Average', 'Average', 'Good', 'Excellent']);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -37,6 +38,7 @@ const IdfSetup = () => {
     setDeadlineDays(s.deadline_days ?? 7);
     setBeforeDays(s.reminder_days_before ?? 2);
     setNeedComment(s.comment_required_for || [1, 2, 5]);
+    setMeeting({ ...{ time: '11:00', duration: 60, days_after: 3, mode: 'online', link: '', venue: '' }, ...(s.meeting || {}) });
     setLabels(s.rating_labels?.length === 5 ? s.rating_labels : ['Poor', 'Below Average', 'Average', 'Good', 'Excellent']);
   };
 
@@ -61,6 +63,7 @@ const IdfSetup = () => {
       const { data } = await saveIdfSetup({
         parameters: params, deadline_days: Number(deadlineDays),
         reminder_days_before: Number(beforeDays), comment_required_for: needComment, rating_labels: labels,
+        meeting: { ...meeting, duration: Number(meeting.duration), days_after: Number(meeting.days_after) },
       }, cid);
       apply(data);
       showSuccess('Setup saved.');
@@ -143,6 +146,46 @@ const IdfSetup = () => {
                     onChange={(e) => setLabels((ls) => ls.map((x, j) => (j === i ? e.target.value : x)))} />
                 </label>
               ))}
+            </div>
+          </div>
+
+          <div className={`${CARD} p-4 space-y-3`}>
+            <div>
+              <h3 className="text-[14px] font-black text-[var(--text-main)]">Results meeting</h3>
+              <p className="text-[11.5px] text-[var(--text-muted)]">
+                When a cycle completes, the MD and all HODs get this meeting in their calendar and an invitation email.
+                HR, the Client Admin or the MD can reschedule it later.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <label className="space-y-1">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Start time (IST)</span>
+                <input type="time" className={`${FIELD} w-full`} value={meeting.time} onChange={(e) => setMeeting({ ...meeting, time: e.target.value })} />
+              </label>
+              <label className="space-y-1">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Length (minutes)</span>
+                <input type="number" min={15} max={240} step={15} className={`${FIELD} w-full`} value={meeting.duration} onChange={(e) => setMeeting({ ...meeting, duration: e.target.value })} />
+              </label>
+              <label className="space-y-1">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Working days after results</span>
+                <input type="number" min={1} max={15} className={`${FIELD} w-full`} value={meeting.days_after} onChange={(e) => setMeeting({ ...meeting, days_after: e.target.value })} />
+              </label>
+              <label className="space-y-1">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Type</span>
+                <select className={`${FIELD} w-full`} value={meeting.mode} onChange={(e) => setMeeting({ ...meeting, mode: e.target.value })}>
+                  <option value="online">Online</option><option value="in_person">In person</option><option value="both">Both</option>
+                </select>
+              </label>
+              <label className="space-y-1 col-span-2">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Default meeting link</span>
+                <input className={`${FIELD} w-full`} placeholder="https://meet.google.com/… or a Teams link" value={meeting.link}
+                  onChange={(e) => setMeeting({ ...meeting, link: e.target.value })} />
+              </label>
+              <label className="space-y-1 col-span-2">
+                <span className="block text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Default venue</span>
+                <input className={`${FIELD} w-full`} placeholder="e.g. Conference room 1" value={meeting.venue}
+                  onChange={(e) => setMeeting({ ...meeting, venue: e.target.value })} />
+              </label>
             </div>
           </div>
 

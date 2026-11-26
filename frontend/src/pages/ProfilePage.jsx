@@ -8,6 +8,7 @@ import {
   MapPin, Globe, Heart, Cake, AtSign, Hash, Users as UsersIcon,
 } from 'lucide-react';
 import NotificationSettings from '../components/settings/NotificationSettings';
+import MasterDepartmentSelect from '../components/common/MasterDepartmentSelect';
 import { motion } from 'framer-motion';
 
 // Fields each section's PATCH /users/me save can carry (see backend SelfProfileUpdate).
@@ -15,7 +16,9 @@ import { motion } from 'framer-motion';
 // HR-controlled fields are read-only for an employee login.
 const EDITABLE = {
   general: ['first_name', 'last_name', 'mobile', 'emergency_mobile'],
-  professional: ['designation', 'department', 'reporting_manager', 'joining_date'],
+  // `department_id` is the master Department (e.g. Finances). The old `department` value
+  // (HOD / Manager …) is a designation TYPE, managed on Edit Member — not shown here.
+  professional: ['designation', 'department_id', 'reporting_manager', 'joining_date'],
 };
 
 const hydrate = (u) => ({
@@ -24,7 +27,7 @@ const hydrate = (u) => ({
   mobile: u?.mobile || '',
   emergency_mobile: u?.emergency_mobile || '',
   designation: u?.designation || '',
-  department: u?.department || '',
+  department_id: u?.department_id || '',
   reporting_manager: u?.reporting_manager || '',
   joining_date: u?.joining_date ? String(u.joining_date).slice(0, 10) : '',
 });
@@ -240,7 +243,7 @@ const ProfilePage = () => {
           <QuickInfo icon={Mail} label="Email" value={user.email} />
           <QuickInfo icon={Hash} label="Employee ID" value={user.employee_id} />
           <QuickInfo icon={Shield} label="Role" value={user.role} />
-          <QuickInfo icon={Briefcase} label="Department" value={user.department} />
+          <QuickInfo icon={Briefcase} label="Department" value={user.department_name} />
         </div>
       </div>
 
@@ -268,7 +271,17 @@ const ProfilePage = () => {
             <Field icon={Hash} label="Employee ID" value={user.employee_id} editable={false} />
             <Field icon={Shield} label="Role" value={user.role} editable={false} />
             <Field icon={IdCard} label="Designation" value={isEditingPro ? form.designation : user.designation} editing={isEditingPro} editable={canEdit('designation')} onChange={(v) => setField('designation', v)} />
-            <Field icon={Briefcase} label="Department" value={isEditingPro ? form.department : user.department} editing={isEditingPro} editable={canEdit('department')} onChange={(v) => setField('department', v)} />
+            {isEditingPro && canEdit('department_id') ? (
+              // The master department list, with "+ Add Department" — the same picker as Edit Member.
+              <div className="min-w-0">
+                <MasterDepartmentSelect companyId={user.company_id || 'internal'} value={form.department_id}
+                  onChange={(v) => setField('department_id', v || '')}
+                  labelClassName="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest"
+                  selectClassName="w-full px-3.5 py-2 border rounded-xl text-[13px] font-medium outline-none bg-[var(--input-bg)] border-[var(--input-border)] text-[var(--text-main)] focus:border-[var(--accent-indigo)]" />
+              </div>
+            ) : (
+              <Field icon={Briefcase} label="Department" value={user.department_name} editing={false} editable={false} />
+            )}
             <Field icon={UsersIcon} label="Reporting Manager" value={reportingManagerName} editable={false} />
             <Field icon={Calendar} label="Joining Date" kind="date" value={isEditingPro ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={isEditingPro} editable={canEdit('joining_date')} onChange={(v) => setField('joining_date', v)} />
             <Field icon={MapPin} label="Office Location" value={user.office_location} editable={false} />

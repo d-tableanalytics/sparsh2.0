@@ -718,8 +718,8 @@ async def main():
     section("Email wording comes from Notification Templates (nothing hard-coded)")
     from app.models.notify_modules import NOTIFY_MODULES
     idf_mod = NOTIFY_MODULES["idf"]
-    check("an 'Inter-Departmental Feedback' module with 14 email templates is listed under Notification Templates",
-          idf_mod["label"] == "Inter-Departmental Feedback" and len(idf_mod["triggers"]) == 14
+    check("an 'Inter-Departmental Feedback' module with 17 email templates is listed under Notification Templates",
+          idf_mod["label"] == "Inter-Departmental Feedback" and len(idf_mod["triggers"]) == 17
           and all(t["slug"] + "_email" in ns.DEFAULT_TEMPLATES for t in idf_mod["triggers"]))
     tpl = store.setdefault("notification_templates", Coll())
     tpl.docs.append({"_id": ObjectId(), "slug": "idf_issue_raised_email", "scope": "company", "company_id": C,

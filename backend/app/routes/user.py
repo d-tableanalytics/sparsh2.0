@@ -140,6 +140,9 @@ class SelfProfileUpdate(BaseModel):
     emergency_mobile: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    # The master department (HRMS ▸ Departments) — the one list all modules use. Same rule as
+    # the rest of this model: written only by someone who maintains employee records.
+    department_id: Optional[str] = None
     reporting_manager: Optional[str] = None
     joining_date: Optional[str] = None
     level: Optional[str] = None
@@ -269,6 +272,17 @@ async def update_my_profile(updates: SelfProfileUpdate, current_user: dict = Dep
         fn = update_data.get("first_name", user.get("first_name")) or ""
         ln = update_data.get("last_name", user.get("last_name")) or ""
         update_data["full_name"] = f"{fn} {ln}".strip()
+
+    # Master department: must belong to the user's own company (staff → the internal one),
+    # exactly as on Edit Member.
+    if "department_id" in update_data:
+        from app.utils.master_department import resolve_department
+        user_company = str(user.get("company_id") or "")
+        if not user_company:
+            from app.utils.hrms_access import internal_company_id
+            user_company = await internal_company_id() or ""
+        update_data["department_id"], update_data["department_name"] = await resolve_department(
+            user_company, update_data.get("department_id"))
 
     update_data["updated_at"] = datetime.utcnow()
     await get_collection(col_name).update_one({"_id": ObjectId(user_id)}, {"$set": update_data})

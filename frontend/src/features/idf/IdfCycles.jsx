@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { getIdfCycles, startIdfCycle, getIdfCycleStatus, cancelIdfCycle, getIdfCycleOptions, addToIdfCycle, getIdfDeletePreview, deleteIdfCycle } from '../../services/idfApi';
 import { CARD, FIELD, TH, TD, day, dayTime, monthLabel, isStaffAdmin, canDelete } from './idfKit';
+import ResultsMeetingCard from './IdfMeeting';
 import { StatusChip, CompanyPicker } from './IdfBits';
 
 /* ─────────────────────────────────────────────────────────────
@@ -218,6 +219,9 @@ const IdfCycles = () => {
               ))}
             </div>
           </div>
+          {shownStatus.cycle?.status === 'Completed' && (
+            <ResultsMeetingCard key={shownStatus.cycle.id} cycleId={shownStatus.cycle.id} companyId={cid} />
+          )}
           {!!shownStatus.responses?.total && (
             <div className={`${CARD} flex flex-wrap items-center gap-3 px-4 py-3`}>
               <span className="rounded-lg p-2 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]"><MessageSquareReply size={16} /></span>

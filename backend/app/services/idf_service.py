@@ -251,6 +251,8 @@ async def settings(company_id: str) -> dict:
         "comment_required_for": doc.get("comment_required_for") or list(DEFAULT_COMMENT_REQUIRED),
         # The 1–5 scale's labels (configurable); the score stays (average ÷ 5) × 100.
         "rating_labels": doc.get("rating_labels") or [RATING_LABELS[i] for i in range(1, 6)],
+        # Setup ▸ Results meeting (time, length, days after results, type, link, venue).
+        "meeting": _process().meeting_settings(doc),
     }
 
 
@@ -272,6 +274,7 @@ async def get_setup(user: dict, company_id: Optional[str]) -> dict:
         "reminder_days_before": st["reminder_days_before"],
         "comment_required_for": st["comment_required_for"],
         "rating_labels": st["rating_labels"],
+        "meeting": st["meeting"],
         "has_cycles": bool(await get_collection(COLL_CYCLES).find_one(
             {"company_id": cid, "status": CYCLE_COMPLETED}, {"_id": 1})),
         "md_count": len(mds), "md_names": [_name(u) for u in mds],
@@ -306,6 +309,7 @@ async def save_setup(user: dict, company_id: Optional[str], payload: dict) -> di
     await get_collection(COLL_SETTINGS).update_one(
         {"company_id": cid},
         {"$set": {"company_id": cid, "parameters": params, "rating_labels": labels,
+                  "meeting": _process().clean_meeting_settings(payload.get("meeting") or (await settings(cid))["meeting"]),
                   "deadline_days": deadline_days, "reminder_days_before": before,
                   "comment_required_for": req, "updated_at": now, "updated_by": str(user.get("_id") or "")},
          "$setOnInsert": {"created_at": now}}, upsert=True)

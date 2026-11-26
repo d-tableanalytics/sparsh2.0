@@ -117,12 +117,83 @@ async def hr_people(cid: str) -> List[dict]:
 # ─────────────────────────────────────────────────────────────
 # Results meeting (MD + all HODs) — "Review: results meeting with the MD and all HODs"
 # ─────────────────────────────────────────────────────────────
+# Setup ▸ Results meeting — the defaults every results meeting is created with.
+MEETING_DEFAULTS = {"time": "11:00", "duration": 60, "days_after": 3, "mode": "online", "link": "", "venue": ""}
+MEETING_MODES = ("online", "in_person", "both")
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def meeting_settings(doc: Optional[dict]) -> dict:
+    return {**MEETING_DEFAULTS, **{k: v for k, v in ((doc or {}).get("meeting") or {}).items() if v is not None}}
+
+
+def clean_meeting_settings(raw: dict) -> dict:
+    """Validate Setup ▸ Results meeting."""
+    m = {**MEETING_DEFAULTS, **(raw or {})}
+    t = str(m.get("time") or "")
+    try:
+        hh, mm = (int(x) for x in t.split(":"))
+        assert 0 <= hh < 24 and 0 <= mm < 60
+    except Exception:
+        raise HTTPException(status_code=422, detail="Meeting time must be HH:MM, e.g. 11:00.")
+    try:
+        duration, days = int(m.get("duration")), int(m.get("days_after"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Meeting length and days must be whole numbers.")
+    if not 15 <= duration <= 240 or not 1 <= days <= 15:
+        raise HTTPException(status_code=422, detail="Meeting length 15–240 minutes; 1–15 working days after the results.")
+    mode = str(m.get("mode") or "online")
+    if mode not in MEETING_MODES:
+        raise HTTPException(status_code=422, detail="Meeting type must be online, in person or both.")
+    link = str(m.get("link") or "").strip()[:500]
+    if link and not link.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="The meeting link must start with http:// or https://.")
+    return {"time": f"{hh:02d}:{mm:02d}", "duration": duration, "days_after": days, "mode": mode,
+            "link": link, "venue": str(m.get("venue") or "").strip()[:200]}
+
+
+def _slot(day: date, hhmm: str, minutes: int):
+    """An India-time slot as the UTC ISO strings the calendar stores."""
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    start = datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(timezone.utc)
+    end = start + timedelta(minutes=minutes)
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ist(iso: str) -> datetime:
+    return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).astimezone(IST)
+
+
+async def _meeting_event(cycle: dict):
+    from app.services.idf_service import _oid
+    if not cycle.get("results_meeting_event_id") or not cycle.get("results_meeting_coll"):
+        return None, None
+    coll = cycle["results_meeting_coll"]
+    return await get_collection(coll).find_one({"_id": _oid(cycle["results_meeting_event_id"])}), coll
+
+
+def _meeting_ctx(cycle: dict, ev: dict, extra: Optional[dict] = None) -> dict:
+    s, e = _ist(ev["start"]), _ist(ev["end"])
+    link = ev.get("meeting_link") or ""
+    return {"cycle_month": _month(cycle.get("period")),
+            "meeting_date": s.strftime("%a, %d %b %Y"),
+            "meeting_time": f"{s.strftime('%I:%M %p').lstrip('0').lower()} – {e.strftime('%I:%M %p').lstrip('0').lower()} IST",
+            "meeting_link": f'<a href="{link}">{link}</a>' if link else "—",
+            "venue": ev.get("location") or "—", **(extra or {})}
+
+
+async def _invitees(cid: str, ev: dict) -> List[dict]:
+    from app.services.idf_service import company_people
+    ids = set(ev.get("assigned_member_ids") or [])
+    return [u for u in await company_people(cid) if str(u["_id"]) in ids]
+
+
 async def schedule_results_meeting(cycle: dict) -> Optional[str]:
-    """Once per cycle: a calendar entry for the MD and every participating HOD, three working
-    days after the results are in. It is an ordinary meeting — they can move it."""
+    """Once per cycle: a calendar meeting for the MD and every participating HOD, on the time,
+    length, day, link and venue set in Setup ▸ Results meeting. Each invitee is emailed."""
     if cycle.get("results_meeting_event_id") or cycle.get("cycle_type") == "pulse":
         return None
-    from app.services.idf_service import company_mds, departments, _name
+    from app.services.idf_service import company_mds, departments
     from app.utils.calendar_utils import get_target_collection_name
     cid = cycle["company_id"]
     mds = await company_mds(cid)
@@ -134,25 +205,142 @@ async def schedule_results_meeting(cycle: dict) -> Optional[str]:
             members += [h["id"] for h in d["heads"] if h["id"] not in members]
     if not members:
         return None
-    day = add_working_days(_as_date(cycle.get("completed_at") or datetime.now(timezone.utc)), 3)
+    m = meeting_settings(await get_collection("idf_settings").find_one({"company_id": cid}))
+    day = add_working_days(_as_date(cycle.get("completed_at") or datetime.now(timezone.utc)), int(m["days_after"]))
+    start, end = _slot(day, m["time"], int(m["duration"]))
     coll = await get_target_collection_name({"assigned_member_ids": members})
     month = _month(cycle.get("period"))
-    ev = await get_collection(coll).insert_one({
+    ev_doc = {
         "kind": "idf_results_meeting", "type": "event",
         "title": f"Inter-Departmental Feedback results meeting — {month}",
         "description": (f"Results meeting of the MD and all HODs for the {month} feedback. The MD opens and "
                         f"sets the no-blame tone. {NO_RETALIATION} The bands decide the steps: Red repair, "
                         f"Amber strengthen, Green sustain. Within {RESPONSE_DAYS} days each HOD tells the "
                         f"raters \"you said, we did\"."),
-        # 11:00–12:00 India time
-        "start": f"{day.isoformat()}T05:30:00Z", "end": f"{day.isoformat()}T06:30:00Z",
+        "start": start, "end": end,
+        "meeting_link": m["link"] or None, "location": m["venue"] or None, "meeting_mode": m["mode"],
+        "rsvp": {},
         "user_id": members[0], "assigned_member_ids": members, "company_id": cid,
         "status": "schedule", "idf_cycle_id": str(cycle["_id"]), "created_at": datetime.now(timezone.utc),
-        "created_by_name": "Inter-Departmental Feedback"})
+        "created_by_name": "Inter-Departmental Feedback"}
+    ev = await get_collection(coll).insert_one(ev_doc)
     await get_collection("idf_cycles").update_one(
         {"_id": cycle["_id"]}, {"$set": {"results_meeting_event_id": str(ev.inserted_id),
                                          "results_meeting_coll": coll, "results_meeting_date": day.isoformat()}})
+    ctx = _meeting_ctx(cycle, ev_doc)
+    for u in await _invitees(cid, ev_doc):
+        await idf_mail(u, "idf_meeting_invite", ctx, cid)
     return day.isoformat()
+
+
+def _meeting_out(cycle: dict, ev: dict, people: Dict[str, dict], viewer_id: str = "") -> dict:
+    from app.services.idf_service import _name
+    rsvp = ev.get("rsvp") or {}
+    s, e = _ist(ev["start"]), _ist(ev["end"])
+    invitees = [{"id": i, "name": _name(people[i]) if i in people else "—",
+                 "response": (rsvp.get(i) or {}).get("response") or "pending",
+                 "reason": (rsvp.get(i) or {}).get("reason") or ""}
+                for i in ev.get("assigned_member_ids") or []]
+    return {"cycle_id": str(cycle["_id"]), "event_id": str(ev["_id"]), "title": ev.get("title"),
+            "date": s.date().isoformat(), "time": s.strftime("%H:%M"),
+            "duration": int((e - s).total_seconds() // 60),
+            "meeting_link": ev.get("meeting_link") or "", "venue": ev.get("location") or "",
+            "mode": ev.get("meeting_mode") or "online", "invitees": invitees,
+            "attending": sum(1 for x in invitees if x["response"] == "attending"),
+            "declined": sum(1 for x in invitees if x["response"] == "declined"),
+            "is_invitee": bool(viewer_id) and viewer_id in (ev.get("assigned_member_ids") or []),
+            "my_response": (rsvp.get(viewer_id) or {}).get("response") if viewer_id else None,
+            "rescheduled_at": ev.get("rescheduled_at")}
+
+
+async def _cycle_and_event(cid: str, cycle_id: str):
+    from app.services.idf_service import _oid
+    c = await get_collection("idf_cycles").find_one({"_id": _oid(cycle_id), "company_id": cid})
+    if not c:
+        raise HTTPException(status_code=404, detail="Feedback cycle not found.")
+    ev, coll = await _meeting_event(c)
+    if not ev:
+        raise HTTPException(status_code=404, detail="This cycle has no results meeting yet — it is booked when the cycle completes.")
+    return c, ev, coll
+
+
+async def get_meeting(user: dict, company_id: Optional[str], cycle_id: str) -> dict:
+    """The results meeting of a cycle — for HR / Admin / MD (manage) and for its invitees."""
+    from app.services.idf_service import assert_manager, user_company_id, company_people
+    uid = str(user.get("_id") or "")
+    try:
+        cid, manager = await assert_manager(user, company_id), True
+    except HTTPException:
+        cid, manager = await user_company_id(user), False
+    c, ev, _ = await _cycle_and_event(cid, cycle_id)
+    if not manager and uid not in (ev.get("assigned_member_ids") or []):
+        raise HTTPException(status_code=403, detail="Only the invitees and HR / Admin / MD see this meeting.")
+    people = {str(u["_id"]): u for u in await company_people(cid)}
+    return {**_meeting_out(c, ev, people, uid), "can_manage": manager}
+
+
+async def reschedule_meeting(user: dict, company_id: Optional[str], cycle_id: str, payload: dict) -> dict:
+    """HR / Client Admin / MD move the results meeting, or change its link or venue. Every invitee
+    is emailed and asked to reply again."""
+    from app.services.idf_service import assert_manager, company_people, audit
+    cid = await assert_manager(user, company_id)
+    c, ev, coll = await _cycle_and_event(cid, cycle_id)
+    m = clean_meeting_settings({"time": payload.get("time") or _ist(ev["start"]).strftime("%H:%M"),
+                                "duration": payload.get("duration") or 60, "days_after": 1,
+                                "mode": payload.get("mode") or ev.get("meeting_mode") or "online",
+                                "link": payload.get("meeting_link", ev.get("meeting_link") or ""),
+                                "venue": payload.get("venue", ev.get("location") or "")})
+    try:
+        day = date.fromisoformat(str(payload.get("date") or _ist(ev["start"]).date().isoformat())[:10])
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Choose the meeting date.")
+    start, end = _slot(day, m["time"], int(m["duration"]))
+    if start < datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"):
+        raise HTTPException(status_code=422, detail="Choose a time in the future.")
+    moved = start != ev["start"] or end != ev["end"]
+    sets = {"start": start, "end": end, "meeting_link": m["link"] or None, "location": m["venue"] or None,
+            "meeting_mode": m["mode"], "updated_at": datetime.now(timezone.utc)}
+    if moved:
+        sets.update({"rsvp": {}, "rescheduled_at": datetime.now(timezone.utc)})   # new time: everyone replies again
+    await get_collection(coll).update_one({"_id": ev["_id"]}, {"$set": sets})
+    await get_collection("idf_cycles").update_one({"_id": c["_id"]}, {"$set": {"results_meeting_date": day.isoformat()}})
+    ev = {**ev, **sets}
+    note = str(payload.get("note") or "").strip()[:500]
+    ctx = _meeting_ctx(c, ev, {"note": note or ("The meeting has moved." if moved else "The meeting details were updated.")})
+    for u in await _invitees(cid, ev):
+        await idf_mail(u, "idf_meeting_rescheduled", ctx, cid)
+    await audit(cid, user, "results meeting rescheduled" if moved else "results meeting updated",
+                {"cycle_id": cycle_id, "start": start})
+    people = {str(u["_id"]): u for u in await company_people(cid)}
+    return {**_meeting_out(c, ev, people, str(user.get("_id") or "")), "can_manage": True}
+
+
+async def rsvp_meeting(user: dict, cycle_id: str, payload: dict) -> dict:
+    """An invitee answers: attending, or can't attend (with a reason). A decline is sent to the
+    organisers (HR / Client Admin and the MD) so they can move the meeting."""
+    from app.services.idf_service import user_company_id, company_people, company_mds, _name
+    cid = await user_company_id(user)
+    uid = str(user.get("_id") or "")
+    c, ev, coll = await _cycle_and_event(cid, cycle_id)
+    if uid not in (ev.get("assigned_member_ids") or []):
+        raise HTTPException(status_code=403, detail="Only the people invited to this meeting can reply.")
+    resp = str(payload.get("response") or "")
+    if resp not in ("attending", "declined"):
+        raise HTTPException(status_code=422, detail="Reply attending or can't attend.")
+    reason = str(payload.get("reason") or "").strip()[:300]
+    if resp == "declined" and not reason:
+        raise HTTPException(status_code=422, detail="Say briefly why you can't attend, so the organiser can find a better time.")
+    entry = {"response": resp, "reason": reason, "name": _name(user), "at": datetime.now(timezone.utc)}
+    await get_collection(coll).update_one({"_id": ev["_id"]}, {"$set": {f"rsvp.{uid}": entry}})
+    ev = {**ev, "rsvp": {**(ev.get("rsvp") or {}), uid: entry}}
+    if resp == "declined":
+        organisers = {str(u["_id"]): u for u in [*(await hr_people(cid)), *(await company_mds(cid))]}
+        organisers.pop(uid, None)
+        ctx = _meeting_ctx(c, ev, {"person": _name(user), "reason": reason})
+        for u in organisers.values():
+            await idf_mail(u, "idf_meeting_declined", ctx, cid)
+    people = {str(u["_id"]): u for u in await company_people(cid)}
+    return _meeting_out(c, ev, people, uid)
 
 
 # ─────────────────────────────────────────────────────────────

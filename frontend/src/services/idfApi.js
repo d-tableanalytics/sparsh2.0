@@ -19,6 +19,10 @@ export const startIdfCycle = (payload, companyId) => api.post('/idf/cycles', pay
 export const getIdfCycleStatus = (cycleId, companyId) => api.get(`/idf/cycles/${cycleId}/status`, co(companyId));
 // Add more department feedback to a started cycle (a completed one reopens).
 export const addToIdfCycle = (cycleId, payload, companyId) => api.post(`/idf/cycles/${cycleId}/add`, payload, co(companyId));
+// The results meeting of a cycle: details + RSVP; HR / Client Admin / MD reschedule it.
+export const getIdfMeeting = (cycleId, companyId) => api.get(`/idf/cycles/${cycleId}/results-meeting`, co(companyId));
+export const rescheduleIdfMeeting = (cycleId, payload, companyId) => api.post(`/idf/cycles/${cycleId}/results-meeting`, payload, co(companyId));
+export const rsvpIdfMeeting = (cycleId, payload) => api.post(`/idf/cycles/${cycleId}/results-meeting/rsvp`, payload);
 // Permanent delete — MD, Client Admin, Super Admin. The preview says what goes; typing DELETE confirms.
 export const getIdfDeletePreview = (cycleId, companyId) => api.get(`/idf/cycles/${cycleId}/delete-preview`, co(companyId));
 export const deleteIdfCycle = (cycleId, companyId) =>

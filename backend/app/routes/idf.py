@@ -64,6 +64,29 @@ async def idf_cycle_status(cycle_id: str, company_id: Optional[str] = Query(None
     return await idf.cycle_status(current_user, company_id, cycle_id)
 
 
+@router.get("/cycles/{cycle_id}/results-meeting")
+async def idf_get_meeting(cycle_id: str, company_id: Optional[str] = Query(None),
+                          current_user: dict = Depends(get_current_user)):
+    """The cycle's results meeting: time, link, venue and who is attending."""
+    from app.services import idf_process
+    return await idf_process.get_meeting(current_user, company_id, cycle_id)
+
+
+@router.post("/cycles/{cycle_id}/results-meeting")
+async def idf_reschedule_meeting(cycle_id: str, payload: dict = Body(...), company_id: Optional[str] = Query(None),
+                                 current_user: dict = Depends(get_current_user)):
+    """HR / Client Admin / MD reschedule the meeting or change its link / venue (invitees are emailed)."""
+    from app.services import idf_process
+    return await idf_process.reschedule_meeting(current_user, company_id, cycle_id, payload)
+
+
+@router.post("/cycles/{cycle_id}/results-meeting/rsvp")
+async def idf_meeting_rsvp(cycle_id: str, payload: dict = Body(...), current_user: dict = Depends(get_current_user)):
+    """An invitee replies: attending, or can't attend with a reason."""
+    from app.services import idf_process
+    return await idf_process.rsvp_meeting(current_user, cycle_id, payload)
+
+
 @router.get("/cycles/{cycle_id}/delete-preview")
 async def idf_delete_preview(cycle_id: str, company_id: Optional[str] = Query(None),
                              current_user: dict = Depends(get_current_user)):
