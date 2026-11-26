@@ -247,10 +247,18 @@ async def generate_actions(cycle: dict) -> int:
     md = {"id": str(mds[0]["_id"]), "name": _name(mds[0])} if mds else None
     coll = get_collection(COLL_ACTIONS)
     await coll.delete_many({"cycle_id": str(cycle["_id"]), "auto": True, "touched": {"$ne": True}})
-    docs = build_actions(cycle, res, heads, base, md)
+    # Actions someone has already worked on are kept (above) — never generate a second copy of
+    # one of them when the cycle completes again (e.g. after departments were added).
+    kept = {_action_key(a) for a in await coll.find({"cycle_id": str(cycle["_id"])}).to_list(1000)}
+    docs = [d for d in build_actions(cycle, res, heads, base, md) if _action_key(d) not in kept]
     if docs:
         await coll.insert_many(docs)
     return len(docs)
+
+
+def _action_key(a: dict) -> tuple:
+    """Which improvement item an action is: its type, the department and who gave the feedback."""
+    return (a.get("type"), a.get("department_id"), a.get("department"), a.get("feedback_from"))
 
 
 def build_actions(cycle: dict, res: dict, heads: dict, base: date, md: Optional[dict] = None) -> List[dict]:

@@ -367,6 +367,8 @@ const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
 
 // ─── Inter-Departmental Feedback activities (backend idf_service.EVENT_KIND) ───
 const FEEDBACK_KIND = 'idf_feedback';
+// The results meeting of the MD and all HODs, scheduled automatically when a cycle completes.
+const FEEDBACK_MEETING = 'idf_results_meeting';
 // Scheduled (created) -> Pending (the HOD opened the form) -> Overdue (deadline passed) ->
 // Completed (submitted and stored). Past the deadline an unsubmitted one reads Overdue.
 const feedbackStatus = (p = {}) => {
@@ -376,7 +378,8 @@ const feedbackStatus = (p = {}) => {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     return due && due < today ? 'Overdue' : 'Pending';
 };
-const feedbackColor = (p) => ({ Completed: '#10b981', Overdue: '#e11d48', Cancelled: '#94a3b8' }[feedbackStatus(p)] || '#0d9488');
+const feedbackColor = (p) => (p?.kind === FEEDBACK_MEETING ? '#6366f1'
+    : ({ Completed: '#10b981', Overdue: '#e11d48', Cancelled: '#94a3b8' }[feedbackStatus(p)] || '#0d9488'));
 // The deadline is a DATE (stored as that day's local time), so show the date only.
 const feedbackDueLabel = (start) => {
     const key = String(start || '').slice(0, 10);
@@ -718,7 +721,7 @@ const CalendarPage = () => {
         const todo = isTodoRow(e);
         // An Inter-Departmental Feedback activity is a reminder to fill a form, not a session:
         // it gets its own type, so it is never listed or counted as a session.
-        if (e.extendedProps?.kind === FEEDBACK_KIND) {
+        if (e.extendedProps?.kind === FEEDBACK_KIND || e.extendedProps?.kind === FEEDBACK_MEETING) {
             return {
                 id: e.id, title: e.title, start: e.start, end: e.end, allDay: e.allDay,
                 backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
@@ -1061,6 +1064,40 @@ const CalendarPage = () => {
     // form is submitted), the submission date, and a way to the form. No Complete / Edit /
     // Delete — the activity is managed by the feedback cycle.
     const renderFeedbackTile = (ev) => {
+        if (ev.extendedProps.kind === FEEDBACK_MEETING) {
+            // The results meeting: who, when and what it is for — an ordinary meeting, not a session.
+            const people = (ev.extendedProps.assigned_member_ids || []).length;
+            const canSeeResults = (user?.governance_role || '').trim().toUpperCase() === 'MD'
+                || ['superadmin', 'admin'].includes(user?.role);
+            return (
+                <div key={ev.id} className="relative rounded-[24px] border p-4 overflow-hidden"
+                    style={{ background: 'rgba(99, 102, 241, 0.04)', borderColor: 'rgba(99, 102, 241, 0.25)' }}>
+                    <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: '#6366f1' }} />
+                    <div className="flex items-center gap-2 text-[10px] font-black text-indigo-600 uppercase tracking-widest">
+                        <MessageSquareText size={11} /> Feedback results meeting
+                        <span className="px-2 py-0.5 rounded-md text-[8px] border bg-indigo-50 text-indigo-600 border-indigo-100">Meeting</span>
+                    </div>
+                    <h4 className="mt-1.5 pr-6 text-[14px] font-black text-[var(--text-main)] leading-tight">{ev.title}</h4>
+                    <p className="mt-1 pr-6 text-[11px] text-[var(--text-muted)] leading-snug">
+                        The MD and all HODs review the Inter-Departmental Feedback results together. The MD opens with
+                        "no retaliation"; the Red / Amber / Green bands decide the next steps; within 15 days each HOD
+                        tells their raters "you said, we did".
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-dashed border-[var(--border)] pt-3">
+                        <span className="flex items-center gap-3 text-[10px] font-bold text-[var(--text-muted)]">
+                            <span className="flex items-center gap-1"><Clock size={11} /> <b className="text-[var(--text-main)]">{formatShortIST(ev.start)}</b></span>
+                            {!!people && <span>{people} invited (MD + HODs)</span>}
+                        </span>
+                        {canSeeResults && (
+                            <button type="button" onClick={() => navigate('/idf/dashboard')}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90">
+                                View results <ArrowUpRight size={11} />
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        }
         const st = feedbackStatus(ev.extendedProps);
         const chip = {
             Completed: 'bg-emerald-100 text-emerald-700 border-emerald-200',

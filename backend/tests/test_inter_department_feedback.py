@@ -584,6 +584,10 @@ async def main():
     r2 = await S.submit(HOD["Commercial"], {**op, "giver_dept_id": str(D["Commercial"])})
     check("…then completes again and the MD gets a fresh report", r2["cycle_completed"]
           and any(not isinstance(m[0], str) and m[1] == ["md@co.test"] for m in mails))
+    nov_keys = [A._action_key(a) for a in store["idf_actions"].docs if a["cycle_id"] == nov_id]
+    check("completing again never duplicates an action someone already worked on",
+          len(nov_keys) == len(set(nov_keys)) and any(a.get("touched") for a in store["idf_actions"].docs
+                                                       if a["cycle_id"] == nov_id))
     pkg2 = next(m for m in mails if not isinstance(m[0], str))
     att2 = next(p for p in pkg2[0].walk() if (p.get_filename() or "").startswith("Interdepartmental_Feedback_Compiled_"))
     check("the new Compiled Excel covers every department, Operation included",
