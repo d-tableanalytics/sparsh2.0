@@ -125,6 +125,90 @@ async def main():
     check("the MD can change it too (venue only: same time, replies kept)", md_rs["venue"] == "Board room"
           and md_rs["date"] == new_day)
 
+    section("Raise an Issue: only about OTHER departments")
+    li = await P.list_issues(HOD["Sales"], None)
+    check("the Sales HOD is not offered Sales", [d["name"] for d in li["departments"]] == ["HR"])
+    await refused("raising an issue about one's own department",
+                  P.raise_issue(HOD["Sales"], {"about_department_id": str(D["Sales"]),
+                                               "description": "Our own team is late again."}), 422)
+    ok = await P.raise_issue(HOD["Sales"], {"about_department_id": str(D["HR"]), "description": "Leave approvals take a week."})
+    check("…but can raise one about HR", ok["about_department"] == "HR")
+
+    section("Action-plan meetings: Schedule meeting on Red / Amber / company-wide repair")
+    import app.services.idf_meetings as M
+    import app.services.idf_analysis as A
+    soon = (date.today() + timedelta(days=5)).isoformat()
+    base = {"company_id": C, "cycle_id": cyc["id"], "period": "2026-11", "status": "Open", "remarks": [],
+            "auto": True, "touched": False, "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc)}
+    red = {**base, "_id": ObjectId(), "type": "Relationship repair", "band": "Red", "department": "HR",
+           "department_id": str(D["HR"]), "feedback_from": "Sales", "owner_user_id": str(HOD["HR"]["_id"]),
+           "owner_name": "HR Head", "target_date": soon}
+    amb = {**base, "_id": ObjectId(), "type": "Strengthen", "band": "Amber", "department": "Sales",
+           "department_id": str(D["Sales"]), "feedback_from": "HR", "owner_user_id": str(HOD["Sales"]["_id"]),
+           "owner_name": "Sales Head", "target_date": soon}
+    comp = {**base, "_id": ObjectId(), "type": "Company-wide repair", "band": "Red", "department": "Company",
+            "department_id": None, "feedback_from": None, "owner_user_id": str(MD["_id"]), "owner_name": "Md Person",
+            "target_date": soon}
+    grn = {**base, "_id": ObjectId(), "type": "Sustain", "band": "Green", "department": "Sales",
+           "department_id": str(D["Sales"]), "feedback_from": None, "owner_user_id": str(HOD["Sales"]["_id"]), "target_date": soon}
+    store["idf_actions"].docs.extend([red, amb, comp, grn])
+    pr = await M.get_action_meeting(HOD["HR"], None, str(red["_id"]))
+    inv = set(pr["proposal"]["invitee_ids"])
+    check("Red proposal: rated HOD + lowest rater's HOD + MD & HR, 60 min, before the deadline",
+          not pr["booked"] and inv == {str(HOD["HR"]["_id"]), str(HOD["Sales"]["_id"]), str(MD["_id"]), str(HRM["_id"])}
+          and pr["proposal"]["duration"] == 60 and pr["proposal"]["date"] <= soon
+          and pr["proposal"]["title"] == "Repair meeting: Sales → HR")
+    pa = await M.get_action_meeting(HOD["Sales"], None, str(amb["_id"]))
+    check("Amber proposal: just the two HODs, 30 minutes",
+          set(pa["proposal"]["invitee_ids"]) == {str(HOD["Sales"]["_id"]), str(HOD["HR"]["_id"])}
+          and pa["proposal"]["duration"] == 30 and pa["proposal"]["title"] == "Interface meeting: HR → Sales")
+    pc = await M.get_action_meeting(MD, None, str(comp["_id"]))
+    check("company below 60%: a company-wide repair session — MD, all HODs and HR",
+          pc["proposal"]["title"].startswith("Company-wide repair session")
+          and set(pc["proposal"]["invitee_ids"]) == {str(MD["_id"]), str(HOD["HR"]["_id"]), str(HOD["Sales"]["_id"]), str(HRM["_id"])})
+    check("a Green action needs no meeting", (await M.get_action_meeting(HOD["Sales"], None, str(grn["_id"])))["needed"] is False)
+    await refused("someone not involved books the Red meeting",
+                  M.schedule_action_meeting(OUT, None, str(red["_id"]), {**pr["proposal"]}), 403)
+    await refused("only one invitee", M.schedule_action_meeting(HOD["HR"], None, str(red["_id"]),
+                                                                {**pr["proposal"], "invitee_ids": [str(HOD["HR"]["_id"])]}), 422)
+    mails.clear()
+    bk = await M.schedule_action_meeting(HOD["HR"], None, str(red["_id"]), {**pr["proposal"], "time": "16:00"})
+    check("the owner books the Red meeting", bk["booked"] and bk["time"] == "16:00" and len(bk["invitees"]) == 4)
+    ev2 = next(e for cn in ("LEARNER_CALENDER", "STAFF_CALENDER") for e in store.get(cn, Coll()).docs
+               if e.get("idf_action_id") == str(red["_id"]))
+    check("it is in the invitees' calendars, linked to the action", ev2["kind"] == "idf_action_meeting"
+          and red.get("meeting", {}).get("event_id") == str(ev2["_id"]))
+    check("each invitee gets the invitation email",
+          len([m for m in mails if m["slug"] == "idf_action_meeting_invite_email"]) == 4)
+    o_hod = {x["id"]: x for x in (await M.meeting_options(HOD["HR"], None))["actions"]}
+    o_hr = {x["id"]: x for x in (await M.meeting_options(HRM, None))["actions"]}
+    check("Calendar ▸ Schedule Action Plan Meeting: an HOD picks from their department's Red / Amber actions",
+          set(o_hod) == {str(red["_id"])} and o_hod[str(red["_id"])]["booked"])
+    check("…HR from all the company's Red / Amber / company-wide actions (never Green)",
+          set(o_hr) == {str(red["_id"]), str(amb["_id"]), str(comp["_id"])} and not o_hr[str(amb["_id"])]["booked"])
+    check("…and the MD too (all of them)",
+          {x["id"] for x in (await M.meeting_options(MD, None))["actions"]} == {str(red["_id"]), str(amb["_id"]), str(comp["_id"])})
+    r3 = await M.rsvp_action_meeting(HOD["Sales"], str(red["_id"]), {"response": "attending"})
+    check("an invitee replies Attending", r3["my_response"] == "attending")
+    mails.clear()
+    await M.rsvp_action_meeting(MD, str(red["_id"]), {"response": "declined", "reason": "Board meeting"})
+    check("a decline tells the booker / owner", any(m["slug"] == "idf_action_meeting_declined_email"
+                                                    and m["to"] == "hr@co.test" for m in mails))
+    mails.clear()
+    rs2 = await M.schedule_action_meeting(HRM, None, str(red["_id"]), {**pr["proposal"], "time": "10:00", "note": "Moved for the MD."})
+    check("HR reschedules it; replies reset; everyone emailed",
+          rs2["time"] == "10:00" and all(i["response"] == "pending" for i in rs2["invitees"])
+          and len([m for m in mails if m["slug"] == "idf_action_meeting_rescheduled_email"]) == 4)
+    mails.clear()
+    n = await M.alert_meetings_not_booked(date.today() + timedelta(days=4))
+    check("an Amber / company action 2 days from its deadline with no meeting → its owner is reminded once",
+          n == 2 and {m["to"] for m in mails} == {"sales@co.test", "md@co.test"}
+          and await M.alert_meetings_not_booked(date.today() + timedelta(days=4)) == 0)
+    await A.delete_action(MD, None, str(red["_id"]))
+    check("deleting the action removes its calendar meeting",
+          not any(e.get("idf_action_id") == str(red["_id"]) for cn in ("LEARNER_CALENDER", "STAFF_CALENDER")
+                  for e in store.get(cn, Coll()).docs))
+
     print(f"\n=== {sum(results)}/{len(results)} checks passed ===")
     if sum(results) != len(results):
         sys.exit(1)

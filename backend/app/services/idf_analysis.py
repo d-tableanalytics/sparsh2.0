@@ -448,6 +448,8 @@ async def delete_action(user: dict, company_id: Optional[str], action_id: str) -
     if not a:
         raise HTTPException(status_code=404, detail="Action not found.")
     cid = await assert_can_delete(user, a["company_id"])
+    from app.services.idf_meetings import delete_meeting_of
+    await delete_meeting_of(a)
     await get_collection(COLL_ACTIONS).delete_one({"_id": oid})
     await audit(cid, user, "action deleted", {"action_id": action_id, "department": a.get("department"),
                                               "type": a.get("type")})
@@ -480,7 +482,8 @@ async def alert_overdue_actions() -> int:
             sent += 1
         await get_collection(COLL_ACTIONS).update_one({"_id": a["_id"]},
                                                       {"$set": {"last_overdue_alert": today.isoformat()}})
-    return sent + await _alert_reviews_due(today)
+    from app.services.idf_meetings import alert_meetings_not_booked
+    return sent + await _alert_reviews_due(today) + await alert_meetings_not_booked(today)
 
 
 async def _alert_reviews_due(today: date) -> int:

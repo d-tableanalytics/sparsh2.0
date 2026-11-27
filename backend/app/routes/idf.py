@@ -107,6 +107,35 @@ async def idf_delete_issue(issue_id: str, company_id: Optional[str] = Query(None
     return await idf_process.delete_issue(current_user, company_id, issue_id)
 
 
+@router.get("/action-meeting-options")
+async def idf_action_meeting_options(company_id: Optional[str] = Query(None),
+                                     current_user: dict = Depends(get_current_user)):
+    """Calendar ▸ Schedule Action Plan Meeting: the Red / Amber / company-wide actions to pick from."""
+    from app.services import idf_meetings
+    return await idf_meetings.meeting_options(current_user, company_id)
+
+
+@router.get("/actions/{action_id}/meeting")
+async def idf_action_meeting(action_id: str, company_id: Optional[str] = Query(None),
+                             current_user: dict = Depends(get_current_user)):
+    """The action's meeting (Red repair / Amber interface / company-wide repair), or a proposal to book."""
+    from app.services import idf_meetings
+    return await idf_meetings.get_action_meeting(current_user, company_id, action_id)
+
+
+@router.post("/actions/{action_id}/meeting")
+async def idf_schedule_action_meeting(action_id: str, payload: dict = Body(...), company_id: Optional[str] = Query(None),
+                                      current_user: dict = Depends(get_current_user)):
+    from app.services import idf_meetings
+    return await idf_meetings.schedule_action_meeting(current_user, company_id, action_id, payload)
+
+
+@router.post("/actions/{action_id}/meeting/rsvp")
+async def idf_action_meeting_rsvp(action_id: str, payload: dict = Body(...), current_user: dict = Depends(get_current_user)):
+    from app.services import idf_meetings
+    return await idf_meetings.rsvp_action_meeting(current_user, action_id, payload)
+
+
 @router.delete("/actions/{action_id}")
 async def idf_delete_action(action_id: str, company_id: Optional[str] = Query(None),
                             current_user: dict = Depends(get_current_user)):

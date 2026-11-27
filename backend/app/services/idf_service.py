@@ -99,6 +99,13 @@ def _gov(u: dict) -> str:
     return (u.get("governance_role") or "").strip().upper()
 
 
+def is_hr(u: dict) -> bool:
+    """HR: the governance role HR — or, with no governance role set, the designation type HR
+    picked in Team (stored in `department`), the same way an HOD is recognised."""
+    gov = _gov(u)
+    return gov == "HR" or (not gov and str(u.get("department") or "").strip().upper() == "HR")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -133,7 +140,7 @@ def _is_staff_admin(user: dict) -> bool:
 
 def _is_manager_in_company(user: dict) -> bool:
     """HR / Admin of the company (and the MD, who may do everything)."""
-    return _gov(user) in {"HR", "MD"} or (user.get("role") or "").lower() == "clientadmin"
+    return _gov(user) == "MD" or is_hr(user) or (user.get("role") or "").lower() == "clientadmin"
 
 
 async def _company_for(user: dict, company_id: Optional[str]) -> str:
@@ -701,6 +708,9 @@ async def delete_cycle(user: dict, company_id: Optional[str], cycle_id: str, con
         if cyc.get("results_meeting_event_id") and cyc.get("results_meeting_coll"):
             await get_collection(cyc["results_meeting_coll"]).delete_one({"_id": _oid(cyc["results_meeting_event_id"])})
     ids = f["cycle_ids"]
+    from app.services.idf_meetings import delete_meeting_of
+    for a in await get_collection(COLL_ACTIONS).find({"cycle_id": {"$in": ids}}).to_list(2000):
+        await delete_meeting_of(a)                       # the action plans' meetings go too
     for coll in (COLL_SUBMISSIONS, COLL_LINKS, COLL_ACTIONS, COLL_RESPONSES):
         await get_collection(coll).delete_many({"cycle_id": {"$in": ids}})
     # A deleted pulse re-score no longer stands as the re-score of an older cycle's actions.

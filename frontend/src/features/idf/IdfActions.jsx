@@ -6,6 +6,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { getIdfActions, updateIdfAction, deleteIdfAction } from '../../services/idfApi';
 import { BAND_STYLE, CARD, FIELD, day, monthLabel, isStaffAdmin, canDelete } from './idfKit';
 import { BandChip, StatusChip, CompanyPicker } from './IdfBits';
+import ActionMeetingPanel from './IdfActionMeeting';
 
 /* ─────────────────────────────────────────────────────────────
    Inter-Departmental Feedback ▸ Action Plans (client document §7–§8).
@@ -82,6 +83,9 @@ const ActionCard = ({ a, onOpen }) => {
             ? <span className="font-bold" style={{ color: BAND_STYLE[a.rescore_band]?.c }}>Pulse re-score {a.rescore_pct}% ({a.rescore_band})</span>
             : a.rescore_date && a.status !== 'Closed' && <span className="text-[var(--text-muted)]">Re-score {day(a.rescore_date)}</span>}
           {a.process_fix && <span className="text-[var(--text-muted)]">Fix: <b className="text-[var(--text-main)]">{a.process_fix}</b></span>}
+          {(a.band === 'Red' || a.band === 'Amber') && a.status !== 'Closed' && (a.meeting?.start
+            ? <span className="font-semibold text-[var(--accent-indigo)]">Meeting {new Date(a.meeting.start).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' })}</span>
+            : <span className="font-semibold text-[var(--accent-orange)]">Meeting not booked</span>)}
           <span className="ml-auto"><StatusChip status={a.status} /></span>
         </div>
         {viewOnly && (
@@ -282,6 +286,10 @@ const IdfActions = () => {
               <button type="button" onClick={() => setEditing(null)} aria-label="Close" className="p-1 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]"><X size={17} /></button>
             </div>
             <div className="px-5 py-4 space-y-4 overflow-y-auto">
+              {/* Red repair / Amber interface / company-wide repair: book its meeting, or see it. */}
+              {(editing.band === 'Red' || editing.band === 'Amber') && (
+                <ActionMeetingPanel key={editing.id} actionId={editing.id} companyId={cid} />
+              )}
               {!!(editing.steps || []).length && (
                 <div className="space-y-1.5">
                   <span className={LABEL}>Improvement process{editing.stage ? ` · ${editing.category || editing.band} · ${editing.stage}` : ''}</span>

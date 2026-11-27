@@ -108,9 +108,10 @@ def html_list(items: List[str]) -> str:
 async def hr_people(cid: str) -> List[dict]:
     """Who runs the survey and the open channel: the company's HR (governance role HR);
     the company Admin when there is no HR."""
-    from app.services.idf_service import company_people, _gov
+    from app.services.idf_service import company_people
     people = await company_people(cid)
-    hr = [u for u in people if _gov(u) == "HR"]
+    from app.services.idf_service import is_hr
+    hr = [u for u in people if is_hr(u)]
     return hr or [u for u in people if (u.get("role") or "").lower() == "clientadmin"]
 
 
@@ -481,6 +482,16 @@ async def _issue_role(user: dict, company_id: Optional[str]):
         return await user_company_id(user), False
 
 
+async def own_department_ids(user: dict, cid: str) -> set:
+    """The user's own department(s): the master department on their profile and any department
+    they head. An issue is raised about ANOTHER department, so these are never offered."""
+    from app.services.idf_service import _my_dept_ids
+    own = set(await _my_dept_ids(user, cid)) if cid else set()
+    if user.get("department_id"):
+        own.add(str(user["department_id"]))
+    return own
+
+
 async def list_issues(user: dict, company_id: Optional[str]) -> dict:
     """HR / Admin / MD / Sparsh Admin: every issue, to bring to the weekly WRM. Anyone else:
     the issues they raised."""
@@ -490,8 +501,10 @@ async def list_issues(user: dict, company_id: Optional[str]) -> dict:
         return {"issues": [], "departments": [], "manager": False}
     q = {"company_id": cid} if manager else {"company_id": cid, "raised_by": str(user.get("_id") or "")}
     rows = await get_collection(COLL_ISSUES).find(q).sort("created_at", -1).to_list(1000)
+    own = await own_department_ids(user, cid)
     return {"issues": [_issue_out(i, manager) for i in rows], "manager": manager,
-            "departments": [{"id": d["id"], "name": d["name"]} for d in await departments(cid)]}
+            # Departments the user may raise an issue about — never their own.
+            "departments": [{"id": d["id"], "name": d["name"]} for d in await departments(cid) if d["id"] not in own]}
 
 
 async def raise_issue(user: dict, payload: dict) -> dict:
@@ -503,6 +516,9 @@ async def raise_issue(user: dict, payload: dict) -> dict:
     about = str(payload.get("about_department_id") or "")
     if about not in depts:
         raise HTTPException(status_code=422, detail="Choose the department the issue is about.")
+    if about in await own_department_ids(user, cid):
+        raise HTTPException(status_code=422, detail=(
+            f"{depts[about]['name']} is your own department — raise an issue about another department."))
     text = str(payload.get("description") or "").strip()
     if len(text) < 10:
         raise HTTPException(status_code=422, detail="Describe the issue: the situation and its effect (a sentence or two).")

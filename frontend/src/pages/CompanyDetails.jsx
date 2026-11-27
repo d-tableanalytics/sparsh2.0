@@ -1300,8 +1300,8 @@ const CompanyDetails = () => {
               </select></div>
             {/* Formerly "Department": saved as before (TPMS reads it to tell HODs/MDs apart);
                 picking one also fills the Designation field. */}
-            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Designation</label>
-              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value, designation: e.target.value || newUser.designation})}>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Governance Role</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value, designation: newUser.designation || e.target.value})}>
                 <option value="HOD">HOD</option><option value="Manager">Manager</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
               </select></div>
           </div>

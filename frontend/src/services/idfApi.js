@@ -55,5 +55,12 @@ export const getIdfIssues = (companyId) => api.get('/idf/issues', co(companyId))
 export const raiseIdfIssue = (payload) => api.post('/idf/issues', payload);
 export const updateIdfIssue = (id, payload, companyId) => api.patch(`/idf/issues/${id}`, payload, co(companyId));
 
-export const getIdfActions =(params) => api.get('/idf/actions', { params });
+// An action plan's meeting (Red repair / Amber interface / company-wide repair): see, book, reply.
+// Calendar ▸ Schedule Action Plan Meeting: the Red / Amber / company-wide actions this user can book for.
+export const getIdfActionMeetingOptions = (companyId) => api.get('/idf/action-meeting-options', co(companyId));
+export const getIdfActionMeeting = (id, companyId) => api.get(`/idf/actions/${id}/meeting`, co(companyId));
+export const scheduleIdfActionMeeting = (id, payload, companyId) => api.post(`/idf/actions/${id}/meeting`, payload, co(companyId));
+export const rsvpIdfActionMeeting = (id, payload) => api.post(`/idf/actions/${id}/meeting/rsvp`, payload);
+
+export const getIdfActions = (params) => api.get('/idf/actions', { params });
 export const updateIdfAction = (id, payload, companyId) => api.patch(`/idf/actions/${id}`, payload, co(companyId));
