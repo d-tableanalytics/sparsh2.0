@@ -6,6 +6,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { getIdfActions, updateIdfAction, deleteIdfAction } from '../../services/idfApi';
 import { BAND_STYLE, CARD, FIELD, day, monthLabel, isStaffAdmin, canDelete } from './idfKit';
 import { BandChip, StatusChip, CompanyPicker } from './IdfBits';
+import ActionMeetingPanel from './IdfActionMeeting';
 
 /* ─────────────────────────────────────────────────────────────
    Inter-Departmental Feedback ▸ Action Plans (client document §7–§8).
@@ -31,9 +32,11 @@ const initials = (n) => String(n || '?').split(/\s+/).filter(Boolean).slice(0, 2
 
 const ActionCard = ({ a, onOpen }) => {
   const band = BAND_STYLE[a.band];
+  // A plan from the department's own feedback (another department owns it): view only.
+  const viewOnly = !onOpen || a.read_only;
   return (
-    <button type="button" onClick={() => onOpen(a)}
-      className={`${CARD} group relative w-full overflow-hidden text-left transition-shadow hover:shadow-md`}>
+    <button type="button" onClick={viewOnly ? undefined : () => onOpen(a)} disabled={viewOnly}
+      className={`${CARD} group relative w-full overflow-hidden text-left transition-shadow ${viewOnly ? 'cursor-default disabled:opacity-100' : 'hover:shadow-md'}`}>
       <span className="absolute inset-y-0 left-0 w-1" style={{ background: band?.c || 'var(--border)' }} />
       <div className="pl-5 pr-4 py-3.5 space-y-2.5">
         <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
@@ -80,8 +83,14 @@ const ActionCard = ({ a, onOpen }) => {
             ? <span className="font-bold" style={{ color: BAND_STYLE[a.rescore_band]?.c }}>Pulse re-score {a.rescore_pct}% ({a.rescore_band})</span>
             : a.rescore_date && a.status !== 'Closed' && <span className="text-[var(--text-muted)]">Re-score {day(a.rescore_date)}</span>}
           {a.process_fix && <span className="text-[var(--text-muted)]">Fix: <b className="text-[var(--text-main)]">{a.process_fix}</b></span>}
+          {(a.band === 'Red' || a.band === 'Amber') && a.status !== 'Closed' && (a.meeting?.start
+            ? <span className="font-semibold text-[var(--accent-indigo)]">Meeting {new Date(a.meeting.start).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' })}</span>
+            : <span className="font-semibold text-[var(--accent-orange)]">Meeting not booked</span>)}
           <span className="ml-auto"><StatusChip status={a.status} /></span>
         </div>
+        {viewOnly && (
+          <p className="text-[10.5px] font-bold uppercase tracking-wide text-[var(--text-muted)]">View only · owned by {a.department}</p>
+        )}
       </div>
     </button>
   );
@@ -234,12 +243,31 @@ const IdfActions = () => {
         ) : (
           <div className={`${CARD} px-6 py-12 text-center`}>
             <ListChecks size={26} className="mx-auto text-[var(--text-muted)]" />
-            <p className="mt-2 text-[13.5px] font-black text-[var(--text-main)]">{all.length ? 'No actions match these filters' : 'No action plans yet'}</p>
+            <p className="mt-2 text-[13.5px] font-black text-[var(--text-main)]">
+              {all.length ? 'No actions match these filters' : isOwner ? 'No action plans for your department' : 'No action plans yet'}
+            </p>
             <p className="text-[12px] text-[var(--text-muted)]">
-              {all.length ? 'Clear a filter to see more.' : 'They are created automatically when a feedback cycle completes.'}
+              {all.length ? 'Clear a filter to see more.'
+                : isOwner ? 'Your department was not rated in a completed cycle, so it owns no improvement actions yet. The plans your feedback led to are listed below.'
+                  : 'They are created automatically when a feedback cycle completes.'}
             </p>
           </div>
         )
+      )}
+
+      {/* The plans an HOD's own feedback led to (their department rated these departments) — view only. */}
+      {isOwner && !!(data?.from_our_feedback || []).length && (
+        <div className="space-y-2.5">
+          <div>
+            <h3 className="text-[14px] font-black text-[var(--text-main)]">From your department's feedback</h3>
+            <p className="text-[11.5px] text-[var(--text-muted)]">
+              Improvement plans of the departments your department rated — view only. The rated department's HOD owns and updates them; scores stay with the MD.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+            {data.from_our_feedback.map((a) => <ActionCard key={a.id} a={a} />)}
+          </div>
+        </div>
       )}
 
       {editing && (
@@ -258,6 +286,10 @@ const IdfActions = () => {
               <button type="button" onClick={() => setEditing(null)} aria-label="Close" className="p-1 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]"><X size={17} /></button>
             </div>
             <div className="px-5 py-4 space-y-4 overflow-y-auto">
+              {/* Red repair / Amber interface / company-wide repair: book its meeting, or see it. */}
+              {(editing.band === 'Red' || editing.band === 'Amber') && (
+                <ActionMeetingPanel key={editing.id} actionId={editing.id} companyId={cid} />
+              )}
               {!!(editing.steps || []).length && (
                 <div className="space-y-1.5">
                   <span className={LABEL}>Improvement process{editing.stage ? ` · ${editing.category || editing.band} · ${editing.stage}` : ''}</span>

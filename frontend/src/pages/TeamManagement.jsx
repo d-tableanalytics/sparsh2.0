@@ -287,9 +287,9 @@ const TeamManagement = () => {
                                      <div className="space-y-1.5">
                                          {/* Saved as before (TPMS reads it to tell HODs/MDs apart); picking one also
                                              fills the Designation field above. */}
-                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Designation</label>
-                                         <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.department} onChange={e => setMemberForm({...memberForm, department: e.target.value, designation: e.target.value || memberForm.designation})}>
-                                             <option value="">Select Designation</option>
+                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Governance Role</label>
+                                         <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.department} onChange={e => setMemberForm({...memberForm, department: e.target.value, designation: memberForm.designation || e.target.value})}>
+                                             <option value="">Select Governance Role</option>
                                              <option value="HOD">HOD</option>
                                              <option value="Manager">Manager</option>
                                              <option value="Implementor">Implementor</option>

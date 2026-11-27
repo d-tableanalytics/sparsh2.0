@@ -99,6 +99,13 @@ def _gov(u: dict) -> str:
     return (u.get("governance_role") or "").strip().upper()
 
 
+def is_hr(u: dict) -> bool:
+    """HR: the governance role HR — or, with no governance role set, the designation type HR
+    picked in Team (stored in `department`), the same way an HOD is recognised."""
+    gov = _gov(u)
+    return gov == "HR" or (not gov and str(u.get("department") or "").strip().upper() == "HR")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -133,7 +140,7 @@ def _is_staff_admin(user: dict) -> bool:
 
 def _is_manager_in_company(user: dict) -> bool:
     """HR / Admin of the company (and the MD, who may do everything)."""
-    return _gov(user) in {"HR", "MD"} or (user.get("role") or "").lower() == "clientadmin"
+    return _gov(user) == "MD" or is_hr(user) or (user.get("role") or "").lower() == "clientadmin"
 
 
 async def _company_for(user: dict, company_id: Optional[str]) -> str:
@@ -251,6 +258,8 @@ async def settings(company_id: str) -> dict:
         "comment_required_for": doc.get("comment_required_for") or list(DEFAULT_COMMENT_REQUIRED),
         # The 1–5 scale's labels (configurable); the score stays (average ÷ 5) × 100.
         "rating_labels": doc.get("rating_labels") or [RATING_LABELS[i] for i in range(1, 6)],
+        # Setup ▸ Results meeting (time, length, days after results, type, link, venue).
+        "meeting": _process().meeting_settings(doc),
     }
 
 
@@ -272,6 +281,7 @@ async def get_setup(user: dict, company_id: Optional[str]) -> dict:
         "reminder_days_before": st["reminder_days_before"],
         "comment_required_for": st["comment_required_for"],
         "rating_labels": st["rating_labels"],
+        "meeting": st["meeting"],
         "has_cycles": bool(await get_collection(COLL_CYCLES).find_one(
             {"company_id": cid, "status": CYCLE_COMPLETED}, {"_id": 1})),
         "md_count": len(mds), "md_names": [_name(u) for u in mds],
@@ -306,6 +316,7 @@ async def save_setup(user: dict, company_id: Optional[str], payload: dict) -> di
     await get_collection(COLL_SETTINGS).update_one(
         {"company_id": cid},
         {"$set": {"company_id": cid, "parameters": params, "rating_labels": labels,
+                  "meeting": _process().clean_meeting_settings(payload.get("meeting") or (await settings(cid))["meeting"]),
                   "deadline_days": deadline_days, "reminder_days_before": before,
                   "comment_required_for": req, "updated_at": now, "updated_by": str(user.get("_id") or "")},
          "$setOnInsert": {"created_at": now}}, upsert=True)
@@ -697,6 +708,9 @@ async def delete_cycle(user: dict, company_id: Optional[str], cycle_id: str, con
         if cyc.get("results_meeting_event_id") and cyc.get("results_meeting_coll"):
             await get_collection(cyc["results_meeting_coll"]).delete_one({"_id": _oid(cyc["results_meeting_event_id"])})
     ids = f["cycle_ids"]
+    from app.services.idf_meetings import delete_meeting_of
+    for a in await get_collection(COLL_ACTIONS).find({"cycle_id": {"$in": ids}}).to_list(2000):
+        await delete_meeting_of(a)                       # the action plans' meetings go too
     for coll in (COLL_SUBMISSIONS, COLL_LINKS, COLL_ACTIONS, COLL_RESPONSES):
         await get_collection(coll).delete_many({"cycle_id": {"$in": ids}})
     # A deleted pulse re-score no longer stands as the re-score of an older cycle's actions.

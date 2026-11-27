@@ -430,8 +430,8 @@ const CompanyManagement = () => {
                       {/* Formerly "Department": saved as before (TPMS reads it to tell HODs/MDs
                           apart); picking one also fills Designation. A new company has no master
                           departments yet — set the admin's department later, once they exist. */}
-                      <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Designation</label>
-                      <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)]" value={formData.admin.department} onChange={(e) => setFormData({...formData, admin: {...formData.admin, department: e.target.value, designation: e.target.value || formData.admin.designation}})}>
+                      <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Governance Role</label>
+                      <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)]" value={formData.admin.department} onChange={(e) => setFormData({...formData, admin: {...formData.admin, department: e.target.value, designation: formData.admin.designation || e.target.value}})}>
                         <option value="HOD">HOD</option>
                         <option value="Implementor">Implementor</option>
                         <option value="EA">EA</option>

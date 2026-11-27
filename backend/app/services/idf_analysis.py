@@ -364,7 +364,29 @@ async def list_actions(user: dict, company_id: Optional[str], filters: dict) -> 
         from app.services.idf_service import company_people, _name
         people = sorted(({"id": str(u["_id"]), "name": _name(u)} for u in await company_people(q["company_id"])),
                         key=lambda p: (p["name"] or "").lower())
-    return {"actions": out, "summary": summary, "role": role, "people": people}
+    # An HOD also sees — read-only, without scores — the plans for the departments their own
+    # department RATED, so a rater (e.g. Sales rating IT) can follow what its feedback led to.
+    from_us = []
+    if role == "owner":
+        from app.services.idf_service import user_company_id, _my_dept_ids
+        cid = await user_company_id(user)
+        mine = await _my_dept_ids(user, cid) if cid else set()
+        if mine:
+            own_ids = {a["id"] for a in out}
+            rated: Dict[str, set] = {}
+            for c in await get_collection("idf_cycles").find({"company_id": cid}).to_list(500):
+                got = {p["receiver_dept_id"] for p in c.get("pairs") or [] if p["giver_dept_id"] in mine}
+                if got:
+                    rated[str(c["_id"])] = got
+            for a in await get_collection(COLL_ACTIONS).find(
+                    {"company_id": cid, "cycle_id": {"$in": list(rated)}}).sort([("period", -1), ("band", 1)]).to_list(2000):
+                if a.get("department_id") in rated.get(a["cycle_id"], set()) and str(a["_id"]) not in own_ids:
+                    o = _action_out(a)
+                    for k in ("current_score", "rescore_pct", "remarks"):       # scores stay with the MD
+                        o.pop(k, None)
+                    o["read_only"] = True
+                    from_us.append(o)
+    return {"actions": out, "summary": summary, "role": role, "people": people, "from_our_feedback": from_us}
 
 
 async def update_action(user: dict, company_id: Optional[str], action_id: str, payload: dict) -> dict:
@@ -426,6 +448,8 @@ async def delete_action(user: dict, company_id: Optional[str], action_id: str) -
     if not a:
         raise HTTPException(status_code=404, detail="Action not found.")
     cid = await assert_can_delete(user, a["company_id"])
+    from app.services.idf_meetings import delete_meeting_of
+    await delete_meeting_of(a)
     await get_collection(COLL_ACTIONS).delete_one({"_id": oid})
     await audit(cid, user, "action deleted", {"action_id": action_id, "department": a.get("department"),
                                               "type": a.get("type")})
@@ -458,7 +482,8 @@ async def alert_overdue_actions() -> int:
             sent += 1
         await get_collection(COLL_ACTIONS).update_one({"_id": a["_id"]},
                                                       {"$set": {"last_overdue_alert": today.isoformat()}})
-    return sent + await _alert_reviews_due(today)
+    from app.services.idf_meetings import alert_meetings_not_booked
+    return sent + await _alert_reviews_due(today) + await alert_meetings_not_booked(today)
 
 
 async def _alert_reviews_due(today: date) -> int:

@@ -25,11 +25,64 @@ IDF_TRIGGER_VARIABLES = {
     "idf_pulse_due": ["name", "cycle_month", "relationships"],
     "idf_action_overdue": ["name", "department", "action_type", "target_date", "status"],
     "idf_action_review_due": ["name", "department", "action_type", "review_cadence", "review_date"],
+    "idf_action_meeting_invite": ["name", "meeting_title", "department", "feedback_from", "action_type", "band",
+                                  "meeting_date", "meeting_time", "meeting_link", "venue", "target_date", "note"],
+    "idf_action_meeting_rescheduled": ["name", "meeting_title", "department", "meeting_date", "meeting_time",
+                                       "meeting_link", "venue", "note"],
+    "idf_action_meeting_declined": ["name", "person", "reason", "meeting_title", "meeting_date", "meeting_time"],
+    "idf_action_meeting_due": ["name", "department", "feedback_from", "action_type", "band", "target_date"],
+    "idf_meeting_invite": ["name", "cycle_month", "meeting_date", "meeting_time", "meeting_link", "venue"],
+    "idf_meeting_rescheduled": ["name", "cycle_month", "meeting_date", "meeting_time", "meeting_link", "venue", "note"],
+    "idf_meeting_declined": ["name", "person", "reason", "cycle_month", "meeting_date", "meeting_time"],
 }
 
 _SIGN = "<p>Regards,<br>Inter-Departmental Feedback</p>"
 
 IDF_DEFAULT_TEMPLATES = {
+    "idf_action_meeting_invite_email": {
+        "subject": "{{meeting_title}} — {{meeting_date}}",
+        "body": ("<p>Dear {{name}},</p><p>You are invited to <b>{{meeting_title}}</b>, part of the "
+                 "Inter-Departmental Feedback action plan for <b>{{department}}</b> ({{action_type}}, {{band}}).</p>"
+                 "<p><b>{{meeting_date}}, {{meeting_time}}</b><br>Link: {{meeting_link}}<br>Venue: {{venue}}</p>"
+                 "<p>{{note}}</p><p>Please reply Attending or Can't attend from the meeting in your calendar.</p>" + _SIGN),
+    },
+    "idf_action_meeting_rescheduled_email": {
+        "subject": "Rescheduled: {{meeting_title}} — {{meeting_date}}",
+        "body": ("<p>Dear {{name}},</p><p>{{note}}</p><p><b>{{meeting_title}}</b> is now on <b>{{meeting_date}}, "
+                 "{{meeting_time}}</b>.<br>Link: {{meeting_link}}<br>Venue: {{venue}}</p>"
+                 "<p>Please reply again from the meeting in your calendar.</p>" + _SIGN),
+    },
+    "idf_action_meeting_declined_email": {
+        "subject": "{{person}} can't attend {{meeting_title}}",
+        "body": ("<p>Dear {{name}},</p><p><b>{{person}}</b> can't attend <b>{{meeting_title}}</b> on {{meeting_date}}, "
+                 "{{meeting_time}}.</p><p>Reason: {{reason}}</p><p>You can move it from the action in "
+                 "<b>Inter-Department Feedback ▸ My Actions / Action Plans</b>.</p>" + _SIGN),
+    },
+    "idf_action_meeting_due_email": {
+        "subject": "Book the meeting: {{department}} action due {{target_date}}",
+        "body": ("<p>Dear {{name}},</p><p>The {{band}} action for <b>{{department}}</b> ({{action_type}}) is due on "
+                 "<b>{{target_date}}</b> and its meeting is not booked yet.</p><p>Open the action in "
+                 "<b>Inter-Department Feedback ▸ My Actions</b> and press <b>Schedule meeting</b>.</p>" + _SIGN),
+    },
+    "idf_meeting_invite_email": {
+        "subject": "Results meeting — Inter-Departmental Feedback {{cycle_month}}: {{meeting_date}}",
+        "body": ("<p>Dear {{name}},</p><p>The {{cycle_month}} Inter-Departmental Feedback results are in. You are "
+                 "invited to the results meeting of the MD and all HODs:</p>"
+                 "<p><b>{{meeting_date}}, {{meeting_time}}</b><br>Link: {{meeting_link}}<br>Venue: {{venue}}</p>"
+                 "<p>Please reply Attending or Can't attend from the meeting in your calendar.</p>" + _SIGN),
+    },
+    "idf_meeting_rescheduled_email": {
+        "subject": "Results meeting rescheduled — {{meeting_date}}, {{meeting_time}}",
+        "body": ("<p>Dear {{name}},</p><p>{{note}}</p><p>The {{cycle_month}} Inter-Departmental Feedback results "
+                 "meeting is now on <b>{{meeting_date}}, {{meeting_time}}</b>.<br>Link: {{meeting_link}}<br>"
+                 "Venue: {{venue}}</p><p>Please reply again from the meeting in your calendar.</p>" + _SIGN),
+    },
+    "idf_meeting_declined_email": {
+        "subject": "{{person}} can't attend the results meeting ({{meeting_date}})",
+        "body": ("<p>Dear {{name}},</p><p><b>{{person}}</b> can't attend the {{cycle_month}} results meeting on "
+                 "{{meeting_date}}, {{meeting_time}}.</p><p>Reason: {{reason}}</p><p>You can move the meeting "
+                 "in <b>Inter-Department Feedback ▸ Feedback Cycles ▸ Results meeting</b>.</p>" + _SIGN),
+    },
     "idf_cycle_started_email": {
         "subject": "Inter-Departmental Feedback: your feedback is requested ({{cycle_month}})",
         "body": ("<p>Dear {{name}},</p>"
